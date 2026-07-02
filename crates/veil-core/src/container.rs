@@ -72,7 +72,7 @@ use age::secrecy::SecretString;
 
 use crate::error::{Result, VeilError};
 use crate::format;
-use crate::index::{FsNode, Kind, deserialize_index, serialize_index};
+use crate::index::{FsNode, Kind, TreeNode, build_tree, deserialize_index, serialize_index};
 use crate::keys::{decrypt_bytes, decrypt_pri_key, encrypt_bytes, encrypt_pri_key};
 
 /// 一个在内存中已解密、可读写的容器句柄。
@@ -223,9 +223,72 @@ impl Container {
         Ok(plaintext)
     }
 
+    /// 把容器里所有文件解密导出到 `out_dir`，重建目录结构。
+    ///
+    /// 相当于 `add_file` 的逆操作（“解压”整个容器）。
+    /// 每个文件都会经过 `read_file` 的 blake3 往返校验，校验不过即报错。
+    ///
+    /// # 参数
+    /// - `out_dir`: 导出目标目录（不存在会自动创建）
+    ///
+    /// # 注意
+    /// 这会把**明文写到磁盘**（显式导出，非查看流程）。调用方自行确保目标位置安全。
+    pub fn extract_all(&self, out_dir: impl AsRef<Path>) -> Result<()> {
+        let out_dir = out_dir.as_ref();
+
+        for node in &self.nodes {
+            // 目标路径 = 导出目录 + 容器内的虚拟路径
+            let dest = out_dir.join(&node.path);
+
+            match node.kind {
+                // 目录：直接建出来（create_dir_all 会一路建齐父级）
+                Kind::Dir => {
+                    std::fs::create_dir_all(&dest)?;
+                }
+                // 文件：先确保父目录存在，再解密内容写入
+                Kind::File => {
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    // read_file 内部只解密该 blob，并做 blake3 校验
+                    let plaintext = self.read_file(&node.path)?;
+                    std::fs::write(&dest, plaintext)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 当前目录树（只读借用）
     pub fn nodes(&self) -> &[FsNode] {
         &self.nodes
+    }
+
+    /// 把目录树渲染成多行字符串（类似 `tree` 命令）。
+    ///
+    /// 存储始终是扁平的 `Vec<FsNode>`，这里用 [`build_tree`] 在**展示时**临时折叠成
+    /// 嵌套树再渲染，不改动存储。目录名后带 `/`，文件不带；空容器返回空字符串。
+    pub fn tree_view(&self) -> String {
+        let root = build_tree(&self.nodes);
+
+        // 递归渲染。prefix 是当前层的缩进前缀（含竖线）
+        fn render(node: &TreeNode, prefix: &str, out: &mut String) {
+            let count = node.children.len();
+            for (i, (name, child)) in node.children.iter().enumerate() {
+                let is_last = i == count - 1;
+                let branch = if is_last { "└── " } else { "├── " };
+                // file 为 None 即目录，名字后加 "/"
+                let slash = if child.file.is_none() { "/" } else { "" };
+                out.push_str(&format!("{prefix}{branch}{name}{slash}\n"));
+                // 下一层前缀：本项是最后一个就用空格，否则用竖线延续
+                let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+                render(child, &child_prefix, out);
+            }
+        }
+
+        let mut out = String::new();
+        render(&root, "", &mut out);
+        out
     }
 
     /// 把 Index + Footer 写到 blob 区之后（`blob_end` 处），并截断多余尾巴。

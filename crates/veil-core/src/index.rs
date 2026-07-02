@@ -12,6 +12,8 @@
 //! 用容器公钥整体加密成 Index，写进 `.veil`。P1 用扁平列表（每个节点带完整
 //! 路径），GUI 浏览时（P4）再按路径折叠成树。
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -59,6 +61,37 @@ pub fn serialize_index(entries: &[FsNode]) -> Result<Vec<u8>> {
 /// 反向：从字节还原出目录树。
 pub fn deserialize_index(bytes: &[u8]) -> Result<Vec<FsNode>> {
     Ok(postcard::from_bytes::<Vec<FsNode>>(bytes)?)
+}
+
+/// 展示/浏览用的**嵌套**目录树节点（与扁平存储的 [`FsNode`] 相对）。
+///
+/// 由 [`build_tree`] 从 `Vec<FsNode>` 折叠而来，**仅存在于内存、不序列化**。
+/// GUI 浏览（P4）遍历它来渲染目录树；若将来把「存储」也改成嵌套，那是另一个
+/// 需要 `Serialize` 的类型，别和这个展示树混用。
+#[derive(Debug, Default)]
+pub struct TreeNode {
+    /// 子节点：名字 -> 子树（BTreeMap 保证按名字有序输出）
+    pub children: BTreeMap<String, TreeNode>,
+    /// 若本节点是文件，带上它在扁平列表里的元数据；目录则为 None
+    pub file: Option<FsNode>,
+}
+
+/// 把扁平的 `Vec<FsNode>` 折叠成一棵嵌套的 [`TreeNode`]（存储不变，仅内存建树）。
+pub fn build_tree(nodes: &[FsNode]) -> TreeNode {
+    let mut root = TreeNode::default();
+    for node in nodes {
+        // 沿路径逐层下钻，缺失的中间目录顺手建出来
+        let mut cur = &mut root;
+        for part in node.path.split('/').filter(|s| !s.is_empty()) {
+            // entry(...).or_default()：没有这个子节点就新建一个空的
+            cur = cur.children.entry(part.to_owned()).or_default();
+        }
+        // 到达路径末端：若是文件，把元数据挂上（目录保持 file = None）
+        if node.kind == Kind::File {
+            cur.file = Some(node.clone());
+        }
+    }
+    root
 }
 
 

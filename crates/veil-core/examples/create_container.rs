@@ -5,9 +5,11 @@ fn main() -> veil_core::error::Result<()> {
     let path = "demo.veil";
     let pass = || SecretString::from("correct horse".to_owned());
 
-    // 创建 → 加两个文件
+    // 创建 → 加几个文件
     let mut container = Container::create(path, pass())?;
     container.add_file("hello.txt", b"Hello, Veil!")?;
+    container.add_file("photos/2024/a.jpg", b"fake jpg bytes")?;
+    container.add_file("photos/2024/b.jpg", b"another jpg")?;
     container.add_file("photos/note.md", b"# secret note\nline2")?;
     println!(
         "✅ 加了 {} 个文件，文件大小 {} 字节",
@@ -15,16 +17,23 @@ fn main() -> veil_core::error::Result<()> {
         std::fs::metadata(path)?.len()
     );
 
-    // 重新打开 → 列出 → 读回并校验
+    // 重新打开 → 树状展示目录结构
     let reopened = Container::open(path, pass())?;
-    println!("✅ 重新打开，目录：");
-    for node in reopened.nodes() {
-        println!("   - {} ({} 字节)", node.path, node.size);
-    }
+    println!("✅ 重新打开，目录结构：");
+    print!("{}", reopened.tree_view());
 
     let data = reopened.read_file("hello.txt")?;
     println!("✅ 读回 hello.txt = {:?}", String::from_utf8_lossy(&data));
     assert_eq!(data, b"Hello, Veil!");
+
+    // 导出整个容器到 out/ 目录
+    let out_dir = "out";
+    reopened.extract_all(out_dir)?;
+    println!("✅ 已导出到 {out_dir}/ ：");
+    for node in reopened.nodes() {
+        let p = std::path::Path::new(out_dir).join(&node.path);
+        println!("   - {}", p.display());
+    }
 
     Ok(())
 }
