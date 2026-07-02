@@ -1,0 +1,8 @@
+[package] # 包配置
+# 定义 crate 的元数据,如名称、版本、依赖等
+name = "veil-gui" # 包名
+edition.workspace = true # 从工作空间workspace继承edition
+version.workspace = true # 从工作空间workspace继承version
+
+[dependencies] # 依赖配置
+eframe = "0.35.0" # 依赖 eframe 库,版本为 0.35.0
