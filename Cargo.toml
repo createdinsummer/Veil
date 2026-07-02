@@ -1,0 +1,17 @@
+[workspace] # 工作空间配置 声明「这不是一个包,而是一组包的容器」
+resolver = "3" # 依赖版本解析器的算法版本
+# 成员名单
+members = ["crates/veil-core", "crates/veil-gui"]
+
+# 工作空间包配置
+# 用于定义工作空间包的默认配置，如edition、version等
+# 共享元数据。子 crate 写 edition.workspace = true 就来这里取,改一处全员生效,不用每个 crate 维护一遍。
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+# 发布构建配置
+[profile.release]
+opt-level = 3 # 优化等级 3 表示最高优化
+lto = "thin" # 开启 thin LTO 优化 跨 crate 内联,体积/速度更好,thin 是「省时版」。
+codegen-units = 1 # 把整个 crate 当一个编译单元,优化更彻底(代价:编译慢,但只在 release 时)。
