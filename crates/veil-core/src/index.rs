@@ -130,4 +130,31 @@ mod tests {
         let back = deserialize_index(&bytes).unwrap();
         assert_eq!(back, tree);
     }
+
+    // 构造一个只填必要字段的文件节点，测试用
+    fn file_node(path: &str) -> FsNode {
+        FsNode {
+            path: path.to_owned(),
+            kind: Kind::File,
+            size: 0,
+            blob_offset: 0,
+            blob_len: 0,
+            content_hash: [0u8; 32],
+            mime: None,
+            mtime: None,
+        }
+    }
+
+    #[test]
+    fn build_tree_folds_paths() {
+        let nodes = vec![file_node("a.txt"), file_node("d/b.txt")];
+        let tree = build_tree(&nodes);
+
+        // 顶层有文件 a.txt 和目录 d
+        assert!(tree.children["a.txt"].file.is_some()); // 文件
+        assert!(tree.children["d"].file.is_none()); // 中间目录（自动生成）
+
+        // d 下面有文件 b.txt
+        assert!(tree.children["d"].children["b.txt"].file.is_some());
+    }
 }

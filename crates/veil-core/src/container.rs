@@ -302,10 +302,11 @@ impl Container {
         let plaintext = self.read_file(virtual_path)?;
 
         // 确保父目录存在（dest 是裸文件名时 parent 为空，跳过）
-        if let Some(parent) = dest.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        // let-chains（edition 2024）：if let 和条件用 && 串在一起
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         std::fs::write(dest, plaintext)?;
         Ok(())
@@ -361,5 +362,133 @@ impl Container {
         let end = self.blob_end + index_cipher.len() as u64 + format::FOOTER_LEN;
         file.set_len(end)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 生成一个进程内唯一的临时路径（并行测试互不踩），测试结束自行清理。
+    fn temp_path(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("veil_test_{}_{n}_{tag}", std::process::id()))
+    }
+
+    fn pass() -> SecretString {
+        SecretString::from("correct horse".to_owned())
+    }
+
+    #[test]
+    fn create_open_empty() {
+        let path = temp_path("empty.veil");
+        Container::create(&path, pass()).unwrap();
+
+        let container = Container::open(&path, pass()).unwrap();
+        assert_eq!(container.nodes().len(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn add_read_roundtrip() {
+        let path = temp_path("rt.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("a.txt", b"hello").unwrap();
+        container.add_file("dir/b.bin", &[0u8, 1, 2, 255]).unwrap();
+
+        // 当前句柄能读回
+        assert_eq!(container.read_file("a.txt").unwrap(), b"hello");
+
+        // 重新打开后仍能读回，且条目数正确
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.nodes().len(), 2);
+        assert_eq!(reopened.read_file("dir/b.bin").unwrap(), vec![0u8, 1, 2, 255]);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn wrong_passphrase_fails() {
+        let path = temp_path("wp.veil");
+        Container::create(&path, pass()).unwrap();
+
+        let wrong = SecretString::from("nope".to_owned());
+        assert!(Container::open(&path, wrong).is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn remove_then_missing() {
+        let path = temp_path("rm.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("keep.txt", b"1").unwrap();
+        container.add_file("gone.txt", b"2").unwrap();
+        container.remove_file("gone.txt").unwrap();
+
+        // 删不存在的文件 → 报错
+        assert!(container.remove_file("nope.txt").is_err());
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.nodes().len(), 1);
+        assert_eq!(reopened.read_file("keep.txt").unwrap(), b"1");
+        assert!(reopened.read_file("gone.txt").is_err()); // 已删，读不到
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_missing_file_errors() {
+        let path = temp_path("miss.veil");
+        let container = Container::create(&path, pass()).unwrap();
+        assert!(container.read_file("nope.txt").is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_all_writes_files() {
+        let path = temp_path("ex.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("x.txt", b"X").unwrap();
+        container.add_file("sub/y.txt", b"Y").unwrap();
+
+        let out = temp_path("ex_out");
+        container.extract_all(&out).unwrap();
+        assert_eq!(std::fs::read(out.join("x.txt")).unwrap(), b"X");
+        assert_eq!(std::fs::read(out.join("sub/y.txt")).unwrap(), b"Y");
+
+        std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tamper_is_detected() {
+        let path = temp_path("tamper.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("secret.txt", b"top secret content").unwrap();
+
+        // 找到该文件 blob 的中间位置
+        let node = &container.nodes()[0];
+        let flip_at = node.blob_offset + node.blob_len / 2;
+
+        // 翻转 blob 里的一个字节（模拟 bit rot / 篡改）
+        {
+            let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(flip_at)).unwrap();
+            let mut byte = [0u8; 1];
+            file.read_exact(&mut byte).unwrap();
+            byte[0] ^= 0xFF;
+            file.seek(SeekFrom::Start(flip_at)).unwrap();
+            file.write_all(&byte).unwrap();
+        }
+
+        // header/index 未动，能打开；但读该文件必失败（age 认证 或 blake3 校验）
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert!(reopened.read_file("secret.txt").is_err());
+
+        std::fs::remove_file(&path).ok();
     }
 }
