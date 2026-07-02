@@ -193,6 +193,32 @@ impl Container {
         Ok(())
     }
 
+    /// 按虚拟路径删除一个文件。
+    ///
+    /// 只从目录树移除该节点并重写 Index/Footer；被删文件的 blob 字节仍留在文件里成为
+    /// **死空间**（仍是密文，不泄露内容），空间回收留到 P6 的 compaction。
+    ///
+    /// # 参数
+    /// - `virtual_path`: 要删除的文件在容器内的虚拟路径
+    ///
+    /// # 错误
+    /// 找不到该文件时返回 `VeilError::Format`。
+    pub fn remove_file(&mut self, virtual_path: &str) -> Result<()> {
+        let before = self.nodes.len();
+        // retain：只保留“不是目标文件”的节点，等于删掉目标
+        self.nodes
+            .retain(|n| !(n.path == virtual_path && n.kind == Kind::File));
+
+        // 数量没变说明没找到
+        if self.nodes.len() == before {
+            return Err(VeilError::Format(format!("找不到文件: {virtual_path}")));
+        }
+
+        // 重写 Index + Footer（blob 数据不动；被删 blob 成为死空间）
+        self.write_index_and_footer()?;
+        Ok(())
+    }
+
     /// 读出某个文件的明文，并做 blake3 往返校验。
     /// **只解密这一个文件的 blob，完全不碰其他数据。**
     ///
@@ -256,6 +282,32 @@ impl Container {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// 按虚拟路径解密**单个**文件，写到磁盘上的 `dest`。
+    ///
+    /// = `read_file`（解密到内存 + blake3 校验）+ 写文件；`extract_all` 的单文件版。
+    ///
+    /// # 参数
+    /// - `virtual_path`: 容器内要解密的文件路径
+    /// - `dest`:         输出文件路径（父目录不存在会自动创建）
+    ///
+    /// # 注意
+    /// 会把**明文写到磁盘**（显式导出，非查看流程）。
+    pub fn extract_file(&self, virtual_path: &str, dest: impl AsRef<Path>) -> Result<()> {
+        let dest = dest.as_ref();
+
+        // 解密内容（内部含 blake3 往返校验）
+        let plaintext = self.read_file(virtual_path)?;
+
+        // 确保父目录存在（dest 是裸文件名时 parent 为空，跳过）
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(dest, plaintext)?;
         Ok(())
     }
 
