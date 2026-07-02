@@ -3,22 +3,28 @@ use veil_core::container::Container;
 
 fn main() -> veil_core::error::Result<()> {
     let path = "demo.veil";
-    // SecretString 不能 clone，用个小闭包每次现造一个
     let pass = || SecretString::from("correct horse".to_owned());
 
-    // 创建
-    Container::create(path, pass())?;
-    let size = std::fs::metadata(path)?.len();
-    println!("✅ 创建容器 {path}，大小 {size} 字节");
+    // 创建 → 加两个文件
+    let mut container = Container::create(path, pass())?;
+    container.add_file("hello.txt", b"Hello, Veil!")?;
+    container.add_file("photos/note.md", b"# secret note\nline2")?;
+    println!(
+        "✅ 加了 {} 个文件，文件大小 {} 字节",
+        container.nodes().len(),
+        std::fs::metadata(path)?.len()
+    );
 
-    // 用正确密码重新打开
-    let container = Container::open(path, pass())?;
-    println!("✅ 重新打开成功，目录树条目数 = {}", container.nodes().len());
-
-    // 用错误密码打开 → 必须失败
-    match Container::open(path, SecretString::from("wrong".to_owned())) {
-        Ok(_) => println!("❌ 不该发生：错误密码竟然打开了！"),
-        Err(e) => println!("✅ 错误密码被正确拒绝：{e}"),
+    // 重新打开 → 列出 → 读回并校验
+    let reopened = Container::open(path, pass())?;
+    println!("✅ 重新打开，目录：");
+    for node in reopened.nodes() {
+        println!("   - {} ({} 字节)", node.path, node.size);
     }
+
+    let data = reopened.read_file("hello.txt")?;
+    println!("✅ 读回 hello.txt = {:?}", String::from_utf8_lossy(&data));
+    assert_eq!(data, b"Hello, Veil!");
+
     Ok(())
 }
