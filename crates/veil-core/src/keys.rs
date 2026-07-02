@@ -88,6 +88,76 @@ pub fn unlock_identity(locked_identity: &[u8], passphrase: SecretString) -> Resu
         .map_err(|e| VeilError::Format(format!("私钥解析失败: {e}")))
 }
 
+
+
+/// 用容器公钥（recipient）把一段明文加密成 age 密文字节。
+/// 每个文件的 blob、以及整棵目录树 Index，都用它加密。
+///
+/// # 参数
+/// - `recipient`: 容器公钥（由身份 `id.to_public()` 得来）
+/// - `plaintext`: 待加密的明文字节
+/// # 返回
+/// - `Ok(Vec<u8>)`: 完整的 age 密文
+pub fn encrypt_bytes(recipient: &age::x25519::Recipient, plaintext: &[u8]) -> Result<Vec<u8>> {
+    // with_recipients 要「一串实现了 age::Recipient 的东西」；我们只有一个收件人
+    // recipient as &dyn age::Recipient：把具体类型转成 trait object 引用
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))?;
+    // 准备一个内存缓冲区当输出目标（Vec<u8> 实现了 Write）
+    let mut out = Vec::new();
+    // &mut out：把 out 可变借给加密器，加密器只管写，所有权仍在 out
+    // 末尾的 ? ：若返回 io::Error，经 #[from] 自动变成 VeilError::Io 并提前返回
+    let mut writer = encryptor.wrap_output(&mut out)?;
+    // 把明文喂进加密流
+    writer.write_all(plaintext)?;
+    writer.finish()?; // 同样：必须调用，否则密文残缺
+    Ok(out)
+}
+
+/// 用容器身份（含私钥）把 age 密文解密回明文字节。
+///
+/// # 参数
+/// - `identity`:   容器身份（解锁后拿到的私钥）
+/// - `ciphertext`: 之前 `encrypt_bytes` 产出的密文
+/// # 返回
+/// - `Ok(Vec<u8>)`: 还原出的明文；密文被篡改/身份不对 → `Err`
+pub fn decrypt_bytes(identity: &age::x25519::Identity, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    // Decryptor::new 读取 age 头部。&[u8] 自身实现 Read，可直接当输入源
+    // ? ：密文头损坏等 → DecryptError → 经 #[from] 变 VeilError::Decrypt
+    let decryptor = age::Decryptor::new(ciphertext)?;
+
+    // &identity as &dyn age::Identity：把具体类型转成 trait object 引用（age 要 dyn）
+    // 返回可读的 StreamReader；密码错也在这一步报错
+    let mut reader = decryptor.decrypt(std::iter::once(identity as &dyn age::Identity))?;
+    // 读取解密出的明文（密文）
+    // ? ：解密失败 → DecryptError → 经 #[from] 变 VeilError::Decrypt
+    let mut out = Vec::new();
+    // 把解密出的明文读进 out
+    reader.read_to_end(&mut out)?; // 读全部字节（不是字符串，所以用 read_to_end）
+    Ok(out)
+}
+
+#[test]
+fn encrypt_decrypt_bytes_roundtrip() {
+    let id = age::x25519::Identity::generate();
+    // 用身份生成公钥，作为收件人
+    let recipient = id.to_public();
+
+    let plaintext = b"hello veil \xff\x00\x01"; // 含非文本字节，证明按二进制处理
+    // 加密
+    let ciphertext = encrypt_bytes(&recipient, plaintext).unwrap();
+    println!("明文 {} 字节 → 密文 {} 字节", plaintext.len(), ciphertext.len());
+
+    // 正确身份能原样解回
+    // 解密
+    let back = decrypt_bytes(&id, &ciphertext).unwrap();
+    assert_eq!(back, plaintext);
+
+    // 换一个身份（等于"没有正确私钥"）→ 必须失败
+    let other = age::x25519::Identity::generate();
+    assert!(decrypt_bytes(&other, &ciphertext).is_err());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
