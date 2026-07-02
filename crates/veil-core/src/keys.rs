@@ -20,11 +20,11 @@ use crate::error::{Result, VeilError};
 /// （即写进 Header 的那串字节）。
 ///
 /// # 参数
-/// - `key_pair`:   容器的非对称密钥（x25519，含私钥、可导出公钥）。用 `&` 只借用、
-///                 不夺走所有权，调用方之后还能继续用它（比如导出公钥去加密文件）。
+/// - `key_pair`: 容器的非对称密钥（x25519，含私钥、可导出公钥）。用 `&` 只借用、
+///   不夺走所有权，调用方之后还能继续用它（比如导出公钥去加密文件）。
 /// - `passphrase`: 用户输入的密码，用来加密 `key_pair` 的私钥。
-///                 用 `SecretString`（非 `String`）承载，避免被误打进日志；
-///                 这里按值传入，因为下面要把它移交给 age 的加密器。
+///   用 `SecretString`（非 `String`）承载，避免被误打进日志；
+///   这里按值传入，因为下面要把它移交给 age 的加密器。
 ///
 /// # 返回
 /// - `Ok(Vec<u8>)`:    密文私钥 `cip_pri_key`（可直接写进容器 Header）。
@@ -61,7 +61,7 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
 ///
 /// # 参数
 /// - `cip_pri_key`: 之前 `encrypt_pri_key` 产出的密文私钥字节。
-///                  用 `&[u8]` 切片只读借用，不关心调用方是 Vec 还是数组，通用且零拷贝。
+///   用 `&[u8]` 切片只读借用，不关心调用方是 Vec 还是数组，通用且零拷贝。
 /// - `passphrase`:  用户输入的密码，用于解密 `cip_pri_key`。
 ///
 /// # 返回

@@ -22,6 +22,7 @@ pub const FOOTER_LEN: u64 = 8 + 8 + 8;
 /// # 参数
 /// - `writer`:      输出目标（文件或内存缓冲）
 /// - `cip_pri_key`: 密文私钥（keys::encrypt_pri_key 的产物）
+///
 /// 结构：
 /// - 8 字节 magic：确认这是个 veil 容器
 /// - 2 字节 version：当前容器格式版本
