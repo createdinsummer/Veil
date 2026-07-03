@@ -93,12 +93,15 @@ impl Container {
     ///
     /// # 参数
     /// - `path`:       容器文件路径（如 "photos.veil"）
-    /// - `passphrase`: 用户密码，用来加密新生成的私钥
+    /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`）
     ///
     /// # 返回
     /// - `Ok(Container)`：已写入磁盘的空容器句柄
     /// - `Err(VeilError)`：加密或写文件失败
-    pub fn create(path: impl AsRef<Path>, passphrase: SecretString) -> Result<Container> {
+    pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
+        // 接受 impl Into<SecretString>：渲染层可直接传 String，无需依赖 age
+        let passphrase = passphrase.into();
+
         // 1) 生成一对全新的非对称密钥
         let key_pair = age::x25519::Identity::generate();
 
@@ -133,12 +136,13 @@ impl Container {
     ///
     /// # 参数
     /// - `path`:       容器文件路径
-    /// - `passphrase`: 用户密码（错误则解密失败）
+    /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`；错误则解密失败）
     ///
     /// # 返回
     /// - `Ok(Container)`：解密后可读写的容器句柄（含目录树）
     /// - `Err(VeilError)`：密码错误、文件损坏或格式不符
-    pub fn open(path: impl AsRef<Path>, passphrase: SecretString) -> Result<Container> {
+    pub fn open(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
+        let passphrase = passphrase.into(); // 渲染层可直接传 String，无需依赖 age
         let path = path.as_ref().to_path_buf();
         let mut file = File::open(&path)?;
 

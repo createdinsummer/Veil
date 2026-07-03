@@ -11,6 +11,21 @@ fn main() -> veil_core::error::Result<()> {
     container.add_file("photos/2024/a.jpg", b"fake jpg bytes")?;
     container.add_file("photos/2024/b.jpg", b"another jpg")?;
     container.add_file("photos/note.md", b"# secret note\nline2")?;
+
+    // 若系统里有小 PNG，加一张真图片，方便在 GUI 里测试「图片查看器」
+    let png_candidates = [
+        "/System/Library/CoreServices/PowerChime.app/Contents/Resources/charging.png",
+        "/System/Library/CoreServices/PowerChime.app/Contents/Resources/battery_icon.png",
+        "/System/Library/Screen Savers/Random.saver/Contents/Resources/thumbnail@2x.png",
+    ];
+    for p in png_candidates {
+        if let Ok(bytes) = std::fs::read(p) {
+            container.add_file("photos/sample.png", &bytes)?;
+            println!("✅ 加入真图片 photos/sample.png（{} 字节）", bytes.len());
+            break;
+        }
+    }
+
     println!(
         "✅ 加了 {} 个文件，文件大小 {} 字节",
         container.nodes().len(),
