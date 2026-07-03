@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use veil_core::container::Container;
-use veil_core::index::{TreeNode, build_tree};
+use veil_core::index::{Node, Tree, list_files};
 
 use crate::viewer::{ActiveView, ViewerRegistry};
 
@@ -245,7 +245,6 @@ impl UnlockedScreen {
         });
 
         // 左侧目录树（收集本帧点击的项，稍后统一应用）
-        let tree = build_tree(self.container.nodes());
         let mut clicked: Option<Selection> = None;
         egui::Panel::left("veil_tree")
             .resizable(true)
@@ -254,10 +253,11 @@ impl UnlockedScreen {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if tree.children.is_empty() {
+                        let root = self.container.root();
+                        if root.is_empty() {
                             ui.weak("(空容器)");
                         } else {
-                            show_tree(ui, &tree, "", &self.selected, &mut clicked);
+                            show_tree(ui, root, "", &self.selected, &mut clicked);
                         }
                     });
             });
@@ -358,7 +358,10 @@ impl UnlockedScreen {
         ui.heading(format!("📁 {prefix}"));
         ui.add_space(8.0);
         let pfx = format!("{prefix}/");
-        let count = self.container.nodes().iter().filter(|n| n.path.starts_with(&pfx)).count();
+        let count = list_files(self.container.root())
+            .iter()
+            .filter(|(p, _)| p.starts_with(&pfx))
+            .count();
         ui.label(format!("包含 {count} 个文件"));
         ui.add_space(12.0);
         if ui.button("📤 导出此目录…").clicked()
@@ -372,24 +375,24 @@ impl UnlockedScreen {
     }
 
     fn file_detail(&mut self, ui: &mut egui::Ui, path: &str) {
-        let Some(node) = self.container.nodes().iter().find(|n| n.path == path).cloned() else {
+        let Some(meta) = self.container.get_file(path).cloned() else {
             return;
         };
-        let file_name = node.path.rsplit('/').next().unwrap_or(&node.path).to_owned();
+        let file_name = path.rsplit('/').next().unwrap_or(path).to_owned();
 
         ui.add_space(8.0);
         ui.heading(&file_name);
         ui.add_space(8.0);
-        ui.label(format!("路径：{}", node.path));
-        ui.label(format!("大小：{} 字节", node.size));
-        ui.label(format!("类型：{}", node.mime.as_deref().unwrap_or("未知")));
+        ui.label(format!("路径：{path}"));
+        ui.label(format!("大小：{} 字节", meta.size));
+        ui.label(format!("类型：{}", meta.mime.as_deref().unwrap_or("未知")));
         ui.add_space(12.0);
 
         // 操作按钮
         ui.horizontal(|ui| {
-            if self.registry.find(&node).is_some() && ui.button("👁 应用内打开").clicked() {
+            if self.registry.find(&meta).is_some() && ui.button("👁 应用内打开").clicked() {
                 let ctx = ui.ctx().clone();
-                match self.registry.find(&node).unwrap().open(&self.container, &node, &ctx) {
+                match self.registry.find(&meta).unwrap().open(&self.container, path, &meta, &ctx) {
                     Ok(view) => {
                         self.current_view = Some((path.to_owned(), view));
                         self.status = None;
@@ -423,7 +426,7 @@ impl UnlockedScreen {
             ui.label("重命名/移动为：");
             ui.add(
                 egui::TextEdit::singleline(&mut self.rename_buf)
-                    .hint_text(&node.path)
+                    .hint_text(path)
                     .desired_width(240.0),
             );
             if ui.button("确认").clicked() && !self.rename_buf.is_empty() {
@@ -487,23 +490,23 @@ impl UnlockedScreen {
 /// 由调用方统一应用，方便在切换时清理临时状态）。
 fn show_tree(
     ui: &mut egui::Ui,
-    node: &TreeNode,
+    dir: &Tree,
     prefix: &str,
     current: &Option<Selection>,
     clicked: &mut Option<Selection>,
 ) {
-    for (name, child) in &node.children {
+    for (name, node) in dir {
         let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        match &child.file {
+        match node {
             // 文件
-            Some(fs_node) => {
-                let is_sel = matches!(current, Some(Selection::File(p)) if p == &fs_node.path);
+            Node::File(_) => {
+                let is_sel = matches!(current, Some(Selection::File(p)) if p == &full);
                 if ui.selectable_label(is_sel, format!("📄 {name}")).clicked() {
-                    *clicked = Some(Selection::File(fs_node.path.clone()));
+                    *clicked = Some(Selection::File(full.clone()));
                 }
             }
             // 目录：自定义折叠头（既能折叠，也能点选整个目录）
-            None => {
+            Node::Dir(children) => {
                 let is_sel = matches!(current, Some(Selection::Dir(p)) if p == &full);
                 let id = ui.make_persistent_id(&full);
                 let mut hit = false;
@@ -513,7 +516,7 @@ fn show_tree(
                             hit = true;
                         }
                     })
-                    .body(|ui| show_tree(ui, child, &full, current, clicked));
+                    .body(|ui| show_tree(ui, children, &full, current, clicked));
                 if hit {
                     *clicked = Some(Selection::Dir(full));
                 }

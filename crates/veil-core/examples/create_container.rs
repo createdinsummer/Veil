@@ -28,7 +28,7 @@ fn main() -> veil_core::error::Result<()> {
 
     println!(
         "✅ 加了 {} 个文件，文件大小 {} 字节",
-        container.nodes().len(),
+        veil_core::index::list_files(container.root()).len(),
         std::fs::metadata(path)?.len()
     );
 
@@ -39,8 +39,8 @@ fn main() -> veil_core::error::Result<()> {
 
     // 展示每个文件识别到的 MIME 类型
     println!("✅ 文件 MIME：");
-    for node in reopened.nodes() {
-        println!("   - {:<20} {}", node.path, node.mime.as_deref().unwrap_or("(未知)"));
+    for (path, meta) in veil_core::index::list_files(reopened.root()) {
+        println!("   - {:<20} {}", path, meta.mime.as_deref().unwrap_or("(未知)"));
     }
 
     // 删除一个文件 → 再看目录结构
@@ -60,8 +60,8 @@ fn main() -> veil_core::error::Result<()> {
     let out_dir = "out";
     reopened.extract_all(out_dir)?;
     println!("✅ 已导出到 {out_dir}/ ：");
-    for node in reopened.nodes() {
-        let p = std::path::Path::new(out_dir).join(&node.path);
+    for (path, _meta) in veil_core::index::list_files(reopened.root()) {
+        let p = std::path::Path::new(out_dir).join(&path);
         println!("   - {}", p.display());
     }
 

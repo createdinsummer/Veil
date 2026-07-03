@@ -1,16 +1,12 @@
-//! # index —— 目录树的数据模型与序列化
+//! # index —— 目录树的数据模型与序列化（**嵌套树**）
 //!
-//! 本模块定义容器里「有哪些文件、各在什么位置」的元数据（对应 spec §3 的 Index）：
+//! 容器的目录用嵌套树表示（对应 spec §3 的 Index）：
+//! - [`Node`]：一个节点，是文件（[`FileMeta`]）或目录（子节点 map）；
+//! - [`Tree`]：目录树的根 = 顶层「名字 → 节点」的 `BTreeMap`（按名字有序）；
+//! - **路径由节点在树中的位置隐含**，不再冗余存整条路径。
 //!
-//! - [`FsNode`]：目录树里的一个节点（文件或目录），记录虚拟路径、大小、
-//!   对应 blob 在容器内的偏移/长度、明文 blake3 哈希等；
-//! - [`Kind`]：节点类型（文件 / 目录）；
-//! - [`serialize_index`] / [`deserialize_index`]：整棵目录树 `Vec<FsNode>`
-//!   与紧凑二进制（postcard）之间的相互转换。
-//!
-//! 这层**只管数据结构与序列化，不碰加密**：序列化出的字节之后会被
-//! 用容器公钥整体加密成 Index，写进 `.veil`。P1 用扁平列表（每个节点带完整
-//! 路径），GUI 浏览时（P4）再按路径折叠成树。
+//! 提供路径导航（[`insert_file`]/[`remove_file`]/[`get_file`]/[`list_files`]）
+//! 与序列化（[`serialize_index`]/[`deserialize_index`]，postcard）。
 
 use std::collections::BTreeMap;
 
@@ -18,125 +14,151 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// 条目类型：是文件还是目录。
-///
-/// derive 说明：
-/// - `Serialize/Deserialize`：让 serde 能把它转成字节 / 从字节还原（postcard 靠这个）。
-/// - `Debug`：可用 `{:?}` 打印（调试用；这里没有秘密，安全）。
-/// - `Clone`：可复制。
-/// - `PartialEq`：可用 `==` 比较（写测试要用）。
+/// 一个文件的元数据（路径由它在树中的位置隐含，故这里不含 path）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Kind {
-    File,
-    Dir,
-}
-
-
-/// 文件系统节点：目录树里的一个条目，可能是文件也可能是目录（对应 spec §3 的 Entry）。
-/// 整棵树就是 `Vec<FsNode>`，序列化加密后即容器里的 Index。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FsNode {
-    /// 虚拟路径，如 "photos/2024/img1.jpg"（明文路径只存在于加密后的 Index 里）
-    pub path: String,
-    /// 文件还是目录
-    pub kind: Kind,
+pub struct FileMeta {
     /// 明文大小（字节）
     pub size: u64,
     /// 该文件的 age 密文块在容器内的起始偏移
     pub blob_offset: u64,
     /// 该 age 密文块的长度
     pub blob_len: u64,
-    /// 明文的 blake3 哈希，用于往返校验（P5 强制用）
+    /// 明文的 blake3 哈希，用于往返校验
     pub content_hash: [u8; 32],
-    /// MIME 类型，用来选查看器（image/jpeg 等）；可能没有，用 Option
+    /// MIME 类型（选查看器用）；可能没有
     pub mime: Option<String>,
     /// 修改时间（Unix 秒）；可能没有
     pub mtime: Option<i64>,
 }
-/// 把整棵目录树序列化成紧凑二进制（尚未加密）。
-pub fn serialize_index(entries: &[FsNode]) -> Result<Vec<u8>> {
-    Ok(postcard::to_stdvec(entries)?)
+
+/// 目录树节点：文件（带元数据）或目录（子节点：名字 → 节点）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Node {
+    File(FileMeta),
+    Dir(BTreeMap<String, Node>),
 }
 
-/// 反向：从字节还原出目录树。
-pub fn deserialize_index(bytes: &[u8]) -> Result<Vec<FsNode>> {
-    Ok(postcard::from_bytes::<Vec<FsNode>>(bytes)?)
+/// 目录树的根：顶层「名字 → 节点」。`BTreeMap` 保证按名字有序。
+pub type Tree = BTreeMap<String, Node>;
+
+/// 序列化整棵目录树（尚未加密）。
+pub fn serialize_index(root: &Tree) -> Result<Vec<u8>> {
+    Ok(postcard::to_stdvec(root)?)
 }
 
-/// 展示/浏览用的**嵌套**目录树节点（与扁平存储的 [`FsNode`] 相对）。
+/// 反序列化目录树。
+pub fn deserialize_index(bytes: &[u8]) -> Result<Tree> {
+    Ok(postcard::from_bytes::<Tree>(bytes)?)
+}
+
+/// 把虚拟路径拆成非空段（"a//b/" → ["a","b"]）。
+fn split_path(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+/// 插入 / 覆盖一个文件（沿途缺失的目录自动创建）。
 ///
-/// 由 [`build_tree`] 从 `Vec<FsNode>` 折叠而来，**仅存在于内存、不序列化**。
-/// GUI 浏览（P4）遍历它来渲染目录树；若将来把「存储」也改成嵌套，那是另一个
-/// 需要 `Serialize` 的类型，别和这个展示树混用。
-#[derive(Debug, Default)]
-pub struct TreeNode {
-    /// 子节点：名字 -> 子树（BTreeMap 保证按名字有序输出）
-    pub children: BTreeMap<String, TreeNode>,
-    /// 若本节点是文件，带上它在扁平列表里的元数据；目录则为 None
-    pub file: Option<FsNode>,
+/// 已存在同名文件则覆盖；中间段若撞上同名文件，会被强制变成目录（罕见冲突）。
+pub fn insert_file(root: &mut Tree, path: &str, meta: FileMeta) {
+    let parts = split_path(path);
+    let Some((last, dirs)) = parts.split_last() else {
+        return; // 空路径，忽略
+    };
+
+    let mut cur = root;
+    for part in dirs {
+        let entry = cur
+            .entry((*part).to_owned())
+            .or_insert_with(|| Node::Dir(BTreeMap::new()));
+        if !matches!(entry, Node::Dir(_)) {
+            *entry = Node::Dir(BTreeMap::new()); // 冲突：文件让位给目录
+        }
+        cur = match entry {
+            Node::Dir(children) => children,
+            Node::File(_) => unreachable!(),
+        };
+    }
+    cur.insert((*last).to_owned(), Node::File(meta)); // BTreeMap::insert 天然覆盖
 }
 
-/// 把扁平的 `Vec<FsNode>` 折叠成一棵嵌套的 [`TreeNode`]（存储不变，仅内存建树）。
-pub fn build_tree(nodes: &[FsNode]) -> TreeNode {
-    let mut root = TreeNode::default();
-    for node in nodes {
-        // 沿路径逐层下钻，缺失的中间目录顺手建出来
-        let mut cur = &mut root;
-        for part in node.path.split('/').filter(|s| !s.is_empty()) {
-            // entry(...).or_default()：没有这个子节点就新建一个空的
-            cur = cur.children.entry(part.to_owned()).or_default();
+/// 删除一个文件，返回它的元数据（顺带清理变空的父目录）。找不到 → `None`。
+pub fn remove_file(root: &mut Tree, path: &str) -> Option<FileMeta> {
+    remove_recursive(root, &split_path(path))
+}
+
+fn remove_recursive(dir: &mut Tree, parts: &[&str]) -> Option<FileMeta> {
+    let (first, rest) = parts.split_first()?;
+    if rest.is_empty() {
+        // 叶子：必须是文件才删
+        match dir.remove(*first) {
+            Some(Node::File(meta)) => Some(meta),
+            Some(other) => {
+                dir.insert((*first).to_owned(), other); // 是目录，放回去
+                None
+            }
+            None => None,
         }
-        // 到达路径末端：若是文件，把元数据挂上（目录保持 file = None）
-        if node.kind == Kind::File {
-            cur.file = Some(node.clone());
+    } else {
+        let removed = match dir.get_mut(*first) {
+            Some(Node::Dir(children)) => remove_recursive(children, rest),
+            _ => None,
+        };
+        // 子目录空了就删掉
+        if let Some(Node::Dir(children)) = dir.get(*first)
+            && children.is_empty()
+        {
+            dir.remove(*first);
+        }
+        removed
+    }
+}
+
+/// 按路径查一个文件的元数据（路径指向目录或不存在 → `None`）。
+pub fn get_file<'a>(root: &'a Tree, path: &str) -> Option<&'a FileMeta> {
+    let parts = split_path(path);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut cur = root;
+    for (i, part) in parts.iter().enumerate() {
+        let last = i == parts.len() - 1;
+        match cur.get(*part)? {
+            Node::File(meta) if last => return Some(meta),
+            Node::Dir(children) if !last => cur = children,
+            _ => return None,
         }
     }
-    root
+    None
 }
 
+/// 收集所有文件的 `(完整路径, 元数据)`，用于导出/校验遍历。
+pub fn list_files(root: &Tree) -> Vec<(String, FileMeta)> {
+    let mut out = Vec::new();
+    collect(root, "", &mut out);
+    out
+}
+
+fn collect(dir: &Tree, prefix: &str, out: &mut Vec<(String, FileMeta)>) {
+    for (name, node) in dir {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match node {
+            Node::File(meta) => out.push((path, meta.clone())),
+            Node::Dir(children) => collect(children, &path, out),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn index_serialize_roundtrip() {
-        let tree = vec![
-            FsNode {
-                path: "photos".to_owned(),
-                kind: Kind::Dir,
-                size: 0,
-                blob_offset: 0,
-                blob_len: 0,
-                content_hash: [0u8; 32],
-                mime: None,
-                mtime: None,
-            },
-            FsNode {
-                path: "photos/a.jpg".to_owned(),
-                kind: Kind::File,
-                size: 1234,
-                blob_offset: 64,
-                blob_len: 1300,
-                content_hash: [7u8; 32],
-                mime: Some("image/jpeg".to_owned()),
-                mtime: Some(1_700_000_000),
-            },
-        ];
-
-        let bytes = serialize_index(&tree).unwrap();
-        println!("目录树序列化后 = {} 字节（紧凑二进制）", bytes.len());
-
-        let back = deserialize_index(&bytes).unwrap();
-        assert_eq!(back, tree);
-    }
-
-    // 构造一个只填必要字段的文件节点，测试用
-    fn file_node(path: &str) -> FsNode {
-        FsNode {
-            path: path.to_owned(),
-            kind: Kind::File,
-            size: 0,
+    fn meta(size: u64) -> FileMeta {
+        FileMeta {
+            size,
             blob_offset: 0,
             blob_len: 0,
             content_hash: [0u8; 32],
@@ -146,15 +168,39 @@ mod tests {
     }
 
     #[test]
-    fn build_tree_folds_paths() {
-        let nodes = vec![file_node("a.txt"), file_node("d/b.txt")];
-        let tree = build_tree(&nodes);
+    fn insert_get_remove() {
+        let mut root = Tree::new();
+        insert_file(&mut root, "a.txt", meta(1));
+        insert_file(&mut root, "d/b.txt", meta(2));
+        insert_file(&mut root, "d/e/c.txt", meta(3));
 
-        // 顶层有文件 a.txt 和目录 d
-        assert!(tree.children["a.txt"].file.is_some()); // 文件
-        assert!(tree.children["d"].file.is_none()); // 中间目录（自动生成）
+        assert_eq!(get_file(&root, "a.txt").unwrap().size, 1);
+        assert_eq!(get_file(&root, "d/b.txt").unwrap().size, 2);
+        assert_eq!(get_file(&root, "d/e/c.txt").unwrap().size, 3);
+        assert!(get_file(&root, "nope").is_none());
+        assert!(get_file(&root, "d").is_none()); // d 是目录不是文件
 
-        // d 下面有文件 b.txt
-        assert!(tree.children["d"].children["b.txt"].file.is_some());
+        // 覆盖
+        insert_file(&mut root, "a.txt", meta(99));
+        assert_eq!(get_file(&root, "a.txt").unwrap().size, 99);
+
+        // 删除 + 空目录清理（删掉 d/e/c.txt 后 d/e 应被清理）
+        assert!(remove_file(&mut root, "d/e/c.txt").is_some());
+        assert!(get_file(&root, "d/e/c.txt").is_none());
+        let files: Vec<String> = list_files(&root).into_iter().map(|(p, _)| p).collect();
+        assert!(files.contains(&"a.txt".to_owned()));
+        assert!(files.contains(&"d/b.txt".to_owned()));
+        assert!(!files.iter().any(|p| p.contains("c.txt")));
+    }
+
+    #[test]
+    fn serialize_roundtrip() {
+        let mut root = Tree::new();
+        insert_file(&mut root, "photos/2024/a.jpg", meta(10));
+        insert_file(&mut root, "readme.md", meta(20));
+
+        let bytes = serialize_index(&root).unwrap();
+        let back = deserialize_index(&bytes).unwrap();
+        assert_eq!(back, root);
     }
 }
