@@ -113,6 +113,7 @@ mod tests {
     fn read_stays_within_slice() {
         // 底层 10 字节 [0,1,...,9]，取中间一段 [3, 3+4) = 字节 3..7
         let data: Vec<u8> = (0..10).collect();
+        // 使用Cursor::new(data)把一段内存字节包装成一个「可读、可写、可 seek 的假文件」
         let mut reader = SliceReader::new(Cursor::new(data), 3, 4).unwrap();
 
         let mut out = Vec::new();
@@ -123,12 +124,14 @@ mod tests {
     #[test]
     fn seek_within_slice() {
         let data: Vec<u8> = (0..10).collect();
+        // 使用Cursor::new(data)把一段内存字节包装成一个「可读、可写、可 seek 的假文件」
         let mut reader = SliceReader::new(Cursor::new(data), 3, 4).unwrap();
 
         // 段内坐标 2 → 底层第 5 字节
-        reader.seek(SeekFrom::Start(2)).unwrap();
-        let mut one = [0u8; 1];
-        reader.read_exact(&mut one).unwrap();
+        reader.seek(SeekFrom::Start(2)).unwrap();// 设置段内游标到 2
+        let mut one = [0u8; 1]; // 申请一个字节的缓冲区
+        // read_exact 会读取，直到填满 one，否则返回错误
+        reader.read_exact(&mut one).unwrap();// 读取一个字节，填满 one
         assert_eq!(one[0], 5);
 
         // 从末尾往前 1 → 段内位置 3 → 底层第 6 字节
