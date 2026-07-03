@@ -16,6 +16,9 @@ pub const FOOTER_MAGIC: &[u8; 8] = b"VEILEND\0";
 pub const VERSION: u16 = 1;
 /// Footer 定长：index_offset(8) + index_len(8) + footer_magic(8) = 24 字节
 pub const FOOTER_LEN: u64 = 8 + 8 + 8;
+/// Header 里 `cip_pri_key` 之前的定长部分：magic(8)+version(2)+flags(2)+cip_pri_key_len(4) = 16 字节。
+/// 即 `cip_pri_key` 从文件偏移 16 开始（改密码时原地覆盖用）。
+pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2 + 4;
 
 /// 写 Header，返回写入的字节数（= 后续第一个 blob 的起始偏移）。
 ///

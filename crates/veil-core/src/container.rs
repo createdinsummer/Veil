@@ -241,6 +241,89 @@ impl Container {
         Ok(())
     }
 
+    /// 修改容器密码。
+    ///
+    /// 只用新密码重新加密**私钥**（重写 Header 里那一小段 `cip_pri_key`），
+    /// 几百 GB 的 blob 一个字节都不动——这是「两级密钥」设计的红利。
+    ///
+    /// # 参数
+    /// - `new_passphrase`: 新密码（`impl Into<SecretString>`，可直接传 `String`）
+    /// # 返回
+    /// - `Ok(())`：Header 的密文私钥已用新密码重写
+    /// - `Err(VeilError)`：加密或写文件失败
+    pub fn change_password(&self, new_passphrase: impl Into<SecretString>) -> Result<()> {
+        // 用新密码重新加密私钥（scrypt 就在这，仅这一次小操作）
+        let new_cip_pri_key = encrypt_pri_key(&self.key_pair, new_passphrase.into())?;
+
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        // 确认新旧密文私钥等长（同长明文经 age 加密后长度稳定）；否则原地覆盖会破坏后续 blob
+        let old_cip_pri_key = format::read_header(&mut file)?;
+        if new_cip_pri_key.len() != old_cip_pri_key.len() {
+            return Err(VeilError::Format("密文私钥长度变化，无法原地改密码".into()));
+        }
+
+        // 定位到 Header 里 cip_pri_key 的起点（偏移 16），原地覆盖
+        file.seek(SeekFrom::Start(format::HEADER_FIXED_LEN))?;
+        file.write_all(&new_cip_pri_key)?;
+        Ok(())
+    }
+
+    /// 重命名 / 移动一个文件（改虚拟路径）。移动 = 目标路径带上新目录。
+    ///
+    /// 只改目录树里的路径（并按新扩展名重识别 MIME），重写 Index/Footer；blob 不动。
+    ///
+    /// # 参数
+    /// - `from`: 现有文件路径
+    /// - `to`:   目标路径（如 "archive/2024/a.jpg"）
+    /// # 返回
+    /// - `Ok(())`：已重命名并重写索引
+    /// - `Err(VeilError)`：找不到源文件，或目标路径已存在
+    pub fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
+        // 目标已存在 → 拒绝（避免撞名产生歧义）
+        if self.nodes.iter().any(|n| n.path == to) {
+            return Err(VeilError::Format(format!("目标路径已存在: {to}")));
+        }
+
+        let node = self
+            .nodes
+            .iter_mut()
+            .find(|n| n.path == from && n.kind == Kind::File)
+            .ok_or_else(|| VeilError::Format(format!("找不到文件: {from}")))?;
+        node.path = to.to_owned();
+        node.mime = crate::mime::guess_mime(to); // 扩展名可能变，重新识别
+
+        self.write_index_and_footer()?;
+        Ok(())
+    }
+
+    /// 递归添加磁盘目录 `src_dir` 下的所有文件到容器。
+    ///
+    /// 每个文件按其相对路径加入，前缀 `dest_prefix`。
+    /// 例：`add_dir("/data/photos", "photos")` → 文件进 "photos/2024/a.jpg" 等。
+    ///
+    /// # 参数
+    /// - `src_dir`:     磁盘上的源目录
+    /// - `dest_prefix`: 容器内的目标前缀（空串 = 放到根）
+    /// # 返回
+    /// - `Ok(())`：目录下所有文件已加入
+    /// - `Err(VeilError)`：读目录/文件或加密失败
+    ///
+    /// 注意：目前每个文件走一次 `add_file`（各重写一次 Index），文件很多时偏慢；
+    /// 且 `add_file` 整份读进内存，超大文件请等流式接口。
+    pub fn add_dir(&mut self, src_dir: impl AsRef<Path>, dest_prefix: &str) -> Result<()> {
+        let src_dir = src_dir.as_ref();
+
+        // 先递归收集所有文件（绝对路径, 容器内虚拟路径）
+        let mut files = Vec::new();
+        collect_files(src_dir, src_dir, dest_prefix, &mut files)?;
+
+        for (abs_path, virtual_path) in files {
+            let bytes = std::fs::read(&abs_path)?;
+            self.add_file(&virtual_path, &bytes)?;
+        }
+        Ok(())
+    }
+
     /// 在目录树里按路径查一个**文件**节点（找不到 / 是目录 → 报错）。
     fn find_file(&self, virtual_path: &str) -> Result<&FsNode> {
         self.nodes
@@ -472,6 +555,34 @@ impl Container {
     }
 }
 
+/// 递归收集 `dir` 下的所有文件，算出各自在容器里的虚拟路径（供 [`Container::add_dir`] 用）。
+///
+/// `base` 是遍历起点，用来算相对路径；`dest_prefix` 拼在相对路径前面。
+fn collect_files(
+    base: &Path,
+    dir: &Path,
+    dest_prefix: &str,
+    out: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files(base, &path, dest_prefix, out)?; // 递归下钻
+        } else if path.is_file() {
+            // 相对 base 的路径，统一用 "/" 连接（Windows 的 "\" 也换成 "/"）
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let virtual_path = if dest_prefix.is_empty() {
+                rel_str
+            } else {
+                format!("{}/{}", dest_prefix.trim_end_matches('/'), rel_str)
+            };
+            out.push((path, virtual_path));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +716,62 @@ mod tests {
         assert_eq!(jpg.mime.as_deref(), Some("image/jpeg"));
         assert_eq!(notes.mime, None);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn change_password_works() {
+        let path = temp_path("chpw.veil");
+        let mut container = Container::create(&path, "old-pass".to_string()).unwrap();
+        container.add_file("f.txt", b"data").unwrap();
+        container.change_password("new-pass".to_string()).unwrap();
+
+        // 旧密码打不开，新密码可以，内容还在
+        assert!(Container::open(&path, "old-pass".to_string()).is_err());
+        let reopened = Container::open(&path, "new-pass".to_string()).unwrap();
+        assert_eq!(reopened.read_file("f.txt").unwrap(), b"data");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rename_file_works() {
+        let path = temp_path("rename.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("a.txt", b"hi").unwrap();
+        container.rename_file("a.txt", "sub/b.md").unwrap();
+
+        // 撞名要报错
+        container.add_file("keep.txt", b"x").unwrap();
+        assert!(container.rename_file("keep.txt", "sub/b.md").is_err());
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert!(reopened.read_file("a.txt").is_err()); // 旧路径没了
+        assert_eq!(reopened.read_file("sub/b.md").unwrap(), b"hi");
+        // MIME 跟着新扩展名更新
+        let node = reopened.nodes().iter().find(|n| n.path == "sub/b.md").unwrap();
+        assert_eq!(node.mime.as_deref(), Some("text/markdown"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn add_dir_recursive() {
+        // 造一个磁盘目录树
+        let src = temp_path("srcdir");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("top.txt"), b"top").unwrap();
+        std::fs::write(src.join("nested/deep.bin"), b"deep").unwrap();
+
+        let path = temp_path("adddir.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_dir(&src, "imported").unwrap();
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.read_file("imported/top.txt").unwrap(), b"top");
+        assert_eq!(reopened.read_file("imported/nested/deep.bin").unwrap(), b"deep");
+
+        std::fs::remove_dir_all(&src).ok();
         std::fs::remove_file(&path).ok();
     }
 
