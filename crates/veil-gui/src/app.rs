@@ -1,8 +1,8 @@
 //! # app —— Veil 桌面应用的状态机与界面
 //!
 //! 两个界面（[`Screen`]）：
-//! - **未解锁**（[`LockScreen`]）：选 `.veil` 文件 + 输密码 → `Container::open`；
-//! - **已解锁**（[`UnlockedScreen`]）：展示目录树（P4 后续接入查看器分发）。
+//! - **未解锁**（[`LockScreen`]）：新建 / 打开容器；
+//! - **已解锁**（[`UnlockedScreen`]）：目录树浏览 + 各种操作（增删/改名/导出/改密码/查看）。
 //!
 //! 渲染层只做「显示 + 收集输入」，所有数据/逻辑都在 `veil-core`。
 
@@ -26,30 +26,26 @@ impl Default for VeilApp {
     }
 }
 
-/// 两个界面之一。
 enum Screen {
     Locked(LockScreen),
-    Unlocked(UnlockedScreen),
+    // Box：UnlockedScreen 比 LockScreen 大得多，装箱避免 enum 整体变大
+    Unlocked(Box<UnlockedScreen>),
 }
 
-/// 界面切换意图：在 `match` 借用结束后再统一应用，避免"边借用 self.screen 边改它"。
 enum Transition {
-    ToUnlocked(UnlockedScreen),
+    ToUnlocked(Box<UnlockedScreen>),
     ToLocked,
 }
 
 impl eframe::App for VeilApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // 用深色铺满整个窗口背景
         ui.painter()
             .rect_filled(ui.max_rect(), egui::CornerRadius::same(0), ui.visuals().panel_fill);
 
-        // 先渲染当前界面，收集"是否要切换"
         let transition = match &mut self.screen {
-            Screen::Locked(lock) => lock.ui(ui).map(Transition::ToUnlocked),
+            Screen::Locked(lock) => lock.ui(ui).map(|u| Transition::ToUnlocked(Box::new(u))),
             Screen::Unlocked(unlocked) => unlocked.ui(ui).then_some(Transition::ToLocked),
         };
-        // 借用结束后再切换界面
         match transition {
             Some(Transition::ToUnlocked(u)) => self.screen = Screen::Unlocked(u),
             Some(Transition::ToLocked) => self.screen = Screen::Locked(LockScreen::default()),
@@ -58,36 +54,34 @@ impl eframe::App for VeilApp {
     }
 }
 
-/// 解锁页状态。
+// ───────────────────────── 解锁页 ─────────────────────────
+
 #[derive(Default)]
 struct LockScreen {
-    veil_path: Option<PathBuf>, // 已选中的 .veil 文件
-    password: String,           // 密码输入框内容
-    error: Option<String>,      // 上次解锁的错误提示
+    veil_path: Option<PathBuf>,
+    password: String,
+    error: Option<String>,
 }
 
 impl LockScreen {
-    /// 渲染解锁页（居中卡片）。成功解锁则返回 `Some(UnlockedScreen)`。
     fn ui(&mut self, ui: &mut egui::Ui) -> Option<UnlockedScreen> {
         let mut result = None;
 
         ui.vertical_centered(|ui| {
-            ui.add_space(70.0);
-
-            // 一张居中的卡片
+            ui.add_space(60.0);
             egui::Frame::group(ui.style())
                 .fill(ui.visuals().extreme_bg_color)
                 .corner_radius(egui::CornerRadius::same(12))
                 .inner_margin(egui::Margin::same(28))
                 .show(ui, |ui| {
-                    ui.set_width(280.0);
+                    ui.set_width(300.0);
                     ui.vertical_centered(|ui| {
                         ui.heading("🔒 Veil 保险箱");
                         ui.add_space(20.0);
 
-                        // 选文件
-                        let pick = egui::Button::new("选择 .veil 文件…")
-                            .min_size(egui::vec2(220.0, 30.0));
+                        // 打开已有容器
+                        let pick =
+                            egui::Button::new("📂 选择 .veil 文件…").min_size(egui::vec2(240.0, 30.0));
                         if ui.add(pick).clicked()
                             && let Some(path) = rfd::FileDialog::new()
                                 .add_filter("Veil 容器", &["veil"])
@@ -96,8 +90,6 @@ impl LockScreen {
                             self.veil_path = Some(path);
                             self.error = None;
                         }
-
-                        // 已选文件名（只显示文件名，别把完整路径塞满）
                         let file_label = match &self.veil_path {
                             Some(p) => p
                                 .file_name()
@@ -108,7 +100,6 @@ impl LockScreen {
                         ui.small(file_label);
 
                         ui.add_space(16.0);
-                        // 密码框（掩码 + 占位提示 + 铺满卡片宽度）
                         ui.add(
                             egui::TextEdit::singleline(&mut self.password)
                                 .password(true)
@@ -118,9 +109,20 @@ impl LockScreen {
 
                         ui.add_space(16.0);
                         let can_unlock = self.veil_path.is_some() && !self.password.is_empty();
-                        let unlock = egui::Button::new("解锁").min_size(egui::vec2(220.0, 32.0));
-                        if ui.add_enabled(can_unlock, unlock).clicked() {
+                        if ui
+                            .add_enabled(can_unlock, egui::Button::new("解锁").min_size(egui::vec2(240.0, 32.0)))
+                            .clicked()
+                        {
                             result = self.try_unlock();
+                        }
+
+                        ui.add_space(6.0);
+                        // 新建容器
+                        if ui
+                            .add(egui::Button::new("🆕 新建保险箱…").min_size(egui::vec2(240.0, 28.0)))
+                            .clicked()
+                        {
+                            result = self.try_create();
                         }
 
                         if let Some(err) = &self.error {
@@ -137,20 +139,12 @@ impl LockScreen {
         result
     }
 
-    /// 尝试用当前路径+密码打开容器。
     fn try_unlock(&mut self) -> Option<UnlockedScreen> {
         let path = self.veil_path.clone()?;
-        // 直接传 String（core 接口收 impl Into<SecretString>）；解锁 scrypt 需 1~2 秒属正常
         match Container::open(&path, self.password.clone()) {
             Ok(container) => {
-                self.password.clear(); // 别把明文密码留在输入框里
-                Some(UnlockedScreen {
-                    container,
-                    registry: ViewerRegistry::with_defaults(),
-                    selected: None,
-                    current_view: None,
-                    status: None,
-                })
+                self.password.clear();
+                Some(UnlockedScreen::new(container))
             }
             Err(e) => {
                 self.error = Some(format!("解锁失败：{e}"));
@@ -158,35 +152,97 @@ impl LockScreen {
             }
         }
     }
+
+    fn try_create(&mut self) -> Option<UnlockedScreen> {
+        if self.password.is_empty() {
+            self.error = Some("请先输入密码".to_owned());
+            return None;
+        }
+        let path = rfd::FileDialog::new()
+            .add_filter("Veil 容器", &["veil"])
+            .set_file_name("vault.veil")
+            .save_file()?;
+        match Container::create(&path, self.password.clone()) {
+            Ok(container) => {
+                self.password.clear();
+                Some(UnlockedScreen::new(container))
+            }
+            Err(e) => {
+                self.error = Some(format!("创建失败：{e}"));
+                None
+            }
+        }
+    }
 }
 
-/// 已解锁页状态。
+// ───────────────────────── 已解锁页 ─────────────────────────
+
+/// 当前选中项：文件或目录。
+#[derive(Clone)]
+enum Selection {
+    File(String),
+    Dir(String),
+}
+
 struct UnlockedScreen {
     container: Container,
     registry: ViewerRegistry,
-    selected: Option<String>, // 当前选中文件的虚拟路径
-    /// 当前应用内视图：(所属文件路径, 视图)。切换文件/关闭时置 None → Drop 清理资源。
+    selected: Option<Selection>,
     current_view: Option<(String, Box<dyn ActiveView>)>,
-    status: Option<String>, // 操作结果提示（如导出成功/失败）
+    status: Option<String>,
+    rename_buf: String,
+    // 改密码对话框
+    pw_dialog: bool,
+    new_pw: String,
+    new_pw2: String,
 }
 
 impl UnlockedScreen {
-    /// 渲染已解锁页（顶部栏 + 左侧目录树 + 右侧详情）。用户点"锁定"则返回 `true`。
+    fn new(container: Container) -> Self {
+        Self {
+            container,
+            registry: ViewerRegistry::with_defaults(),
+            selected: None,
+            current_view: None,
+            status: None,
+            rename_buf: String::new(),
+            pw_dialog: false,
+            new_pw: String::new(),
+            new_pw2: String::new(),
+        }
+    }
+
+    /// 渲染已解锁页。用户点"锁定"则返回 `true`。
     fn ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
         let mut lock_requested = false;
 
-        // 选中项变了 → 关掉旧视图（RAII 清理临时明文 / 释放纹理）
-        if let Some((view_path, _)) = &self.current_view
-            && self.selected.as_deref() != Some(view_path.as_str())
-        {
-            self.current_view = None;
+        // 选中项已不是正在查看的文件 → 关掉视图（RAII 清理临时明文/纹理）
+        if let Some((view_path, _)) = &self.current_view {
+            let still = matches!(&self.selected, Some(Selection::File(p)) if p == view_path);
+            if !still {
+                self.current_view = None;
+            }
         }
 
-        // 顶部栏
+        // 顶部工具栏
         egui::Panel::top("veil_top").show(ui, |ui| {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.heading("📁 媒体库");
+                ui.separator();
+                if ui.button("➕ 添加文件").clicked() {
+                    self.add_files_action();
+                }
+                if ui.button("📂 添加文件夹").clicked() {
+                    self.add_folder_action();
+                }
+                if ui.button("📤 导出全部").clicked() {
+                    self.export_all_action();
+                }
+                if ui.button("🔑 修改密码").clicked() {
+                    self.pw_dialog = true;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🔒 锁定").clicked() {
                         lock_requested = true;
@@ -196,7 +252,7 @@ impl UnlockedScreen {
             ui.add_space(6.0);
         });
 
-        // 左侧：目录树（把扁平 nodes 折叠成树来展示）
+        // 左侧目录树
         let tree = build_tree(self.container.nodes());
         egui::Panel::left("veil_tree")
             .resizable(true)
@@ -208,26 +264,105 @@ impl UnlockedScreen {
                         if tree.children.is_empty() {
                             ui.weak("(空容器)");
                         } else {
-                            show_tree(ui, &tree, &mut self.selected);
+                            show_tree(ui, &tree, "", &mut self.selected);
                         }
                     });
             });
 
-        // 右侧：选中文件的详情 + 操作
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.detail_ui(ui);
-        });
+        // 右侧详情
+        egui::CentralPanel::default().show(ui, |ui| self.detail_ui(ui));
+
+        // 改密码对话框
+        self.password_dialog(&ctx);
 
         lock_requested
     }
 
-    /// 右侧详情面板：文件信息 + 「应用内打开 / 导出」+ 活动视图渲染。
-    fn detail_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(path) = self.selected.clone() else {
-            ui.centered_and_justified(|ui| ui.weak("← 在左侧选择一个文件"));
+    // ---- 工具栏动作 ----
+
+    fn add_files_action(&mut self) {
+        let Some(paths) = rfd::FileDialog::new().pick_files() else {
             return;
         };
-        // 从目录树里取该文件的元数据
+        // 若选中了目录，加到该目录下，否则放根
+        let prefix = match &self.selected {
+            Some(Selection::Dir(p)) => format!("{p}/"),
+            _ => String::new(),
+        };
+        let mut ok = 0;
+        for p in &paths {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if let Ok(bytes) = std::fs::read(p)
+                && self.container.add_file(&format!("{prefix}{name}"), &bytes).is_ok()
+            {
+                ok += 1;
+            }
+        }
+        self.status = Some(format!("已添加 {ok}/{} 个文件", paths.len()));
+    }
+
+    fn add_folder_action(&mut self) {
+        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let folder = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "imported".to_owned());
+        let prefix = match &self.selected {
+            Some(Selection::Dir(p)) => format!("{p}/{folder}"),
+            _ => folder,
+        };
+        self.status = match self.container.add_dir(&dir, &prefix) {
+            Ok(()) => Some(format!("已添加文件夹 → {prefix}/")),
+            Err(e) => Some(format!("添加文件夹失败：{e}")),
+        };
+    }
+
+    fn export_all_action(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            self.status = match self.container.extract_all(&dir) {
+                Ok(()) => Some(format!("已导出全部到 {}", dir.display())),
+                Err(e) => Some(format!("导出失败：{e}")),
+            };
+        }
+    }
+
+    // ---- 右侧详情 ----
+
+    fn detail_ui(&mut self, ui: &mut egui::Ui) {
+        match self.selected.clone() {
+            None => {
+                ui.centered_and_justified(|ui| ui.weak("← 选择左侧的文件或目录"));
+            }
+            Some(Selection::Dir(prefix)) => self.dir_detail(ui, &prefix),
+            Some(Selection::File(path)) => self.file_detail(ui, &path),
+        }
+        if let Some(s) = &self.status {
+            ui.add_space(8.0);
+            ui.small(s);
+        }
+    }
+
+    fn dir_detail(&mut self, ui: &mut egui::Ui, prefix: &str) {
+        ui.add_space(8.0);
+        ui.heading(format!("📁 {prefix}"));
+        ui.add_space(8.0);
+        let pfx = format!("{prefix}/");
+        let count = self.container.nodes().iter().filter(|n| n.path.starts_with(&pfx)).count();
+        ui.label(format!("包含 {count} 个文件"));
+        ui.add_space(12.0);
+        if ui.button("📤 导出此目录…").clicked()
+            && let Some(out) = rfd::FileDialog::new().pick_folder()
+        {
+            self.status = match self.container.extract_dir(prefix, &out) {
+                Ok(()) => Some(format!("已导出目录到 {}", out.display())),
+                Err(e) => Some(format!("导出失败：{e}")),
+            };
+        }
+    }
+
+    fn file_detail(&mut self, ui: &mut egui::Ui, path: &str) {
         let Some(node) = self.container.nodes().iter().find(|n| n.path == path).cloned() else {
             return;
         };
@@ -241,66 +376,131 @@ impl UnlockedScreen {
         ui.label(format!("类型：{}", node.mime.as_deref().unwrap_or("未知")));
         ui.add_space(12.0);
 
+        // 操作按钮
         ui.horizontal(|ui| {
-            // 有查看器命中 → 提供「应用内打开」
             if self.registry.find(&node).is_some() && ui.button("👁 应用内打开").clicked() {
                 let ctx = ui.ctx().clone();
-                match self
-                    .registry
-                    .find(&node)
-                    .unwrap()
-                    .open(&self.container, &node, &ctx)
-                {
+                match self.registry.find(&node).unwrap().open(&self.container, &node, &ctx) {
                     Ok(view) => {
-                        self.current_view = Some((path.clone(), view));
+                        self.current_view = Some((path.to_owned(), view));
                         self.status = None;
                     }
                     Err(e) => self.status = Some(format!("打开失败：{e}")),
                 }
             }
-
-            // 导出到本地（复用 core 的 extract_file）——始终可用
-            if ui.button("💾 导出到本地…").clicked()
+            if ui.button("💾 导出…").clicked()
                 && let Some(dest) = rfd::FileDialog::new().set_file_name(&file_name).save_file()
             {
-                self.status = match self.container.extract_file(&path, &dest) {
+                self.status = match self.container.extract_file(path, &dest) {
                     Ok(()) => Some(format!("已导出到 {}", dest.display())),
                     Err(e) => Some(format!("导出失败：{e}")),
                 };
             }
+            if ui.button("🗑 删除").clicked() {
+                self.status = match self.container.remove_file(path) {
+                    Ok(()) => {
+                        self.selected = None;
+                        self.current_view = None;
+                        Some("已删除".to_owned())
+                    }
+                    Err(e) => Some(format!("删除失败：{e}")),
+                };
+            }
         });
 
-        if let Some(s) = &self.status {
-            ui.add_space(8.0);
-            ui.small(s);
-        }
+        // 重命名 / 移动
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("重命名/移动为：");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.rename_buf)
+                    .hint_text(&node.path)
+                    .desired_width(240.0),
+            );
+            if ui.button("确认").clicked() && !self.rename_buf.is_empty() {
+                let to = self.rename_buf.clone();
+                self.status = match self.container.rename_file(path, &to) {
+                    Ok(()) => {
+                        self.selected = Some(Selection::File(to.clone()));
+                        self.rename_buf.clear();
+                        Some(format!("已重命名为 {to}"))
+                    }
+                    Err(e) => Some(format!("重命名失败：{e}")),
+                };
+            }
+        });
 
-        // 渲染当前活动视图（若属于当前选中文件）
+        // 活动视图（图片显示 / 播放器提示）
         if let Some((view_path, view)) = self.current_view.as_mut()
-            && *view_path == path
+            && view_path == path
         {
             ui.separator();
             view.ui(ui);
         }
     }
+
+    fn password_dialog(&mut self, ctx: &egui::Context) {
+        if !self.pw_dialog {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("修改密码")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.new_pw).password(true).hint_text("新密码"));
+                ui.add(egui::TextEdit::singleline(&mut self.new_pw2).password(true).hint_text("确认新密码"));
+                ui.add_space(6.0);
+                let matched = !self.new_pw.is_empty() && self.new_pw == self.new_pw2;
+                if !matched && !self.new_pw2.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(230, 90, 90), "两次输入不一致");
+                }
+                if ui.add_enabled(matched, egui::Button::new("确认修改")).clicked() {
+                    self.status = match self.container.change_password(self.new_pw.clone()) {
+                        Ok(()) => Some("密码已修改".to_owned()),
+                        Err(e) => Some(format!("改密码失败：{e}")),
+                    };
+                    self.new_pw.clear();
+                    self.new_pw2.clear();
+                    self.pw_dialog = false;
+                }
+            });
+        if !open {
+            self.pw_dialog = false;
+            self.new_pw.clear();
+            self.new_pw2.clear();
+        }
+    }
 }
 
-/// 递归渲染目录树：目录用可折叠标题，文件用可选中标签。
-fn show_tree(ui: &mut egui::Ui, node: &TreeNode, selected: &mut Option<String>) {
+/// 递归渲染目录树：目录用「可折叠 + 可选中」头，文件用可选中标签。
+fn show_tree(ui: &mut egui::Ui, node: &TreeNode, prefix: &str, selected: &mut Option<Selection>) {
     for (name, child) in &node.children {
+        let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         match &child.file {
-            // 文件：可选中
+            // 文件
             Some(fs_node) => {
-                let is_sel = selected.as_deref() == Some(fs_node.path.as_str());
+                let is_sel = matches!(selected.as_ref(), Some(Selection::File(p)) if p == &fs_node.path);
                 if ui.selectable_label(is_sel, format!("📄 {name}")).clicked() {
-                    *selected = Some(fs_node.path.clone());
+                    *selected = Some(Selection::File(fs_node.path.clone()));
                 }
             }
-            // 目录：可折叠
+            // 目录：自定义折叠头（既能折叠，也能点选整个目录）
             None => {
-                egui::CollapsingHeader::new(format!("📁 {name}"))
-                    .default_open(true)
-                    .show(ui, |ui| show_tree(ui, child, selected));
+                let is_sel = matches!(selected.as_ref(), Some(Selection::Dir(p)) if p == &full);
+                let id = ui.make_persistent_id(&full);
+                let mut clicked = false;
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                    .show_header(ui, |ui| {
+                        if ui.selectable_label(is_sel, format!("📁 {name}")).clicked() {
+                            clicked = true;
+                        }
+                    })
+                    .body(|ui| show_tree(ui, child, &full, selected));
+                if clicked {
+                    *selected = Some(Selection::Dir(full));
+                }
             }
         }
     }
@@ -310,13 +510,10 @@ fn show_tree(ui: &mut egui::Ui, node: &TreeNode, selected: &mut Option<String>) 
 pub fn setup_style(ctx: &egui::Context) {
     use egui::{FontFamily, FontId, TextStyle};
 
-    // 强制深色主题（不跟随系统亮/暗）
     ctx.set_theme(egui::ThemePreference::Dark);
-
-    // 0.35 的样式是主题感知的：用 all_styles_mut 一次改所有主题的字号/间距
     ctx.all_styles_mut(|style| {
         style.text_styles = [
-            (TextStyle::Heading, FontId::new(26.0, FontFamily::Proportional)),
+            (TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional)),
             (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
             (TextStyle::Button, FontId::new(15.0, FontFamily::Proportional)),
             (TextStyle::Monospace, FontId::new(14.0, FontFamily::Monospace)),
@@ -324,37 +521,30 @@ pub fn setup_style(ctx: &egui::Context) {
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(8.0, 10.0);
-        style.spacing.button_padding = egui::vec2(14.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
     });
 }
 
 /// 给 egui 装一个中文字体，否则中文显示为方块 □。
-///
-/// 依次尝试几个平台上常见的中文字体路径，用第一个能读到的。都没有就跳过
-/// （中文会显示为方块，但不会崩）。
 pub fn setup_cjk_font(ctx: &egui::Context) {
     const CANDIDATES: &[&str] = &[
-        // macOS（优先单体 .ttf，最稳）
         "/Library/Fonts/Arial Unicode.ttf",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
-        // Linux
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        // Windows
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
     ];
 
     let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) else {
-        return; // 没找到中文字体
+        return;
     };
 
     let mut fonts = egui::FontDefinitions::default();
     fonts
         .font_data
         .insert("cjk".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
-    // 放到比例字体族的最前（优先用它渲染），等宽字体也追加上
     fonts
         .families
         .entry(egui::FontFamily::Proportional)

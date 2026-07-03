@@ -502,6 +502,36 @@ impl Container {
         Ok(())
     }
 
+    /// 把某个虚拟目录（前缀）下的所有文件解密导出到 `out_dir`，保留相对结构。
+    ///
+    /// 例：`extract_dir("photos", "out")` → "photos/2024/a.jpg" 导出到 "out/2024/a.jpg"。
+    ///
+    /// # 参数
+    /// - `virtual_prefix`: 容器内的目录前缀（如 "photos" 或 "photos/2024"）
+    /// - `out_dir`:        导出目标目录（不存在会自动创建）
+    /// # 返回
+    /// - `Ok(())`：该目录下所有文件已导出
+    /// - `Err(VeilError)`：某文件校验失败或写盘失败
+    pub fn extract_dir(&self, virtual_prefix: &str, out_dir: impl AsRef<Path>) -> Result<()> {
+        let out_dir = out_dir.as_ref();
+        let prefix = format!("{}/", virtual_prefix.trim_end_matches('/'));
+
+        for node in &self.nodes {
+            if node.kind != Kind::File || !node.path.starts_with(&prefix) {
+                continue;
+            }
+            // 相对该目录的路径，保留子结构
+            let rel = node.path.strip_prefix(&prefix).unwrap_or(&node.path);
+            let dest = out_dir.join(rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let plaintext = self.read_file(&node.path)?;
+            std::fs::write(&dest, plaintext)?;
+        }
+        Ok(())
+    }
+
     /// 当前目录树（只读借用）
     pub fn nodes(&self) -> &[FsNode] {
         &self.nodes
@@ -752,6 +782,24 @@ mod tests {
         let node = reopened.nodes().iter().find(|n| n.path == "sub/b.md").unwrap();
         assert_eq!(node.mime.as_deref(), Some("text/markdown"));
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_dir_subtree() {
+        let path = temp_path("exdir.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("photos/2024/a.txt", b"A").unwrap();
+        container.add_file("photos/b.txt", b"B").unwrap();
+        container.add_file("docs/c.txt", b"C").unwrap(); // 不属于 photos
+
+        let out = temp_path("exdir_out");
+        container.extract_dir("photos", &out).unwrap();
+        assert_eq!(std::fs::read(out.join("2024/a.txt")).unwrap(), b"A");
+        assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"B");
+        assert!(!out.join("c.txt").exists()); // docs 下的没被导出
+
+        std::fs::remove_dir_all(&out).ok();
         std::fs::remove_file(&path).ok();
     }
 
