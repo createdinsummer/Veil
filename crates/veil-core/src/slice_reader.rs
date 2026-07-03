@@ -9,9 +9,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 /// 把底层 reader `R` 限定到 `[start, start+len)` 一段。
 pub struct SliceReader<R> {
-    inner: R,
-    start: u64,
-    len: u64,
+    inner: R, // 底层 reader（需可 Seek）
+    start: u64, // 段在底层的起始偏移
+    len: u64,   // 段长度
     pos: u64, // 段内当前位置：0 表示段起点，len 表示段末尾
 }
 
@@ -31,6 +31,14 @@ impl<R: Seek> SliceReader<R> {
 }
 
 impl<R: Read> Read for SliceReader<R> {
+    /// 从底层 reader 读，但只读到段内。
+    ///
+    /// # 参数
+    /// - `buf`: 存储读到的字节的缓冲区
+    /// # 返回
+    /// - `Ok(n)`：实际读到的字节数
+    /// - `Err(e)`：读取错误（如底层 reader 错误、段内已读完等）
+    ///
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // 段内还剩多少没读
         let remaining = self.len - self.pos;
@@ -50,6 +58,13 @@ impl<R: Seek> Seek for SliceReader<R> {
     /// 在「段内 0..len 坐标系」里定位，内部换算成底层的 start + 段内偏移。
     ///
     /// 三种定位方式都先算出目标的“段内绝对位置” new_pos，再统一处理。
+    ///
+    /// # 参数
+    /// - `style`: 定位方式（从段起点、段末尾、当前位置偏移）
+    /// # 返回
+    /// - `Ok(new_pos)`：按 Seek 契约，返回新的（段内）位置
+    /// - `Err(e)`：定位错误（如超出段范围、偏移量超出范围等）
+    ///
     fn seek(&mut self, style: SeekFrom) -> io::Result<u64> {
         // 1) 把三种 SeekFrom 都换算成「段内绝对位置」（可能为负 / 越界，用 i64 中转）
         let new_pos: i64 = match style {
