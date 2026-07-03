@@ -23,6 +23,10 @@ pub const FOOTER_LEN: u64 = 8 + 8 + 8;
 /// - `writer`:      输出目标（文件或内存缓冲）
 /// - `cip_pri_key`: 密文私钥（keys::encrypt_pri_key 的产物）
 ///
+/// # 返回
+/// - `Ok(u64)`：写入的字节数（= Header 长度，也是后续第一个 blob 的起始偏移）
+/// - `Err(VeilError)`：写入出错
+///
 /// 结构：
 /// - 8 字节 magic：确认这是个 veil 容器
 /// - 2 字节 version：当前容器格式版本

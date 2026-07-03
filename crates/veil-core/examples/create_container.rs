@@ -22,6 +22,12 @@ fn main() -> veil_core::error::Result<()> {
     println!("✅ 重新打开，目录结构：");
     print!("{}", reopened.tree_view());
 
+    // 展示每个文件识别到的 MIME 类型
+    println!("✅ 文件 MIME：");
+    for node in reopened.nodes() {
+        println!("   - {:<20} {}", node.path, node.mime.as_deref().unwrap_or("(未知)"));
+    }
+
     // 删除一个文件 → 再看目录结构
     reopened.remove_file("photos/2024/a.jpg")?;
     println!("✅ 删除 photos/2024/a.jpg 后：");

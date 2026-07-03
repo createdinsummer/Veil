@@ -94,6 +94,10 @@ impl Container {
     /// # 参数
     /// - `path`:       容器文件路径（如 "photos.veil"）
     /// - `passphrase`: 用户密码，用来加密新生成的私钥
+    ///
+    /// # 返回
+    /// - `Ok(Container)`：已写入磁盘的空容器句柄
+    /// - `Err(VeilError)`：加密或写文件失败
     pub fn create(path: impl AsRef<Path>, passphrase: SecretString) -> Result<Container> {
         // 1) 生成一对全新的非对称密钥
         let key_pair = age::x25519::Identity::generate();
@@ -130,6 +134,10 @@ impl Container {
     /// # 参数
     /// - `path`:       容器文件路径
     /// - `passphrase`: 用户密码（错误则解密失败）
+    ///
+    /// # 返回
+    /// - `Ok(Container)`：解密后可读写的容器句柄（含目录树）
+    /// - `Err(VeilError)`：密码错误、文件损坏或格式不符
     pub fn open(path: impl AsRef<Path>, passphrase: SecretString) -> Result<Container> {
         let path = path.as_ref().to_path_buf();
         let mut file = File::open(&path)?;
@@ -161,6 +169,10 @@ impl Container {
     /// # 参数
     /// - `virtual_path`: 容器内的虚拟路径，如 "photos/a.jpg"
     /// - `plaintext`:    文件明文内容
+    ///
+    /// # 返回
+    /// - `Ok(())`：文件已加密追加、Index/Footer 已更新
+    /// - `Err(VeilError)`：加密或写文件失败
     pub fn add_file(&mut self, virtual_path: &str, plaintext: &[u8]) -> Result<()> {
         // 明文的 blake3 哈希，存进节点，日后读出时比对（往返校验）
         let content_hash: [u8; 32] = blake3::hash(plaintext).into();
@@ -184,7 +196,8 @@ impl Container {
             blob_offset: self.blob_end,
             blob_len: blob_cipher.len() as u64,
             content_hash,
-            mime: None,
+            // 按扩展名猜 MIME，供查看器分发（未知为 None）
+            mime: crate::mime::guess_mime(virtual_path),
             mtime: None,
         });
         self.blob_end += blob_cipher.len() as u64; // blob 区变长了
@@ -201,6 +214,10 @@ impl Container {
     ///
     /// # 参数
     /// - `virtual_path`: 要删除的文件在容器内的虚拟路径
+    ///
+    /// # 返回
+    /// - `Ok(())`：已从目录树移除并重写 Index/Footer
+    /// - `Err(VeilError)`：找不到该文件，或写文件失败
     ///
     /// # 错误
     /// 找不到该文件时返回 `VeilError::Format`。
@@ -335,6 +352,10 @@ impl Container {
     /// # 参数
     /// - `out_dir`: 导出目标目录（不存在会自动创建）
     ///
+    /// # 返回
+    /// - `Ok(())`：所有文件已解密并重建目录结构写入 `out_dir`
+    /// - `Err(VeilError)`：某文件校验失败或写盘失败
+    ///
     /// # 注意
     /// 这会把**明文写到磁盘**（显式导出，非查看流程）。调用方自行确保目标位置安全。
     pub fn extract_all(&self, out_dir: impl AsRef<Path>) -> Result<()> {
@@ -370,6 +391,10 @@ impl Container {
     /// # 参数
     /// - `virtual_path`: 容器内要解密的文件路径
     /// - `dest`:         输出文件路径（父目录不存在会自动创建）
+    ///
+    /// # 返回
+    /// - `Ok(())`：文件已解密并写入 `dest`
+    /// - `Err(VeilError)`：找不到文件、校验失败或写盘失败
     ///
     /// # 注意
     /// 会把**明文写到磁盘**（显式导出，非查看流程）。
@@ -560,6 +585,22 @@ mod tests {
         } // tmp 在这里 Drop → 应自动删除临时文件
 
         assert!(!temp_file_path.exists(), "Drop 后临时明文应被删除");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn add_file_fills_mime() {
+        let path = temp_path("mime.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("a.jpg", b"x").unwrap();
+        container.add_file("notes", b"y").unwrap(); // 无扩展名
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        let jpg = reopened.find_file("a.jpg").unwrap();
+        let notes = reopened.find_file("notes").unwrap();
+        assert_eq!(jpg.mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(notes.mime, None);
+
         std::fs::remove_file(&path).ok();
     }
 

@@ -44,6 +44,10 @@ impl Drop for TempPlaintext {
 /// # 参数
 /// - `virtual_path`: 原文件的容器内路径（仅用来取扩展名，播放器靠它选解码器）
 /// - `reader`:       已解密的明文流（如 [`crate::container::Container`] 的 blob 解密流）
+///
+/// # 返回
+/// - `Ok(TempPlaintext)`：临时明文文件的 RAII 守卫（Drop 时自动删除文件）
+/// - `Err(io::Error)`：创建临时文件或写入失败
 pub fn decrypt_to_temp<R: Read>(virtual_path: &str, mut reader: R) -> io::Result<TempPlaintext> {
     // 生成唯一临时文件名：目录+文件名
     let path = preferred_temp_dir().join(unique_temp_name(virtual_path));
