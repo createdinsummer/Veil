@@ -311,6 +311,22 @@ impl Container {
         Ok(buf)
     }
 
+    /// 把某文件解密到一个受控临时位置（优先 RAM 盘），返回 RAII 守卫。
+    ///
+    /// 用于**视频 / 音频 V1**：解密后把 [`TempPlaintext::path`] 交系统播放器打开；
+    /// 守卫变量 Drop 时临时明文自动删除。流式解密，不整份进内存（大视频友好）。
+    ///
+    /// # 安全
+    /// 临时明文会短暂落在**容器外**的受控目录（优先 RAM）、权限 0600、守卫销毁即删。
+    /// SSD 上删除不保证物理擦除，UI 需如实告知（spec §6.2）。
+    pub fn extract_to_temp(&self, virtual_path: &str) -> Result<crate::temp::TempPlaintext> {
+        // 查找文件节点
+        let node = self.find_file(virtual_path)?;
+        // 打开流式解密读取器
+        let reader = self.open_blob_reader(node)?;
+        Ok(crate::temp::decrypt_to_temp(virtual_path, reader)?)
+    }
+
     /// 把容器里所有文件解密导出到 `out_dir`，重建目录结构。
     ///
     /// 相当于 `add_file` 的逆操作（“解压”整个容器）。
@@ -523,6 +539,27 @@ mod tests {
         assert_eq!(std::fs::read(out.join("sub/y.txt")).unwrap(), b"Y");
 
         std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn extract_to_temp_and_auto_cleanup() {
+        let path = temp_path("tmp.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("clip.mp4", b"fake video bytes").unwrap();
+
+        let temp_file_path;
+        {
+            let tmp = container.extract_to_temp("clip.mp4").unwrap();
+            temp_file_path = tmp.path().to_path_buf();
+
+            // 临时文件存在、内容正确、保留了扩展名
+            assert!(temp_file_path.exists());
+            assert_eq!(std::fs::read(&temp_file_path).unwrap(), b"fake video bytes");
+            assert_eq!(temp_file_path.extension().unwrap(), "mp4");
+        } // tmp 在这里 Drop → 应自动删除临时文件
+
+        assert!(!temp_file_path.exists(), "Drop 后临时明文应被删除");
         std::fs::remove_file(&path).ok();
     }
 

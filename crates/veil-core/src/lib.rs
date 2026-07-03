@@ -5,3 +5,4 @@ pub mod format;
 pub mod index;
 pub mod keys;
 pub mod slice_reader;
+pub mod temp;
