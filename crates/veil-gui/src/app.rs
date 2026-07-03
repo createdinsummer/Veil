@@ -178,7 +178,7 @@ impl LockScreen {
 // ───────────────────────── 已解锁页 ─────────────────────────
 
 /// 当前选中项：文件或目录。
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Selection {
     File(String),
     Dir(String),
@@ -217,14 +217,6 @@ impl UnlockedScreen {
         let ctx = ui.ctx().clone();
         let mut lock_requested = false;
 
-        // 选中项已不是正在查看的文件 → 关掉视图（RAII 清理临时明文/纹理）
-        if let Some((view_path, _)) = &self.current_view {
-            let still = matches!(&self.selected, Some(Selection::File(p)) if p == view_path);
-            if !still {
-                self.current_view = None;
-            }
-        }
-
         // 顶部工具栏
         egui::Panel::top("veil_top").show(ui, |ui| {
             ui.add_space(6.0);
@@ -252,8 +244,9 @@ impl UnlockedScreen {
             ui.add_space(6.0);
         });
 
-        // 左侧目录树
+        // 左侧目录树（收集本帧点击的项，稍后统一应用）
         let tree = build_tree(self.container.nodes());
+        let mut clicked: Option<Selection> = None;
         egui::Panel::left("veil_tree")
             .resizable(true)
             .default_size(300.0)
@@ -264,10 +257,26 @@ impl UnlockedScreen {
                         if tree.children.is_empty() {
                             ui.weak("(空容器)");
                         } else {
-                            show_tree(ui, &tree, "", &mut self.selected);
+                            show_tree(ui, &tree, "", &self.selected, &mut clicked);
                         }
                     });
             });
+
+        // 应用点击：**换了选中项就清掉上一项的临时 UI 状态**（操作提示、重命名输入）
+        if let Some(sel) = clicked {
+            if self.selected.as_ref() != Some(&sel) {
+                self.status = None;
+                self.rename_buf.clear();
+            }
+            self.selected = Some(sel);
+        }
+        // 选中项不再是正在查看的文件 → 关掉视图（RAII 清理临时明文/纹理）
+        if let Some((view_path, _)) = &self.current_view {
+            let still = matches!(&self.selected, Some(Selection::File(p)) if p == view_path);
+            if !still {
+                self.current_view = None;
+            }
+        }
 
         // 右侧详情
         egui::CentralPanel::default().show(ui, |ui| self.detail_ui(ui));
@@ -474,32 +483,39 @@ impl UnlockedScreen {
     }
 }
 
-/// 递归渲染目录树：目录用「可折叠 + 可选中」头，文件用可选中标签。
-fn show_tree(ui: &mut egui::Ui, node: &TreeNode, prefix: &str, selected: &mut Option<Selection>) {
+/// 递归渲染目录树：`current` 决定高亮，点击写入 `clicked`（不直接改选中项，
+/// 由调用方统一应用，方便在切换时清理临时状态）。
+fn show_tree(
+    ui: &mut egui::Ui,
+    node: &TreeNode,
+    prefix: &str,
+    current: &Option<Selection>,
+    clicked: &mut Option<Selection>,
+) {
     for (name, child) in &node.children {
         let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         match &child.file {
             // 文件
             Some(fs_node) => {
-                let is_sel = matches!(selected.as_ref(), Some(Selection::File(p)) if p == &fs_node.path);
+                let is_sel = matches!(current, Some(Selection::File(p)) if p == &fs_node.path);
                 if ui.selectable_label(is_sel, format!("📄 {name}")).clicked() {
-                    *selected = Some(Selection::File(fs_node.path.clone()));
+                    *clicked = Some(Selection::File(fs_node.path.clone()));
                 }
             }
             // 目录：自定义折叠头（既能折叠，也能点选整个目录）
             None => {
-                let is_sel = matches!(selected.as_ref(), Some(Selection::Dir(p)) if p == &full);
+                let is_sel = matches!(current, Some(Selection::Dir(p)) if p == &full);
                 let id = ui.make_persistent_id(&full);
-                let mut clicked = false;
+                let mut hit = false;
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
                     .show_header(ui, |ui| {
                         if ui.selectable_label(is_sel, format!("📁 {name}")).clicked() {
-                            clicked = true;
+                            hit = true;
                         }
                     })
-                    .body(|ui| show_tree(ui, child, &full, selected));
-                if clicked {
-                    *selected = Some(Selection::Dir(full));
+                    .body(|ui| show_tree(ui, child, &full, current, clicked));
+                if hit {
+                    *clicked = Some(Selection::Dir(full));
                 }
             }
         }

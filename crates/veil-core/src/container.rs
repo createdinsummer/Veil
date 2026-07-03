@@ -192,8 +192,8 @@ impl Container {
             file.write_all(&blob_cipher)?;
         }
 
-        // 记录这个文件的节点
-        self.nodes.push(FsNode {
+        // 这个文件的节点
+        let node = FsNode {
             path: virtual_path.to_owned(),
             kind: Kind::File,
             size: plaintext.len() as u64,
@@ -203,8 +203,14 @@ impl Container {
             // 按扩展名猜 MIME，供查看器分发（未知为 None）
             mime: crate::mime::guess_mime(virtual_path),
             mtime: None,
-        });
+        };
         self.blob_end += blob_cipher.len() as u64; // blob 区变长了
+
+        // 同名则**覆盖**（旧节点被替换，旧 blob 成死空间待 P6 回收）；否则追加
+        match self.nodes.iter_mut().find(|n| n.path == virtual_path) {
+            Some(existing) => *existing = node,
+            None => self.nodes.push(node),
+        }
 
         // 把更新后的 Index + Footer 重写到 blob 区之后
         self.write_index_and_footer()?;
@@ -781,6 +787,24 @@ mod tests {
         // MIME 跟着新扩展名更新
         let node = reopened.nodes().iter().find(|n| n.path == "sub/b.md").unwrap();
         assert_eq!(node.mime.as_deref(), Some("text/markdown"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn add_file_overwrites_same_path() {
+        let path = temp_path("overwrite.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("a.txt", b"first").unwrap();
+        container.add_file("a.txt", b"second-longer").unwrap(); // 同名覆盖
+
+        // 无重复节点，内容是最新的
+        assert_eq!(container.nodes().iter().filter(|n| n.path == "a.txt").count(), 1);
+        assert_eq!(container.read_file("a.txt").unwrap(), b"second-longer");
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.nodes().len(), 1);
+        assert_eq!(reopened.read_file("a.txt").unwrap(), b"second-longer");
 
         std::fs::remove_file(&path).ok();
     }
