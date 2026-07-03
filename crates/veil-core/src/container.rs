@@ -73,6 +73,7 @@ use age::secrecy::SecretString;
 use crate::error::{Result, VeilError};
 use crate::format;
 use crate::index::{FsNode, Kind, TreeNode, build_tree, deserialize_index, serialize_index};
+use crate::slice_reader::SliceReader;
 use crate::keys::{decrypt_bytes, decrypt_pri_key, encrypt_bytes, encrypt_pri_key};
 
 /// 一个在内存中已解密、可读写的容器句柄。
@@ -219,27 +220,59 @@ impl Container {
         Ok(())
     }
 
-    /// 读出某个文件的明文，并做 blake3 往返校验。
-    /// **只解密这一个文件的 blob，完全不碰其他数据。**
+    /// 在目录树里按路径查一个**文件**节点（找不到 / 是目录 → 报错）。
+    fn find_file(&self, virtual_path: &str) -> Result<&FsNode> {
+        self.nodes
+            .iter()
+            .find(|n| n.path == virtual_path && n.kind == Kind::File)
+            .ok_or_else(|| VeilError::Format(format!("找不到文件: {virtual_path}")))
+    }
+
+    /// 打开一个「只解密该 blob」的流式解密读取器（可 Seek）。
+    ///
+    /// 用 [`SliceReader`] 把容器大文件限定到该 blob 的 `[offset, offset+len)`，
+    /// 再交给 age 解密。因为 `SliceReader` 可 Seek，返回的 `StreamReader` 也可 Seek
+    /// —— 这就是随机访问（视频拖动）的基础。**完全不碰其他 blob。**
+    ///
+    /// # 参数
+    /// - `node`: 要解密的文件节点
+    ///
+    /// # 返回
+    /// - `Ok(reader)`：新建的 `StreamReader`流式解密读取器
+    fn open_blob_reader(
+        &self,
+        node: &FsNode,
+    ) -> Result<age::stream::StreamReader<SliceReader<File>>> {
+        // 打开容器文件
+        let file = File::open(&self.path)?;
+        // 只读该文件的 blob 的范围，获取文件句柄
+        let slice = SliceReader::new(file, node.blob_offset, node.blob_len)?;
+        // 读 age 密文的"头部"
+        let decryptor = age::Decryptor::new(slice)?;
+        // 获取解密流
+        let reader = decryptor.decrypt(std::iter::once(&self.key_pair as &dyn age::Identity))?;
+        // 流式解密读取器
+        Ok(reader)
+    }
+
+    /// 读出某个文件的完整明文，并做 blake3 往返校验。
+    /// **流式解密、只碰这一个文件的 blob。**
     ///
     /// # 参数
     /// - `virtual_path`: 要读取的文件在容器内的虚拟路径
+    /// # 返回
+    /// - `Ok(plaintext)`：读到的明文字节
+    /// - `Err(e)`：读取错误（如文件不存在、数据损坏等）
     pub fn read_file(&self, virtual_path: &str) -> Result<Vec<u8>> {
-        // 在内存目录树里查这个路径（只找文件，不找目录）
-        let node = self
-            .nodes
-            .iter()
-            .find(|n| n.path == virtual_path && n.kind == Kind::File)
-            .ok_or_else(|| VeilError::Format(format!("找不到文件: {virtual_path}")))?;
+        let node = self.find_file(virtual_path)?;
 
-        // 只读该 blob 的那一段字节（seek 到偏移，精确读 blob_len 个字节）
-        let mut file = File::open(&self.path)?;
-        file.seek(SeekFrom::Start(node.blob_offset))?;
-        let mut blob_cipher = vec![0u8; node.blob_len as usize];
-        file.read_exact(&mut blob_cipher)?;
-
-        // 解密
-        let plaintext = decrypt_bytes(&self.key_pair, &blob_cipher)?;
+        // 流式解密整段：不把密文整块预读进内存，而是边读边解
+        let mut reader = self.open_blob_reader(node)?;
+        let mut plaintext = Vec::new();
+        // 把 reader 里的字节全部读进 plaintext
+        // 不预读整块密文,reader 边从磁盘拉一小段密文、边解、边扔进 plaintext → 内存里只有明文在增长
+        // 内存保存整个明文，不保存密文
+        reader.read_to_end(&mut plaintext)?;
 
         // 往返校验：重算 blake3，应与存的一致；不一致说明数据损坏
         let hash: [u8; 32] = blake3::hash(&plaintext).into();
@@ -247,6 +280,35 @@ impl Container {
             return Err(VeilError::Format("内容哈希不匹配（数据损坏？）".into()));
         }
         Ok(plaintext)
+    }
+
+    /// 随机读取某文件解密后的 `[offset, offset+len)` 一段（不读整文件）。
+    ///
+    /// 用于大文件 / 视频拖动：`seek` 到解密流的指定位置，只读请求的这一小段。
+    /// 末尾不足 `len` 时返回实际读到的字节。
+    ///
+    /// 注意：只读一段时**无法做整文件 blake3 校验**（那需要全部明文）；不过 age 的
+    /// 分块认证仍保证所读片段未被篡改。
+    ///
+    /// # 参数
+    /// - `virtual_path`: 文件路径
+    /// - `offset`:       从解密后明文的第几个字节开始
+    /// - `len`:          最多读多少字节
+    /// # 返回
+    /// - `Ok(bufplaintext)`：读到的明文字节
+    /// - `Err(e)`：读取错误（如文件不存在、偏移量超出范围等）
+    ///
+    pub fn read_range(&self, virtual_path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let node = self.find_file(virtual_path)?;
+        // 获取流式解密读取器
+        let mut reader = self.open_blob_reader(node)?;
+        // 定位到指定偏移量，开始读取
+        reader.seek(SeekFrom::Start(offset))?; // 在解密流里定位设置读取起始位置
+        let mut buf = Vec::new();
+        // take(len)：最多读 len 字节（到末尾就早停）
+        reader.take(len as u64) // 设置读取最大字节数为 len
+            .read_to_end(&mut buf)?; // 全部读取到 buf 里
+        Ok(buf)
     }
 
     /// 把容器里所有文件解密导出到 `out_dir`，重建目录结构。
@@ -461,6 +523,23 @@ mod tests {
         assert_eq!(std::fs::read(out.join("sub/y.txt")).unwrap(), b"Y");
 
         std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_range_random_access() {
+        let path = temp_path("range.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("data.bin", b"0123456789ABCDEF").unwrap();
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        // 从第 4 字节起读 5 个 → "45678"
+        assert_eq!(reopened.read_range("data.bin", 4, 5).unwrap(), b"45678");
+        // 末尾不足：从第 14 字节起读 10 个 → 只剩 "EF"
+        assert_eq!(reopened.read_range("data.bin", 14, 10).unwrap(), b"EF");
+        // 整段仍可完整读回
+        assert_eq!(reopened.read_file("data.bin").unwrap(), b"0123456789ABCDEF");
+
         std::fs::remove_file(&path).ok();
     }
 
