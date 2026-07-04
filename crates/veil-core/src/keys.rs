@@ -13,8 +13,20 @@
 
 use age::secrecy::{ExposeSecret, SecretString};
 use std::io::{Read, Write};
+use zeroize::Zeroize;
 
 use crate::error::{Result, VeilError};
+
+/// 固定的 scrypt 工作因子 `N = 2^log_n`。
+///
+/// 不用 age 的自动校准（会按「创建时的机器/构建」定强度——debug 构建会校准出偏弱的
+/// log_n≈14）。固定一个足够强的值，保证任何环境创建的容器强度一致。
+///
+/// 测试时用很低的值，否则每次建/开容器都要跑一次昂贵 scrypt，测试会慢到几分钟。
+#[cfg(not(test))]
+const SCRYPT_WORK_FACTOR: u8 = 18;
+#[cfg(test)]
+const SCRYPT_WORK_FACTOR: u8 = 10;
 
 /// 用「用户密码 `passphrase`」把 `key_pair` 的私钥加密成密文私钥 `cip_pri_key`
 /// （即写进 Header 的那串字节）。
@@ -35,9 +47,11 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
     // 取私钥的字符串形式 "AGE-SECRET-KEY-..."；仍用 SecretString 包着，切勿打印
     let pri_key_str: SecretString = key_pair.to_string();
 
-    // 用密码构造加密器：with_user_passphrase 内部即用 scrypt 把密码派生成加密密钥
-    // passphrase 的所有权在此被 age 拿走（之后本函数不能再用它）
-    let encryptor = age::Encryptor::with_user_passphrase(passphrase);
+    // 用密码构造 scrypt 收件人，并**固定工作因子**（不用 with_user_passphrase 的自动校准）
+    let mut recipient = age::scrypt::Recipient::new(passphrase);
+    recipient.set_work_factor(SCRYPT_WORK_FACTOR);
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
 
     // 准备一个内存缓冲区当输出目标（Vec<u8> 实现了 Write）
     let mut out = Vec::new();
@@ -70,7 +84,9 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
 pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<age::x25519::Identity> {
     // 密码派生的解密方（age::scrypt::Identity）：与加密时用的 scrypt 密码配对
     // 注意它不是我们的 key_pair，只是「用密码解密」这一步的解密器；passphrase 在此交给它
-    let scrypt_identity = age::scrypt::Identity::new(passphrase);
+    let mut scrypt_identity = age::scrypt::Identity::new(passphrase);
+    // age 默认拒绝工作因子过高的密文（反 DoS）；显式允许我们固定的强度
+    scrypt_identity.set_max_work_factor(SCRYPT_WORK_FACTOR);
 
     // Decryptor::new 读取 age 头部。&[u8] 自身实现 Read，可直接当输入源
     // ? ：密文头损坏等 → DecryptError → 经 #[from] 变 VeilError::Decrypt
@@ -88,9 +104,13 @@ pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<a
 
     // 把字符串解析回 x25519 私钥。
     // parse 的错误类型是 &str，不是 VeilError，所以用 map_err 手动转成 VeilError::Format
-    pri_key_str
+    let result = pri_key_str
         .parse::<age::x25519::Identity>()
-        .map_err(|e| VeilError::Format(format!("私钥解析失败: {e}")))
+        .map_err(|e| VeilError::Format(format!("私钥解析失败: {e}")));
+
+    // 清零内存里的明文私钥字符串（zeroize），不留残迹
+    pri_key_str.zeroize();
+    result
 }
 
 /// 用公钥 `pub_key` 把一段明文加密成 age 密文字节。

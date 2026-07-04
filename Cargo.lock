@@ -4537,6 +4537,7 @@ dependencies = [
  "postcard",
  "serde",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

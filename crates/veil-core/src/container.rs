@@ -55,8 +55,9 @@ pub struct Container {
     key_pair: age::x25519::Identity,
     /// 内存中的**嵌套**目录树
     root: Tree,
-    /// blob 区结束处 = Index 的起始偏移；下一个 blob 从这里追加
-    blob_end: u64,
+    // 崩溃安全策略：所有写入都**追加到文件末尾**（永不覆盖已提交数据），
+    // Footer 最后写 + fsync 作为提交点；下一个 blob / Index 都从当前 EOF 追加，
+    // 所以不需要单独记 blob_end。
 }
 
 impl Container {
@@ -73,22 +74,20 @@ impl Container {
         let key_pair = age::x25519::Identity::generate();
         let cip_pri_key = encrypt_pri_key(&key_pair, passphrase)?;
 
-        // 先只写 Header，拿到长度（= blob 区起点，此刻也是 Index 起点）
-        let header_len = {
+        // 写 Header（文件开头）
+        {
             let file = File::create(path.as_ref())?;
             let mut writer = BufWriter::new(file);
-            let n = format::write_header(&mut writer, &cip_pri_key)?;
+            format::write_header(&mut writer, &cip_pri_key)?;
             writer.flush()?;
-            n
-        };
+        }
 
         let container = Container {
             path: path.as_ref().to_path_buf(),
             key_pair,
             root: Tree::new(),
-            blob_end: header_len,
         };
-        container.write_index_and_footer()?;
+        container.commit()?; // 追加空 Index + Footer
         Ok(container)
     }
 
@@ -103,20 +102,17 @@ impl Container {
     pub fn open(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
         let passphrase = passphrase.into();
         let path = path.as_ref().to_path_buf();
-        let mut file = File::open(&path)?;
 
-        let cip_pri_key = format::read_header(&mut file)?;
+        let cip_pri_key = {
+            let mut file = File::open(&path)?;
+            format::read_header(&mut file)?
+        };
         let key_pair = decrypt_pri_key(&cip_pri_key, passphrase)?;
 
-        let (index_offset, index_len) = format::read_footer(&mut file)?;
-        file.seek(SeekFrom::Start(index_offset))?;
-        let mut index_cipher = vec![0u8; index_len as usize];
-        file.read_exact(&mut index_cipher)?;
+        // 加载 Index：正常读文件尾 Footer；崩溃过则恢复到上一个有效 Footer
+        let root = recover_index(&path, &key_pair)?;
 
-        let index_plain = decrypt_bytes(&key_pair, &index_cipher)?;
-        let root = deserialize_index(&index_plain)?;
-
-        Ok(Container { path, key_pair, root, blob_end: index_offset })
+        Ok(Container { path, key_pair, root })
     }
 
     /// 往容器里追加一个文件（同名则覆盖，旧 blob 成死空间）。
@@ -131,25 +127,26 @@ impl Container {
         let content_hash: [u8; 32] = blake3::hash(plaintext).into();
         let blob_cipher = encrypt_bytes(&self.key_pair.to_public(), plaintext)?;
 
-        // 在 blob_end 处追加 blob（此处正是旧 Index 位置，稍后被重写覆盖）
-        {
+        // 把 blob **追加到文件末尾**并 fsync（确保 blob 落盘后，才让 Index 指向它）
+        let blob_offset = {
             let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-            file.seek(SeekFrom::Start(self.blob_end))?;
+            let off = file.seek(SeekFrom::End(0))?;
             file.write_all(&blob_cipher)?;
-        }
+            file.sync_all()?;
+            off
+        };
 
         let meta = FileMeta {
             size: plaintext.len() as u64,
-            blob_offset: self.blob_end,
+            blob_offset,
             blob_len: blob_cipher.len() as u64,
             content_hash,
             mime: crate::mime::guess_mime(virtual_path),
             mtime: None,
         };
-        self.blob_end += blob_cipher.len() as u64;
 
         index::insert_file(&mut self.root, virtual_path, meta); // 插入/覆盖到树
-        self.write_index_and_footer()?;
+        self.commit()?; // 追加新 Index + Footer
         Ok(())
     }
 
@@ -166,7 +163,7 @@ impl Container {
         if index::remove_file(&mut self.root, virtual_path).is_none() {
             return Err(VeilError::Format(format!("找不到文件: {virtual_path}")));
         }
-        self.write_index_and_footer()?;
+        self.commit()?;
         Ok(())
     }
 
@@ -209,7 +206,7 @@ impl Container {
             .ok_or_else(|| VeilError::Format(format!("找不到文件: {from}")))?;
         meta.mime = crate::mime::guess_mime(to); // 扩展名可能变，重新识别
         index::insert_file(&mut self.root, to, meta);
-        self.write_index_and_footer()?;
+        self.commit()?;
         Ok(())
     }
 
@@ -390,19 +387,116 @@ impl Container {
         Ok(reader)
     }
 
-    /// 把 Index + Footer 写到 blob 区之后（`blob_end` 处），并截断多余尾巴。
-    fn write_index_and_footer(&self) -> Result<()> {
+    /// 提交当前目录树：把新的 Index + Footer **追加到文件末尾**并 fsync。
+    ///
+    /// 追加式（不覆盖已提交数据）+ Footer 最后写 + fsync = 崩溃安全：崩溃只会在末尾
+    /// 留下未提交的垃圾（下次 open 时被恢复截断），**已提交的数据永不被破坏**。
+    /// 代价：旧的 Index/Footer 成为死空间，P6 的 compaction 回收。
+    fn commit(&self) -> Result<()> {
         let index_plain = serialize_index(&self.root)?;
         let index_cipher = encrypt_bytes(&self.key_pair.to_public(), &index_plain)?;
 
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        file.seek(SeekFrom::Start(self.blob_end))?;
+        let index_offset = file.seek(SeekFrom::End(0))?; // 追加在末尾
         file.write_all(&index_cipher)?;
-        format::write_footer(&mut file, self.blob_end, index_cipher.len() as u64)?;
-
-        let end = self.blob_end + index_cipher.len() as u64 + format::FOOTER_LEN;
-        file.set_len(end)?;
+        format::write_footer(&mut file, index_offset, index_cipher.len() as u64)?;
+        file.sync_all()?; // fsync：这是「提交点」
         Ok(())
+    }
+
+    /// 校验容器内所有文件的完整性（age 认证 + blake3 往返）。
+    ///
+    /// # 返回
+    /// **损坏文件的路径列表**（空 = 全部完好）。
+    pub fn verify_all(&self) -> Vec<String> {
+        index::list_files(&self.root)
+            .into_iter()
+            .filter(|(path, _)| self.read_file(path).is_err())
+            .map(|(path, _)| path)
+            .collect()
+    }
+}
+
+/// 打开时加载 Index：先试文件尾的 Footer（正常）；若无效（崩溃留下的尾部垃圾），
+/// 向前分块扫描上一个有效 Footer，截断尾部垃圾后返回（崩溃恢复）。
+fn recover_index(path: &Path, key_pair: &age::x25519::Identity) -> Result<Tree> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let file_len = file.seek(SeekFrom::End(0))?;
+
+    // 快路径：文件尾正好是有效 Footer
+    if let Some(tree) = try_footer_end(&mut file, file_len, key_pair)? {
+        return Ok(tree);
+    }
+
+    // 崩溃恢复：从末尾向前分块搜 Footer 魔数，找第一个能解密的 Footer
+    const CHUNK: u64 = 1 << 20; // 1 MiB
+    let magic_len = format::FOOTER_MAGIC.len();
+    let mut window_end = file_len;
+    loop {
+        let window_start = window_end.saturating_sub(CHUNK);
+        file.seek(SeekFrom::Start(window_start))?;
+        let mut buf = vec![0u8; (window_end - window_start) as usize];
+        file.read_exact(&mut buf)?;
+
+        // 从窗口尾向前找魔数
+        if buf.len() >= magic_len {
+            for i in (0..=buf.len() - magic_len).rev() {
+                if &buf[i..i + magic_len] == format::FOOTER_MAGIC {
+                    let footer_end = window_start + i as u64 + magic_len as u64;
+                    if let Some(tree) = try_footer_end(&mut file, footer_end, key_pair)? {
+                        file.set_len(footer_end)?; // 截断尾部垃圾
+                        file.sync_all()?;
+                        return Ok(tree);
+                    }
+                }
+            }
+        }
+        if window_start == 0 {
+            break;
+        }
+        // 重叠 magic_len-1 字节，防魔数跨窗口边界漏掉
+        window_end = window_start + magic_len as u64 - 1;
+    }
+    Err(VeilError::Format("找不到有效的 Footer（文件损坏）".into()))
+}
+
+/// 尝试把 `footer_end` 当作某个 Footer 的结束位置来加载 Index：校验魔数 + 自洽 + 能解密。
+fn try_footer_end(
+    file: &mut File,
+    footer_end: u64,
+    key_pair: &age::x25519::Identity,
+) -> Result<Option<Tree>> {
+    if footer_end < format::FOOTER_LEN {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(footer_end - format::FOOTER_LEN))?;
+    let mut buf = [0u8; format::FOOTER_LEN as usize];
+    if file.read_exact(&mut buf).is_err() {
+        return Ok(None);
+    }
+    if &buf[16..24] != format::FOOTER_MAGIC {
+        return Ok(None);
+    }
+    let index_offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+    let index_len = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+    // 自洽：index_offset + index_len + FOOTER_LEN 应正好等于 footer_end
+    if index_offset
+        .checked_add(index_len)
+        .and_then(|s| s.checked_add(format::FOOTER_LEN))
+        != Some(footer_end)
+    {
+        return Ok(None);
+    }
+
+    // 读并解密 Index（能解密才算真有效，进一步排除魔数误匹配）
+    file.seek(SeekFrom::Start(index_offset))?;
+    let mut cipher = vec![0u8; index_len as usize];
+    if file.read_exact(&mut cipher).is_err() {
+        return Ok(None);
+    }
+    match decrypt_bytes(key_pair, &cipher).and_then(|p| deserialize_index(&p)) {
+        Ok(tree) => Ok(Some(tree)),
+        Err(_) => Ok(None),
     }
 }
 
@@ -652,6 +746,57 @@ mod tests {
         assert_eq!(reopened.read_range("data.bin", 4, 5).unwrap(), b"45678");
         assert_eq!(reopened.read_range("data.bin", 14, 10).unwrap(), b"EF");
         assert_eq!(reopened.read_file("data.bin").unwrap(), b"0123456789ABCDEF");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn crash_recovery_truncates_garbage() {
+        let path = temp_path("crash.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("a.txt", b"hello").unwrap();
+        container.add_file("b.txt", b"world").unwrap();
+        drop(container);
+
+        // 模拟崩溃：在文件末尾追加一段"未提交的垃圾"（写 blob/Index 写到一半崩了）
+        {
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"garbage from a crashed half-written blob append........")
+                .unwrap();
+        }
+
+        // open 应自动恢复到上一个有效 Footer，内容完好
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.read_file("a.txt").unwrap(), b"hello");
+        assert_eq!(reopened.read_file("b.txt").unwrap(), b"world");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn verify_all_detects_corruption() {
+        let path = temp_path("verify.veil");
+        let mut container = Container::create(&path, pass()).unwrap();
+        container.add_file("good.txt", b"ok").unwrap();
+        container.add_file("bad.txt", b"will be tampered").unwrap();
+        assert!(container.verify_all().is_empty()); // 全好
+
+        // 篡改 bad.txt 的 blob 中间一字节
+        let meta = container.get_file("bad.txt").unwrap();
+        let flip_at = meta.blob_offset + meta.blob_len / 2;
+        {
+            let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(flip_at)).unwrap();
+            let mut b = [0u8; 1];
+            f.read_exact(&mut b).unwrap();
+            b[0] ^= 0xFF;
+            f.seek(SeekFrom::Start(flip_at)).unwrap();
+            f.write_all(&b).unwrap();
+        }
+
+        let reopened = Container::open(&path, pass()).unwrap();
+        assert_eq!(reopened.verify_all(), vec!["bad.txt".to_owned()]);
+        assert_eq!(reopened.read_file("good.txt").unwrap(), b"ok"); // 好文件不受影响
 
         std::fs::remove_file(&path).ok();
     }

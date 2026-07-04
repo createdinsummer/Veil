@@ -235,6 +235,14 @@ impl UnlockedScreen {
                 if ui.button("🔑 修改密码").clicked() {
                     self.pw_dialog = true;
                 }
+                if ui.button("🔍 校验完整性").clicked() {
+                    let bad = self.container.verify_all();
+                    self.status = Some(if bad.is_empty() {
+                        "✅ 完整性校验通过，全部文件完好".to_owned()
+                    } else {
+                        format!("⚠️ {} 个文件损坏：{}", bad.len(), bad.join("、"))
+                    });
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🔒 锁定").clicked() {
                         lock_requested = true;
