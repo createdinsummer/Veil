@@ -172,6 +172,19 @@ enum Commands {
         #[arg(short = 'n', long, conflicts_with = "new_password_pos")]
         new_password: Option<String>,
     },
+
+    /// 交互式 shell 模式（批处理）
+    Shell {
+        /// 容器文件路径
+        container: String,
+
+        /// 容器密码（位置参数，可选）
+        password_pos: Option<String>,
+
+        /// 容器密码（选项方式）
+        #[arg(short, long, conflicts_with = "password_pos")]
+        password: Option<String>,
+    },
 }
 
 fn main() {
@@ -234,6 +247,10 @@ fn main() {
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
             commands::passwd::run(&container, old_pwd, new_pwd)
+        }
+        Commands::Shell { container, password_pos, password } => {
+            let pwd = password_pos.or(password);
+            commands::shell::run(&container, pwd)
         }
     };
 
