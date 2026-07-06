@@ -22,11 +22,22 @@ use crate::error::{Result, VeilError};
 /// 不用 age 的自动校准（会按「创建时的机器/构建」定强度——debug 构建会校准出偏弱的
 /// log_n≈14）。固定一个足够强的值，保证任何环境创建的容器强度一致。
 ///
-/// 测试时用很低的值，否则每次建/开容器都要跑一次昂贵 scrypt，测试会慢到几分钟。
-#[cfg(not(test))]
+/// 创建容器时用的 scrypt 工作因子（N = 2^log_n）。
+///
+/// **按构建模式区分**（`debug_assertions` 在 `cargo run`/`cargo test` 等 debug 构建为真、
+/// release 为假）：release 用强因子保证安全；debug 用低因子，避免开发时 scrypt 未优化、
+/// 每次新建/打开容器都卡十几秒。
+///
+/// ⚠️ 后果：**用 debug 构建创建的容器强度较弱（12）；正式使用请用 release 构建创建（18）。**
+#[cfg(not(debug_assertions))]
 const SCRYPT_WORK_FACTOR: u8 = 18;
-#[cfg(test)]
-const SCRYPT_WORK_FACTOR: u8 = 10;
+#[cfg(debug_assertions)]
+const SCRYPT_WORK_FACTOR: u8 = 12;
+
+/// 打开容器时**接受的**工作因子上限（反 DoS：拒绝恶意容器声称的超大因子）。
+///
+/// 与构建模式无关，取一个足够高的天花板，保证任何正常容器（无论 debug/release 创建）都能打开。
+const SCRYPT_MAX_WORK_FACTOR: u8 = 22;
 
 /// 用「用户密码 `passphrase`」把 `key_pair` 的私钥加密成密文私钥 `cip_pri_key`
 /// （即写进 Header 的那串字节）。
@@ -85,8 +96,9 @@ pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<a
     // 密码派生的解密方（age::scrypt::Identity）：与加密时用的 scrypt 密码配对
     // 注意它不是我们的 key_pair，只是「用密码解密」这一步的解密器；passphrase 在此交给它
     let mut scrypt_identity = age::scrypt::Identity::new(passphrase);
-    // age 默认拒绝工作因子过高的密文（反 DoS）；显式允许我们固定的强度
-    scrypt_identity.set_max_work_factor(SCRYPT_WORK_FACTOR);
+    // age 默认拒绝工作因子过高的密文（反 DoS）；放宽到固定天花板，
+    // 保证 debug(12)/release(18) 建的容器都能打开
+    scrypt_identity.set_max_work_factor(SCRYPT_MAX_WORK_FACTOR);
 
     // Decryptor::new 读取 age 头部。&[u8] 自身实现 Read，可直接当输入源
     // ? ：密文头损坏等 → DecryptError → 经 #[from] 变 VeilError::Decrypt
