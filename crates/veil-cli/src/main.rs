@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 
-/// Veil
+/// Veil - 一个简单、安全、高效的文件加密容器工具
 #[derive(Parser)]
 #[command(name = "veil")]
 #[command(version, about, long_about = None)]
