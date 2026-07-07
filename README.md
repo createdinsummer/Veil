@@ -307,7 +307,9 @@ A: 约 100ms。只需重新加密私钥，无需重新加密数据。
 
 ## 许可证
 
-待定
+Apache License 2.0
+
+详见 [LICENSE](LICENSE) 文件。
 
 ## 贡献
 
