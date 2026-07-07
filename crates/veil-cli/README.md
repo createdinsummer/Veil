@@ -115,24 +115,6 @@ veil> exit
 正在退出...
 ```
 
-**性能对比**：
-```
-传统方式（每个命令解密一次）:
-  veil add vault.veil file1.txt pass  # ~150ms
-  veil add vault.veil file2.txt pass  # ~150ms
-  veil add vault.veil file3.txt pass  # ~150ms
-  总耗时: ~450ms
-
-Shell 模式（只解密一次）:
-  veil shell vault.veil pass          # ~150ms
-  veil> add file1.txt                 # ~10ms
-  veil> add file2.txt                 # ~10ms
-  veil> add file3.txt                 # ~10ms
-  总耗时: ~180ms
-
-性能提升: 2.5倍
-```
-
 **Shell 模式支持的命令**：
 - `add <source> [dest]` - 添加文件/目录
 - `rm <path>` - 删除文件
@@ -467,9 +449,3 @@ veil> exit
 - Footer 作为提交点
 - 未提交的数据在下次打开时自动截断
 
-## 限制
-
-- 单个文件大小：理论上无限制，实际受内存限制（当前全部读入内存）
-- 文件数量：无限制
-- 容器大小：理论上无限制
-- 并发操作：不支持多线程并发操作同一个容器
