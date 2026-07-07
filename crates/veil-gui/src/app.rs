@@ -76,7 +76,7 @@ impl LockScreen {
                 .show(ui, |ui| {
                     ui.set_width(300.0);
                     ui.vertical_centered(|ui| {
-                        ui.heading("🔒 Veil 保险箱");
+                        ui.heading("🔒 Veil 容器");
                         ui.add_space(20.0);
 
                         // 打开已有容器
@@ -119,7 +119,7 @@ impl LockScreen {
                         ui.add_space(6.0);
                         // 新建容器
                         if ui
-                            .add(egui::Button::new("🆕 新建保险箱…").min_size(egui::vec2(240.0, 28.0)))
+                            .add(egui::Button::new("🆕 新建 Veil 容器 …").min_size(egui::vec2(240.0, 28.0)))
                             .clicked()
                         {
                             result = self.try_create();

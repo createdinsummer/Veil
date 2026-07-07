@@ -29,6 +29,9 @@ colored = "2.1"
 # 进度条
 indicatif = "0.17"
 
+# 文件遍历（用于进度条统计）
+walkdir = "2.4"
+
 [dev-dependencies]
 # 测试框架
 assert_cmd = "2.0"

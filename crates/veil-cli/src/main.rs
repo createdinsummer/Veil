@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 
-/// Veil - 加密媒体保险箱命令行工具
+/// Veil
 #[derive(Parser)]
 #[command(name = "veil")]
 #[command(version, about, long_about = None)]

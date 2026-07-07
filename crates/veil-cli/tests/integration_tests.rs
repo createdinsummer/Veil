@@ -24,7 +24,7 @@ fn test_help_command() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Veil - 加密媒体保险箱命令行工具"))
+        .stdout(predicate::str::contains("Veil"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("free"));

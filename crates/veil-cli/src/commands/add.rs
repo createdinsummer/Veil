@@ -2,6 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::container::Container;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::fs;
 
 /// 添加文件或目录到容器。
 ///
@@ -52,17 +54,67 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
             source_path.file_name().unwrap().to_str().unwrap()
         });
 
+        let file_size = source_path.metadata()?.len();
+
         println!("{} 正在添加文件: {} -> {}", "→".blue(), source, virtual_path);
+
+        // 创建进度条
+        let pb = ProgressBar::new(file_size);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
+
         let content = std::fs::read(source_path)?;
+        pb.set_position(file_size);
+
         container.add_file(virtual_path, &content)?;
+
+        pb.finish_with_message(format!("{}", "完成".green()));
 
         println!("{} 文件已添加: {}", "✓".green(), virtual_path);
     } else if source_path.is_dir() {
         // 添加目录
         let dest_prefix = dest.unwrap_or("");
 
-        println!("{} 正在添加目录: {} -> {}", "→".blue(), source, dest_prefix);
-        container.add_dir(source_path, dest_prefix)?;
+        println!("{} 正在扫描目录: {}", "→".blue(), source);
+
+        // 收集所有文件
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(source_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            files.push(entry.path().to_path_buf());
+        }
+
+        let file_count = files.len();
+        println!("{} 找到 {} 个文件，开始添加...", "→".blue(), file_count);
+
+        // 创建进度条
+        let pb = ProgressBar::new(file_count as u64);
+        pb.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
+
+        // 逐个添加文件并更新进度条
+        for file_path in files {
+            let relative_path = file_path.strip_prefix(source_path).unwrap();
+            let virtual_path = if dest_prefix.is_empty() {
+                relative_path.to_str().unwrap().to_string()
+            } else {
+                format!("{}/{}", dest_prefix.trim_end_matches('/'), relative_path.to_str().unwrap())
+            };
+
+            let content = fs::read(&file_path)?;
+            container.add_file(&virtual_path, &content)?;
+
+            pb.inc(1);
+        }
+
+        pb.finish_with_message(format!("{}", "完成".green()));
 
         println!("{} 目录已添加完成", "✓".green());
     } else {

@@ -1,6 +1,6 @@
 # Veil GUI
 
-Veil 加密媒体保险箱的图形界面应用 —— 基于 Tauri + React 的桌面应用。
+Veil的图形界面应用 —— 基于 Tauri + React 的桌面应用。
 
 ## 概述
 
