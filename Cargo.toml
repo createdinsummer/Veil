@@ -1,14 +1,14 @@
 [workspace] # 工作空间配置 声明「这不是一个包,而是一组包的容器」
 resolver = "3" # 依赖版本解析器的算法版本
 # 成员名单
-members = ["crates/veil-core", "crates/veil-gui", "crates/veil-cli"]
+members = ["crates/veil-core", "crates/veil-cli"]
 
 # 工作空间包配置
 # 用于定义工作空间包的默认配置，如edition、version等
 # 共享元数据。子 crate 写 edition.workspace = true 就来这里取,改一处全员生效,不用每个 crate 维护一遍。
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "1.0.0"
 
 # 发布构建配置
 [profile.release]
