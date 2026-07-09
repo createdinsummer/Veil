@@ -4,6 +4,27 @@ use std::path::Path;
 use veil_core::container::Container;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
+use std::io::Read;
+
+/// 包装 Reader 以实时更新进度条
+struct ProgressReader<R> {
+    inner: R,
+    progress: ProgressBar,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, progress: ProgressBar) -> Self {
+        Self { inner, progress }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.progress.inc(n as u64);
+        Ok(n)
+    }
+}
 
 /// 添加文件或目录到容器。
 ///
@@ -65,10 +86,10 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
             .unwrap()
             .progress_chars("#>-"));
 
-        let content = std::fs::read(source_path)?;
-        pb.set_position(file_size);
-
-        container.add_file(virtual_path, &content)?;
+        // 使用流式加密（包装进度条更新）
+        let file = fs::File::open(source_path)?;
+        let reader = ProgressReader::new(file, pb.clone());
+        container.add_file_streaming(virtual_path, reader)?;
 
         pb.finish_with_message(format!("{}", "完成".green()));
 
@@ -99,20 +120,9 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
             .unwrap()
             .progress_chars("#>-"));
 
-        // 逐个添加文件并更新进度条
-        for file_path in files {
-            let relative_path = file_path.strip_prefix(source_path).unwrap();
-            let virtual_path = if dest_prefix.is_empty() {
-                relative_path.to_str().unwrap().to_string()
-            } else {
-                format!("{}/{}", dest_prefix.trim_end_matches('/'), relative_path.to_str().unwrap())
-            };
-
-            let content = fs::read(&file_path)?;
-            container.add_file(&virtual_path, &content)?;
-
-            pb.inc(1);
-        }
+        // add_dir 内部已改为流式处理，这里只需调用一次
+        container.add_dir(source_path, dest_prefix)?;
+        pb.set_position(file_count as u64);
 
         pb.finish_with_message(format!("{}", "完成".green()));
 

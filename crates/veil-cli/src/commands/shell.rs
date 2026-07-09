@@ -182,8 +182,9 @@ fn cmd_add(container: &mut Container, args: &[&str]) -> Result<()> {
         });
 
         println!("{} 正在添加: {} -> {}", "→".blue(), source, virtual_path);
-        let content = std::fs::read(source_path)?;
-        container.add_file(virtual_path, &content)?;
+        // 使用流式接口
+        let file = std::fs::File::open(source_path)?;
+        container.add_file_streaming(virtual_path, file)?;
         println!("{} 文件已添加: {}", "✓".green(), virtual_path);
     } else if source_path.is_dir() {
         let dest_prefix = dest.unwrap_or("");

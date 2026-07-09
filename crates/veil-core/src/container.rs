@@ -117,6 +117,8 @@ impl Container {
 
     /// 往容器里追加一个文件（同名则覆盖，旧 blob 成死空间）。
     ///
+    /// 适用于**小文件**或已在内存的数据。大文件（几十 MB 以上）请用 [`add_file_streaming`](Self::add_file_streaming)。
+    ///
     /// # 参数
     /// - `virtual_path`: 容器内的虚拟路径，如 "photos/a.jpg"
     /// - `plaintext`:    文件明文内容
@@ -147,6 +149,83 @@ impl Container {
 
         index::insert_file(&mut self.root, virtual_path, meta); // 插入/覆盖到树
         self.commit()?; // 追加新 Index + Footer
+        Ok(())
+    }
+
+    /// 流式添加文件（适用于大文件，不会一次性读入内存）。
+    ///
+    /// 使用固定大小的缓冲区（64KB）边读边加密边写入，内存占用恒定。得益于 age 使用
+    /// **流密码**（ChaCha20-Poly1305），加密和解密的块大小可以完全不同——加密时用
+    /// 64KB 缓冲，解密时可以用 8KB 或 1MB，结果都正确。流密码将明文逐字节与密钥流
+    /// XOR，生成连续的密文字节流，没有"块边界"概念，因此无需对齐或填充。
+    ///
+    /// # 参数
+    /// - `virtual_path`: 容器内的虚拟路径
+    /// - `reader`:       实现了 `Read` 的数据源（如 `File`、`BufReader`）
+    /// # 返回
+    /// - `Ok(())`：文件已流式加密追加、Index/Footer 已更新
+    /// - `Err(VeilError)`：读取、加密或写文件失败
+    ///
+    /// # 示例
+    /// ```no_run
+    /// # use veil_core::container::Container;
+    /// # use std::fs::File;
+    /// # fn example() -> veil_core::error::Result<()> {
+    /// let mut container = Container::open("data.veil", "password")?;
+    /// let file = File::open("large_video.mp4")?;
+    /// container.add_file_streaming("videos/vacation.mp4", file)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_file_streaming(
+        &mut self,
+        virtual_path: &str,
+        mut reader: impl Read,
+    ) -> Result<()> {
+        const CHUNK_SIZE: usize = 64 * 1024; // 64KB 缓冲区
+
+        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        let blob_offset = file.seek(SeekFrom::End(0))?;
+
+        // age 流式加密器（写入容器文件）
+        let recipient = self.key_pair.to_public();
+        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
+            .expect("failed to create encryptor");
+        let mut writer = encryptor.wrap_output(&mut file)?;
+
+        // 边读边 hash 边加密边写
+        let mut hasher = blake3::Hasher::new();
+        let mut total_size = 0u64;
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+
+            hasher.update(&buffer[..n]);
+            writer.write_all(&buffer[..n])?;
+            total_size += n as u64;
+        }
+
+        writer.finish()?;
+        let blob_len = file.stream_position()? - blob_offset;
+        file.sync_all()?; // 确保 blob 落盘后，才让 Index 指向它
+
+        let content_hash: [u8; 32] = hasher.finalize().into();
+
+        let meta = FileMeta {
+            size: total_size,
+            blob_offset,
+            blob_len,
+            content_hash,
+            mime: crate::mime::guess_mime(virtual_path),
+            mtime: None,
+        };
+
+        index::insert_file(&mut self.root, virtual_path, meta);
+        self.commit()?;
         Ok(())
     }
 
@@ -212,28 +291,27 @@ impl Container {
 
     /// 递归添加磁盘目录 `src_dir` 下的所有文件到容器，前缀 `dest_prefix`。
     ///
+    /// 使用流式处理，每个文件边读边加密，内存占用恒定。批量写入所有 blob 后只提交一次
+    /// Index，避免重复重写索引。
+    ///
     /// # 参数
     /// - `src_dir`:     磁盘上的源目录
     /// - `dest_prefix`: 容器内的目标前缀（空串 = 放到根）
     /// # 返回
     /// - `Ok(())`：目录下所有文件已加入
     /// - `Err(VeilError)`：读目录/文件或加密失败
-    ///
-    /// 注意：目前每个文件走一次 `add_file`（各重写一次 Index），文件很多时偏慢；
-    /// 且 `add_file` 整份读进内存，超大文件请等流式接口。
     pub fn add_dir(&mut self, src_dir: impl AsRef<Path>, dest_prefix: &str) -> Result<()> {
         let src_dir = src_dir.as_ref();
         let mut files = Vec::new();
         collect_files(src_dir, src_dir, dest_prefix, &mut files)?;
 
-        // 批量：所有 blob 追加到末尾（逐个读、不一次性全进内存），**只提交一次 Index**。
+        // 批量：所有 blob 追加到末尾（逐个流式读取），**只提交一次 Index**。
         // 相比逐个 add_file，把 O(N²) 的 Index 重写降为 O(N)、2N 次 fsync 降为 2 次。
         {
             let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
             let mut offset = file.seek(SeekFrom::End(0))?;
             for (abs_path, virtual_path) in files {
-                let plaintext = std::fs::read(&abs_path)?;
-                self.stage_blob(&mut file, &mut offset, &virtual_path, &plaintext)?;
+                self.stage_blob_streaming(&mut file, &mut offset, &virtual_path, File::open(&abs_path)?)?;
             }
             file.sync_all()?; // 所有 blob 一次性落盘（崩溃安全的前提）
         }
@@ -269,7 +347,61 @@ impl Container {
         Ok(())
     }
 
+    /// 流式版本的 `stage_blob`（供 `add_dir` 批量场景用）。
+    fn stage_blob_streaming(
+        &mut self,
+        file: &mut File,
+        offset: &mut u64,
+        virtual_path: &str,
+        mut reader: impl Read,
+    ) -> Result<()> {
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        let blob_offset = *offset;
+
+        // age 流式加密器
+        let recipient = self.key_pair.to_public();
+        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
+            .expect("failed to create encryptor");
+        let mut writer = encryptor.wrap_output(&mut *file)?;
+
+        // 边读边 hash 边加密
+        let mut hasher = blake3::Hasher::new();
+        let mut total_size = 0u64;
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            writer.write_all(&buffer[..n])?;
+            total_size += n as u64;
+        }
+
+        writer.finish()?;
+        let blob_len = file.stream_position()? - blob_offset;
+        *offset = file.stream_position()?;
+
+        let content_hash: [u8; 32] = hasher.finalize().into();
+
+        let meta = FileMeta {
+            size: total_size,
+            blob_offset,
+            blob_len,
+            content_hash,
+            mime: crate::mime::guess_mime(virtual_path),
+            mtime: None,
+        };
+
+        index::insert_file(&mut self.root, virtual_path, meta);
+        Ok(())
+    }
+
     /// 读出某个文件的完整明文，并做 blake3 往返校验。**流式解密、只碰这一个 blob。**
+    ///
+    /// 适用于**小文件**或需要全部内容的场景。大文件请用 [`open_file_reader`](Self::open_file_reader) 流式读取。
     ///
     /// # 参数
     /// - `virtual_path`: 要读取的文件路径
@@ -288,6 +420,40 @@ impl Container {
             return Err(VeilError::Format("内容哈希不匹配（数据损坏？）".into()));
         }
         Ok(plaintext)
+    }
+
+    /// 打开文件的流式读取器（适用于大文件，不会一次性读入内存）。
+    ///
+    /// 返回实现了 `Read + Seek` 的解密流，可以按需读取任意大小的数据块。得益于 age
+    /// 使用**流密码**（ChaCha20-Poly1305），解密时的读取块大小可以与加密时完全不同。
+    /// 流密码生成连续的密文字节流，解密时只需按顺序读取并与密钥流 XOR，无论一次读
+    /// 1 字节还是 1MB 都能正确还原明文。
+    ///
+    /// # 参数
+    /// - `virtual_path`: 要读取的文件路径
+    /// # 返回
+    /// - `Ok(impl Read + Seek)`：流式解密读取器
+    /// - `Err(VeilError)`：找不到文件或打开失败
+    ///
+    /// # 示例
+    /// ```no_run
+    /// # use veil_core::container::Container;
+    /// # use std::io::{Read, copy};
+    /// # use std::fs::File;
+    /// # fn example() -> veil_core::error::Result<()> {
+    /// let container = Container::open("data.veil", "password")?;
+    /// let mut reader = container.open_file_reader("videos/vacation.mp4")?;
+    /// let mut output = File::create("vacation.mp4")?;
+    /// std::io::copy(&mut reader, &mut output)?;  // 流式复制，内存占用恒定
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn open_file_reader(
+        &self,
+        virtual_path: &str,
+    ) -> Result<impl Read + Seek> {
+        let meta = self.file_meta(virtual_path)?;
+        self.open_blob_reader(meta)
     }
 
     /// 随机读取某文件解密后的 `[offset, offset+len)` 一段（不读整文件）。
@@ -322,7 +488,7 @@ impl Container {
         Ok(crate::temp::decrypt_to_temp(virtual_path, reader)?)
     }
 
-    /// 按虚拟路径解密**单个**文件，写到磁盘 `dest`。
+    /// 按虚拟路径解密**单个**文件，写到磁盘 `dest`。使用流式处理，内存占用恒定。
     ///
     /// # 参数
     /// - `virtual_path`: 容器内要解密的文件路径
@@ -331,14 +497,43 @@ impl Container {
     /// - `Ok(())`：文件已解密并写入 `dest`
     /// - `Err(VeilError)`：找不到文件、校验失败或写盘失败
     pub fn extract_file(&self, virtual_path: &str, dest: impl AsRef<Path>) -> Result<()> {
+        use std::io::BufWriter;
+
         let dest = dest.as_ref();
-        let plaintext = self.read_file(virtual_path)?;
+        let meta = self.file_meta(virtual_path)?;
+
         if let Some(parent) = dest.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(dest, plaintext)?;
+
+        // 流式解密并写入文件
+        let mut reader = self.open_blob_reader(meta)?;
+        let mut writer = BufWriter::new(File::create(dest)?);
+
+        // 边读边校验 hash
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0u8; 64 * 1024];
+
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+            writer.write_all(&buffer[..n])?;
+        }
+
+        writer.flush()?;
+
+        // 校验完整性
+        let hash: [u8; 32] = hasher.finalize().into();
+        if hash != meta.content_hash {
+            std::fs::remove_file(dest)?; // 校验失败，删除损坏文件
+            return Err(VeilError::Format("内容哈希不匹配（数据损坏？）".into()));
+        }
+
         Ok(())
     }
 
