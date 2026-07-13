@@ -10,3 +10,7 @@
 /release
 
 .DS_Store
+
+# macFUSE 安装包（过大，不提交到仓库）
+installers/*.dmg
+installers/*.pkg
