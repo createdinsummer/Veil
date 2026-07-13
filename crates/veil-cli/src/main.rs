@@ -185,23 +185,6 @@ enum Commands {
         #[arg(short, long, conflicts_with = "password_pos")]
         password: Option<String>,
     },
-
-    /// 挂载容器为网络磁盘（WebDAV）
-    Mount {
-        /// 容器文件路径
-        container: String,
-
-        /// 容器密码（位置参数，可选）
-        password_pos: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
-        password: Option<String>,
-
-        /// 自动打开文件管理器
-        #[arg(short = 'o', long, default_value = "true")]
-        auto_open: bool,
-    },
 }
 
 fn main() {
@@ -268,10 +251,6 @@ fn main() {
         Commands::Shell { container, password_pos, password } => {
             let pwd = password_pos.or(password);
             commands::shell::run(&container, pwd)
-        }
-        Commands::Mount { container, password_pos, password, auto_open } => {
-            let pwd = password_pos.or(password);
-            commands::mount::run(&container, pwd, auto_open)
         }
     };
 

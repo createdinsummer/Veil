@@ -7,7 +7,6 @@ pub mod ex;
 pub mod info;
 pub mod passwd;
 pub mod shell;
-pub mod mount;
 
 /// 提示用户输入密码（不回显）。
 ///
