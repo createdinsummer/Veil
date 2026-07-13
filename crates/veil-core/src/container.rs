@@ -103,14 +103,21 @@ impl Container {
         let passphrase = passphrase.into();
         let path = path.as_ref().to_path_buf();
 
+        let start = std::time::Instant::now();
         let cip_pri_key = {
             let mut file = File::open(&path)?;
             format::read_header(&mut file)?
         };
+        eprintln!("  读取头部: {:.3}s", start.elapsed().as_secs_f64());
+
+        let start = std::time::Instant::now();
         let key_pair = decrypt_pri_key(&cip_pri_key, passphrase)?;
+        eprintln!("  解密密钥: {:.3}s", start.elapsed().as_secs_f64());
 
         // 加载 Index：正常读文件尾 Footer；崩溃过则恢复到上一个有效 Footer
+        let start = std::time::Instant::now();
         let root = recover_index(&path, &key_pair)?;
+        eprintln!("  加载索引: {:.3}s", start.elapsed().as_secs_f64());
 
         Ok(Container { path, key_pair, root })
     }

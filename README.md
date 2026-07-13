@@ -13,6 +13,7 @@ Veil 是一个基于现代加密算法的文件加密容器工具，将任意文
 - 📦 **单文件容器**：所有数据存储在一个 `.veil` 文件中，便于传输和备份
 - 🌲 **目录树结构**：支持嵌套目录，保持文件组织
 - 💾 **流式处理**：大文件边读边加密，内存占用恒定（~64KB）
+- 🎬 **FUSE 挂载**：虚拟磁盘，视频秒开，流畅播放（macOS）
 - ⚡ **批处理模式**：Shell 模式性能提升 2-6 倍
 - 📊 **进度显示**：实时显示加密/解密进度
 - 💪 **崩溃安全**：追加写入 + Footer 提交点，确保数据完整性
@@ -61,9 +62,11 @@ veil shell vault.veil
 Veil/
 ├── crates/
 │   ├── veil-core/      # 核心加密库
-│   └── veil-cli/       # 命令行工具
+│   ├── veil-cli/       # 命令行工具
+│   └── veil-fuse/      # FUSE 挂载（macOS）
+├── setup_fuse.sh       # FUSE 在线安装
+├── setup_fuse_offline.sh # FUSE 离线安装
 ├── build.sh            # 打包脚本
-├── INSTALL.md          # 安装指南
 └── README.md           # 本文件
 ```
 
@@ -71,6 +74,7 @@ Veil/
 
 - **[veil-core](crates/veil-core/README.md)** - 核心加密库，提供容器管理 API
 - **[veil-cli](crates/veil-cli/README.md)** - 命令行工具，9 个命令 + 批处理模式
+- **[veil-fuse](crates/veil-fuse/README.md)** - FUSE 挂载，视频秒开（macOS）
 
 ## 加密技术
 
@@ -172,6 +176,30 @@ veil> add photo3.jpg
 veil> exit
 ```
 
+### FUSE 挂载（macOS）
+
+将容器挂载为虚拟磁盘，直接播放视频无需解密：
+
+```bash
+# 安装 macFUSE（首次使用）
+./setup_fuse.sh
+
+# 挂载容器
+cargo run --release -p veil-fuse --example mount_with_guide movies.veil
+
+# 在 Finder 中打开
+open /tmp/veil
+
+# 双击视频文件 → 秒开！
+```
+
+**性能：**
+- 打开 1.4GB 视频：< 1 秒（传统方式 30 秒）
+- 内存占用：~64KB（传统方式 1.4GB）
+- 拖动进度条：流畅
+
+详见 [FUSE 文档](crates/veil-fuse/README.md)。
+
 ## 安全性
 
 - ✅ **加密算法**：军事级 ChaCha20-Poly1305 AEAD
@@ -223,6 +251,8 @@ A: 约 100ms。只需重新加密私钥，无需重新加密数据。
 ## 路线图
 
 - [x] 流式读写支持（已完成 - 处理超大文件）
+- [x] FUSE 挂载（已完成 - macOS 支持）
+- [ ] FUSE 挂载（Windows/Linux 支持）
 - [ ] 容器压缩
 - [ ] 增量更新
 - [ ] 死空间回收
