@@ -1,7 +1,8 @@
 [workspace] # 工作空间配置 声明「这不是一个包,而是一组包的容器」
 resolver = "3" # 依赖版本解析器的算法版本
-# 成员名单
-members = ["crates/veil-core", "crates/veil-cli", "crates/veil-fuse"]
+# 成员名单（veil-fuse 需要安装 macFUSE 后单独编译）
+members = ["crates/veil-core", "crates/veil-cli"]
+# exclude = ["crates/veil-fuse"]  # veil-fuse 不在默认编译中
 
 # 工作空间包配置
 # 用于定义工作空间包的默认配置，如edition、version等
