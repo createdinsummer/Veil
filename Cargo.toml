@@ -8,7 +8,7 @@ members = ["crates/veil-core", "crates/veil-cli"]
 # 共享元数据。子 crate 写 edition.workspace = true 就来这里取,改一处全员生效,不用每个 crate 维护一遍。
 [workspace.package]
 edition = "2024"
-version = "1.0.0"
+version = "1.1.0"
 
 # 发布构建配置
 [profile.release]

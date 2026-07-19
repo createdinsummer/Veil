@@ -5,6 +5,10 @@ set -e
 
 echo "开始打包 Veil CLI..."
 
+# 清理旧的编译产物
+echo "清理旧的编译产物..."
+cargo clean
+
 # 编译（仅 CLI，跳过测试节省空间）
 echo "编译 release 版本..."
 cargo build --release --package veil-cli
@@ -26,6 +30,3 @@ echo "✓ 打包完成！"
 echo ""
 echo "发布目录: release/"
 ls -lh release/bin/veil
-echo ""
-echo "安装命令:"
-echo "  sudo cp release/bin/veil /usr/local/bin/"

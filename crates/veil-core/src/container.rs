@@ -301,6 +301,21 @@ impl Container {
     /// - `Ok(())`：目录下所有文件已加入
     /// - `Err(VeilError)`：读目录/文件或加密失败
     pub fn add_dir(&mut self, src_dir: impl AsRef<Path>, dest_prefix: &str) -> Result<()> {
+        self.add_dir_with_progress(src_dir, dest_prefix, |_, _, _| {})
+    }
+
+    /// 添加目录，带进度回调。
+    ///
+    /// 回调参数：`(已完成文件数, 当前文件路径, 当前文件大小)`
+    pub fn add_dir_with_progress<F>(
+        &mut self,
+        src_dir: impl AsRef<Path>,
+        dest_prefix: &str,
+        mut progress_callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(usize, &Path, u64),
+    {
         let src_dir = src_dir.as_ref();
         let mut files = Vec::new();
         collect_files(src_dir, src_dir, dest_prefix, &mut files)?;
@@ -310,7 +325,9 @@ impl Container {
         {
             let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
             let mut offset = file.seek(SeekFrom::End(0))?;
-            for (abs_path, virtual_path) in files {
+            for (index, (abs_path, virtual_path)) in files.into_iter().enumerate() {
+                let file_size = abs_path.metadata()?.len();
+                progress_callback(index, &abs_path, file_size); // 开始处理当前文件
                 self.stage_blob_streaming(&mut file, &mut offset, &virtual_path, File::open(&abs_path)?)?;
             }
             file.sync_all()?; // 所有 blob 一次性落盘（崩溃安全的前提）

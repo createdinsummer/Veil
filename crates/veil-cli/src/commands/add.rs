@@ -6,6 +6,23 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Read;
 
+/// 格式化文件大小
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// 包装 Reader 以实时更新进度条
 struct ProgressReader<R> {
     inner: R,
@@ -89,11 +106,21 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
         // 使用流式加密（包装进度条更新）
         let file = fs::File::open(source_path)?;
         let reader = ProgressReader::new(file, pb.clone());
-        container.add_file_streaming(virtual_path, reader)?;
 
-        pb.finish_with_message(format!("{}", "完成".green()));
+        let result = container.add_file_streaming(virtual_path, reader);
 
-        println!("{} 文件已添加: {}", "✓".green(), virtual_path);
+        // 确保进度条被清理
+        match result {
+            Ok(_) => {
+                pb.finish_with_message(format!("{}", "完成".green()));
+                println!("{} 文件已添加: {}", "✓".green(), virtual_path);
+                Ok(())
+            }
+            Err(e) => {
+                pb.abandon_with_message(format!("{}", "失败".red()));
+                Err(e)
+            }
+        }?;
     } else if source_path.is_dir() {
         // 添加目录
         let dest_prefix = dest.unwrap_or("");
@@ -113,20 +140,35 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
         let file_count = files.len();
         println!("{} 找到 {} 个文件，开始添加...", "→".blue(), file_count);
 
-        // 创建进度条
+        // 创建进度条 - 显示当前文件信息
         let pb = ProgressBar::new(file_count as u64);
         pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 ({eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 | {msg}")
             .unwrap()
             .progress_chars("#>-"));
 
-        // add_dir 内部已改为流式处理，这里只需调用一次
-        container.add_dir(source_path, dest_prefix)?;
-        pb.set_position(file_count as u64);
+        // add_dir 带进度回调
+        let result = container.add_dir_with_progress(source_path, dest_prefix, |processed, file_path, file_size| {
+            pb.set_position((processed + 1) as u64);
+            let file_name = file_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            pb.set_message(format!("{} ({})", file_name, format_size(file_size)));
+        });
 
-        pb.finish_with_message(format!("{}", "完成".green()));
-
-        println!("{} 目录已添加完成", "✓".green());
+        // 确保进度条被清理
+        match result {
+            Ok(_) => {
+                pb.set_position(file_count as u64);
+                pb.finish_with_message(format!("{}", "完成".green()));
+                println!("{} 目录已添加完成", "✓".green());
+                Ok(())
+            }
+            Err(e) => {
+                pb.abandon_with_message(format!("{}", "失败".red()));
+                Err(e)
+            }
+        }?;
     } else {
         anyhow::bail!("不支持的文件类型");
     }
