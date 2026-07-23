@@ -5,8 +5,14 @@ mod commands;
 /// Veil - 一个简单、安全、高效的文件加密容器工具
 #[derive(Parser)]
 #[command(name = "veil")]
-#[command(version, about, long_about = None)]
+#[command(version)]
+#[command(about = format!("Veil v{} - 一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
+#[command(long_about = format!("Veil v{}\n一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
 struct Cli {
+    /// 显示版本信息
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     #[command(subcommand)]
     command: Commands,
 }
