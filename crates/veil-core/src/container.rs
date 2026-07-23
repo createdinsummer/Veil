@@ -301,12 +301,12 @@ impl Container {
     /// - `Ok(())`：目录下所有文件已加入
     /// - `Err(VeilError)`：读目录/文件或加密失败
     pub fn add_dir(&mut self, src_dir: impl AsRef<Path>, dest_prefix: &str) -> Result<()> {
-        self.add_dir_with_progress(src_dir, dest_prefix, |_, _, _| {})
+        self.add_dir_with_progress(src_dir, dest_prefix, |_, _, _, _| {})
     }
 
     /// 添加目录，带进度回调。
     ///
-    /// 回调参数：`(已完成文件数, 当前文件路径, 当前文件大小)`
+    /// 回调参数：`(已完成文件数, 总文件数, 当前文件路径, 当前文件大小)`
     pub fn add_dir_with_progress<F>(
         &mut self,
         src_dir: impl AsRef<Path>,
@@ -314,11 +314,18 @@ impl Container {
         mut progress_callback: F,
     ) -> Result<()>
     where
-        F: FnMut(usize, &Path, u64),
+        F: FnMut(usize, usize, &Path, u64),
     {
         let src_dir = src_dir.as_ref();
         let mut files = Vec::new();
         collect_files(src_dir, src_dir, dest_prefix, &mut files)?;
+
+        let total_files = files.len();
+
+        // 空目录也调用一次回调，让上层知道总数为 0
+        if total_files == 0 {
+            return Ok(());
+        }
 
         // 批量：所有 blob 追加到末尾（逐个流式读取），**只提交一次 Index**。
         // 相比逐个 add_file，把 O(N²) 的 Index 重写降为 O(N)、2N 次 fsync 降为 2 次。
@@ -327,7 +334,7 @@ impl Container {
             let mut offset = file.seek(SeekFrom::End(0))?;
             for (index, (abs_path, virtual_path)) in files.into_iter().enumerate() {
                 let file_size = abs_path.metadata()?.len();
-                progress_callback(index, &abs_path, file_size); // 开始处理当前文件
+                progress_callback(index, total_files, &abs_path, file_size); // 开始处理当前文件
                 self.stage_blob_streaming(&mut file, &mut offset, &virtual_path, File::open(&abs_path)?)?;
             }
             file.sync_all()?; // 所有 blob 一次性落盘（崩溃安全的前提）
@@ -758,9 +765,19 @@ fn collect_files(
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
-        if path.is_dir() {
+
+        // 获取元数据，不跟随符号链接
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue, // 跳过无法访问的文件
+        };
+
+        if metadata.is_symlink() {
+            // 跳过符号链接，避免重复计数和循环引用
+            continue;
+        } else if metadata.is_dir() {
             collect_files(base, &path, dest_prefix, out)?;
-        } else if path.is_file() {
+        } else if metadata.is_file() {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().replace('\\', "/");
             let virtual_path = if dest_prefix.is_empty() {

@@ -37,7 +37,7 @@ fn test_version_command() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("veil 1.0.0"));
+        .stdout(predicate::str::contains("veil 1.1.0"));
 }
 
 #[test]

@@ -127,28 +127,20 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
 
         println!("{} 正在扫描目录: {}", "→".blue(), source);
 
-        // 收集所有文件
-        let mut files = Vec::new();
-        for entry in walkdir::WalkDir::new(source_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            files.push(entry.path().to_path_buf());
-        }
-
-        let file_count = files.len();
-        println!("{} 找到 {} 个文件，开始添加...", "→".blue(), file_count);
-
-        // 创建进度条 - 显示当前文件信息
-        let pb = ProgressBar::new(file_count as u64);
+        // 不在 CLI 层扫描，让 core 层扫描并通过回调返回总数
+        let pb = ProgressBar::new(0); // 初始为 0，回调里更新
         pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 | {msg}")
             .unwrap()
             .progress_chars("#>-"));
 
         // add_dir 带进度回调
-        let result = container.add_dir_with_progress(source_path, dest_prefix, |processed, file_path, file_size| {
+        let result = container.add_dir_with_progress(source_path, dest_prefix, |processed, total, file_path, file_size| {
+            // 第一次回调时设置总数
+            if pb.length() == Some(0) {
+                pb.set_length(total as u64);
+                println!("{} 找到 {} 个文件，开始添加...", "→".blue(), total);
+            }
             pb.set_position((processed + 1) as u64);
             let file_name = file_path.file_name()
                 .and_then(|n| n.to_str())
@@ -159,9 +151,20 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
         // 确保进度条被清理
         match result {
             Ok(_) => {
-                pb.set_position(file_count as u64);
-                pb.finish_with_message(format!("{}", "完成".green()));
-                println!("{} 目录已添加完成", "✓".green());
+                if let Some(len) = pb.length() {
+                    if len == 0 {
+                        // 空目录情况
+                        pb.finish_and_clear();
+                        println!("{} 目录为空，无文件添加", "→".yellow());
+                    } else {
+                        pb.set_position(len);
+                        pb.finish_with_message(format!("{}", "完成".green()));
+                        println!("{} 目录已添加完成", "✓".green());
+                    }
+                } else {
+                    pb.finish_and_clear();
+                    println!("{} 目录为空，无文件添加", "→".yellow());
+                }
                 Ok(())
             }
             Err(e) => {
