@@ -45,6 +45,7 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
 
     println!("\n{}", "容器信息:".cyan().bold());
     println!("  路径: {}", container_path);
+    println!("  创建版本: {}", container.cli_version());
 
     // 文件大小
     let metadata = std::fs::metadata(container_path)?;

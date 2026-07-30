@@ -8,6 +8,15 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::error::{Result, VeilError};
 
+/// Header 数据结构
+#[derive(Debug, Clone)]
+pub struct Header {
+    /// CLI 版本字符串（创建容器时的版本）
+    pub cli_version: String,
+    /// 密文私钥
+    pub cip_pri_key: Vec<u8>,
+}
+
 /// 文件开头魔数，用来一眼确认"这是个 veil 容器"
 pub const MAGIC: &[u8; 8] = b"VEILPKG\0";
 /// 文件末尾 Footer 的魔数
@@ -16,14 +25,15 @@ pub const FOOTER_MAGIC: &[u8; 8] = b"VEILEND\0";
 pub const VERSION: u16 = 1;
 /// Footer 定长：index_offset(8) + index_len(8) + footer_magic(8) = 24 字节
 pub const FOOTER_LEN: u64 = 8 + 8 + 8;
-/// Header 里 `cip_pri_key` 之前的定长部分：magic(8)+version(2)+flags(2)+cip_pri_key_len(4) = 16 字节。
-/// 即 `cip_pri_key` 从文件偏移 16 开始（改密码时原地覆盖用）。
-pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2 + 4;
+/// Header 里固定字段长度：magic(8)+version(2)+flags(2) = 12 字节。
+/// 后面跟变长字段：cli_version_len(4) + cli_version(N) + cip_pri_key_len(4) + cip_pri_key(M)
+pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2;
 
 /// 写 Header，返回写入的字节数（= 后续第一个 blob 的起始偏移）。
 ///
 /// # 参数
 /// - `writer`:      输出目标（文件或内存缓冲）
+/// - `cli_version`: CLI 版本字符串（如 "1.1.0"）
 /// - `cip_pri_key`: 密文私钥（keys::encrypt_pri_key 的产物）
 ///
 /// # 返回
@@ -34,19 +44,26 @@ pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2 + 4;
 /// - 8 字节 magic：确认这是个 veil 容器
 /// - 2 字节 version：当前容器格式版本
 /// - 2 字节 flags：预留，暂 0
+/// - 4 字节 cli_version_len：CLI 版本字符串字节数
+/// - N 字节 cli_version：CLI 版本字符串 UTF-8
 /// - 4 字节 cip_pri_key_len：密文私钥字节数
-/// - N 字节 cip_pri_key：密文私钥内容
-pub fn write_header<W: Write>(writer: &mut W, cip_pri_key: &[u8]) -> Result<u64> {
-    writer.write_all(MAGIC)?;                                     // 8 字节
-    writer.write_all(&VERSION.to_le_bytes())?;                    // 2 字节
-    writer.write_all(&0u16.to_le_bytes())?;                       // 2 字节 flags（预留，暂 0）
-    writer.write_all(&(cip_pri_key.len() as u32).to_le_bytes())?; // 4 字节 长度
-    writer.write_all(cip_pri_key)?;                              // N 字节 内容
-    Ok(8 + 2 + 2 + 4 + cip_pri_key.len() as u64)
+/// - M 字节 cip_pri_key：密文私钥内容
+pub fn write_header<W: Write>(writer: &mut W, cli_version: &str, cip_pri_key: &[u8]) -> Result<u64> {
+    let cli_version_bytes = cli_version.as_bytes();
+
+    writer.write_all(MAGIC)?;                                           // 8 字节
+    writer.write_all(&VERSION.to_le_bytes())?;                          // 2 字节
+    writer.write_all(&0u16.to_le_bytes())?;                             // 2 字节 flags（预留，暂 0）
+    writer.write_all(&(cli_version_bytes.len() as u32).to_le_bytes())?; // 4 字节 cli_version 长度
+    writer.write_all(cli_version_bytes)?;                               // N 字节 cli_version 内容
+    writer.write_all(&(cip_pri_key.len() as u32).to_le_bytes())?;       // 4 字节 cip_pri_key 长度
+    writer.write_all(cip_pri_key)?;                                     // M 字节 cip_pri_key 内容
+
+    Ok(8 + 2 + 2 + 4 + cli_version_bytes.len() as u64 + 4 + cip_pri_key.len() as u64)
 }
 
-/// 读 Header，校验 magic/version，返回密文私钥 `cip_pri_key` 字节。
-pub fn read_header<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
+/// 读 Header，校验 magic/version，返回 Header 结构（包含 cli_version 和 cip_pri_key）。
+pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
     if &magic != MAGIC {
@@ -62,13 +79,25 @@ pub fn read_header<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
 
     reader.read_exact(&mut u16buf)?; // flags，暂时读掉不用
 
+    // 读取 cli_version
     let mut u32buf = [0u8; 4];
     reader.read_exact(&mut u32buf)?;
-    let len = u32::from_le_bytes(u32buf) as usize;
+    let cli_version_len = u32::from_le_bytes(u32buf) as usize;
+    let mut cli_version_bytes = vec![0u8; cli_version_len];
+    reader.read_exact(&mut cli_version_bytes)?;
+    let cli_version = String::from_utf8(cli_version_bytes)
+        .map_err(|e| VeilError::Format(format!("cli_version 不是有效的 UTF-8: {}", e)))?;
 
-    let mut cip_pri_key = vec![0u8; len];
+    // 读取 cip_pri_key
+    reader.read_exact(&mut u32buf)?;
+    let cip_pri_key_len = u32::from_le_bytes(u32buf) as usize;
+    let mut cip_pri_key = vec![0u8; cip_pri_key_len];
     reader.read_exact(&mut cip_pri_key)?;
-    Ok(cip_pri_key)
+
+    Ok(Header {
+        cli_version,
+        cip_pri_key,
+    })
 }
 
 /// 写 Footer（定长 24 字节），记录 Index 的位置。
@@ -107,14 +136,16 @@ mod tests {
         let mut buf = Cursor::new(Vec::new());
 
         let fake_cip_pri_key = b"pretend-this-is-cip-pri-key";
-        let header_len = write_header(&mut buf, fake_cip_pri_key).unwrap();
+        let cli_version = "1.1.0";
+        let header_len = write_header(&mut buf, cli_version, fake_cip_pri_key).unwrap();
         write_footer(&mut buf, 111, 222).unwrap();
         println!("header 长度 = {header_len} 字节");
 
         // 回到开头读 Header
         buf.set_position(0);
-        let got = read_header(&mut buf).unwrap();
-        assert_eq!(got, fake_cip_pri_key);
+        let header = read_header(&mut buf).unwrap();
+        assert_eq!(header.cip_pri_key, fake_cip_pri_key);
+        assert_eq!(header.cli_version, cli_version);
 
         // 读末尾 Footer
         let (offset, len) = read_footer(&mut buf).unwrap();

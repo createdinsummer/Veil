@@ -2,6 +2,9 @@ use anyhow::Result;
 use colored::Colorize;
 use veil_core::container::Container;
 
+/// CLI 版本（从 Cargo.toml 读取）
+const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// 创建新的加密容器。
 ///
 /// 创建一个空的 `.veil` 容器文件，使用用户提供的密码加密私钥。
@@ -35,7 +38,7 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
     println!("{}", "创建新容器...".cyan());
     let password = super::prompt_new_password(password)?;
 
-    Container::create(container_path, password)?;
+    Container::create(container_path, password, CLI_VERSION)?;
 
     println!("{} 容器创建成功: {}", "✓".green(), container_path);
     Ok(())

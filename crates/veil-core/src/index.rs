@@ -138,6 +138,40 @@ pub fn list_files(root: &Tree) -> Vec<(String, FileMeta)> {
     out
 }
 
+/// 查找匹配通配符模式的所有文件。
+///
+/// 支持 `*`（匹配任意字符，不含 `/`）和 `**`（匹配任意字符，含 `/`）。
+///
+/// # 示例
+/// - `*.jpg` - 根目录下所有 jpg 文件
+/// - `photos/*.jpg` - photos 目录下所有 jpg 文件
+/// - `**/*.jpg` - 所有子目录下的 jpg 文件
+///
+/// # 错误
+/// 如果模式无效则返回 `Err`。
+pub fn match_files(root: &Tree, pattern: &str) -> Result<Vec<(String, FileMeta)>> {
+    use glob::{Pattern, MatchOptions};
+
+    // 编译通配符模式
+    let glob_pattern = Pattern::new(pattern)
+        .map_err(|e| crate::error::VeilError::Format(format!("无效的通配符模式: {}", e)))?;
+
+    // 配置匹配选项：* 不匹配 /
+    let options = MatchOptions {
+        require_literal_separator: true, // * 不匹配 /，只有 ** 才能跨目录
+        ..Default::default()
+    };
+
+    // 获取所有文件并过滤
+    let all_files = list_files(root);
+    let matched: Vec<_> = all_files
+        .into_iter()
+        .filter(|(path, _)| glob_pattern.matches_with(path, options))
+        .collect();
+
+    Ok(matched)
+}
+
 fn collect(dir: &Tree, prefix: &str, out: &mut Vec<(String, FileMeta)>) {
     for (name, node) in dir {
         let path = if prefix.is_empty() {
@@ -202,5 +236,42 @@ mod tests {
         let bytes = serialize_index(&root).unwrap();
         let back = deserialize_index(&bytes).unwrap();
         assert_eq!(back, root);
+    }
+
+    #[test]
+    fn match_files_wildcard() {
+        let mut root = Tree::new();
+        insert_file(&mut root, "a.jpg", meta(1));
+        insert_file(&mut root, "b.png", meta(2));
+        insert_file(&mut root, "photos/2024/c.jpg", meta(3));
+        insert_file(&mut root, "photos/2024/d.png", meta(4));
+        insert_file(&mut root, "photos/2025/e.jpg", meta(5));
+        insert_file(&mut root, "docs/readme.txt", meta(6));
+
+        // 匹配根目录 jpg（* 不匹配 /）
+        let matched = match_files(&root, "*.jpg").unwrap();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].0, "a.jpg");
+
+        // 匹配特定目录下的 jpg
+        let matched = match_files(&root, "photos/2024/*.jpg").unwrap();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].0, "photos/2024/c.jpg");
+
+        // 匹配所有 jpg（递归，** 匹配任意层级目录）
+        let matched = match_files(&root, "**/*.jpg").unwrap();
+        assert_eq!(matched.len(), 3); // 所有 jpg 文件
+        let paths: Vec<_> = matched.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(paths.contains(&"a.jpg"));
+        assert!(paths.contains(&"photos/2024/c.jpg"));
+        assert!(paths.contains(&"photos/2025/e.jpg"));
+
+        // 匹配任意年份目录
+        let matched = match_files(&root, "photos/*/*.jpg").unwrap();
+        assert_eq!(matched.len(), 2);
+
+        // 无匹配
+        let matched = match_files(&root, "*.mp4").unwrap();
+        assert_eq!(matched.len(), 0);
     }
 }

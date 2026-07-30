@@ -8,6 +8,16 @@ mod commands;
 #[command(version)]
 #[command(about = format!("Veil v{} - 一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
 #[command(long_about = format!("Veil v{}\n一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
+#[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+命令:
+{subcommands}
+
+选项:
+{options}
+")]
 struct Cli {
     /// 显示版本信息
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
@@ -20,6 +30,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// 创建新容器
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Init {
         /// 容器文件路径（如 photos.veil）
         container: String,
@@ -28,11 +48,21 @@ enum Commands {
         password: Option<String>,
 
         /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password")]
+        #[arg(short, long, conflicts_with = "password", help = "容器密码（选项方式）")]
         password_opt: Option<String>,
     },
 
     /// 添加文件或目录到容器
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Add {
         /// 容器文件路径
         container: String,
@@ -60,6 +90,16 @@ enum Commands {
     },
 
     /// 从容器删除文件或目录
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Rm {
         /// 容器文件路径
         container: String,
@@ -76,6 +116,16 @@ enum Commands {
     },
 
     /// 移动/重命名容器内的文件
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Mv {
         /// 容器文件路径
         container: String,
@@ -103,6 +153,16 @@ enum Commands {
     },
 
     /// 树状显示容器内容
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Free {
         /// 容器文件路径
         container: String,
@@ -116,11 +176,21 @@ enum Commands {
     },
 
     /// 导出文件或目录
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Ex {
         /// 容器文件路径
         container: String,
 
-        /// 容器内的虚拟路径（位置参数或 -i）
+        /// 容器内的虚拟路径（位置参数或 -i，支持通配符）
         input_pos: Option<String>,
 
         /// 导出到的目标路径（位置参数或 -o）
@@ -129,7 +199,7 @@ enum Commands {
         /// 容器密码（位置参数，可选）
         password_pos: Option<String>,
 
-        /// 容器内的虚拟路径（选项方式）
+        /// 容器内的虚拟路径（选项方式，支持通配符）
         #[arg(short, long, conflicts_with = "input_pos")]
         input: Option<String>,
 
@@ -137,16 +207,22 @@ enum Commands {
         #[arg(short, long, conflicts_with = "output_pos")]
         output: Option<String>,
 
-        /// 导出全部内容
-        #[arg(short, long)]
-        all: bool,
-
         /// 容器密码（选项方式）
         #[arg(short, long, conflicts_with = "password_pos")]
         password: Option<String>,
     },
 
     /// 显示容器信息
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Info {
         /// 容器文件路径
         container: String,
@@ -160,6 +236,16 @@ enum Commands {
     },
 
     /// 修改容器密码
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Passwd {
         /// 容器文件路径
         container: String,
@@ -180,6 +266,16 @@ enum Commands {
     },
 
     /// 交互式 shell 模式（批处理）
+    #[command(help_template = "\
+{about-with-newline}
+用法: {usage}
+
+参数:
+{positionals}
+
+选项:
+{options}
+")]
     Shell {
         /// 容器文件路径
         container: String,
@@ -233,13 +329,13 @@ fn main() {
             let pwd = password_pos.or(password);
             commands::free::run(&container, pwd)
         }
-        Commands::Ex { container, input_pos, output_pos, password_pos, input, output, all, password } => {
+        Commands::Ex { container, input_pos, output_pos, password_pos, input, output, password } => {
             let inp = input_pos.or(input);
             let out = output_pos.or(output);
             let pwd = password_pos.or(password);
 
             if let Some(out) = out {
-                commands::ex::run(&container, inp.as_deref(), &out, all, pwd)
+                commands::ex::run(&container, inp.as_deref(), &out, pwd)
             } else {
                 eprintln!("❌ 错误: 请指定输出路径（位置参数或 -o）");
                 std::process::exit(1);

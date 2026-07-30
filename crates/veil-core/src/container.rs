@@ -55,6 +55,8 @@ pub struct Container {
     key_pair: age::x25519::Identity,
     /// 内存中的**嵌套**目录树
     root: Tree,
+    /// 容器创建时使用的 CLI 版本
+    cli_version: String,
     // 崩溃安全策略：所有写入都**追加到文件末尾**（永不覆盖已提交数据），
     // Footer 最后写 + fsync 作为提交点；下一个 blob / Index 都从当前 EOF 追加，
     // 所以不需要单独记 blob_end。
@@ -66,10 +68,11 @@ impl Container {
     /// # 参数
     /// - `path`:       容器文件路径（如 "photos.veil"）
     /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`）
+    /// - `cli_version`: CLI 版本字符串（如 "1.1.0"）
     /// # 返回
     /// - `Ok(Container)`：已写入磁盘的空容器句柄
     /// - `Err(VeilError)`：加密或写文件失败
-    pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
+    pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>, cli_version: &str) -> Result<Container> {
         let passphrase = passphrase.into();
         let key_pair = age::x25519::Identity::generate();
         let cip_pri_key = encrypt_pri_key(&key_pair, passphrase)?;
@@ -78,7 +81,7 @@ impl Container {
         {
             let file = File::create(path.as_ref())?;
             let mut writer = BufWriter::new(file);
-            format::write_header(&mut writer, &cip_pri_key)?;
+            format::write_header(&mut writer, cli_version, &cip_pri_key)?;
             writer.flush()?;
         }
 
@@ -86,6 +89,7 @@ impl Container {
             path: path.as_ref().to_path_buf(),
             key_pair,
             root: Tree::new(),
+            cli_version: cli_version.to_string(),
         };
         container.commit()?; // 追加空 Index + Footer
         Ok(container)
@@ -103,16 +107,21 @@ impl Container {
         let passphrase = passphrase.into();
         let path = path.as_ref().to_path_buf();
 
-        let cip_pri_key = {
+        let header = {
             let mut file = File::open(&path)?;
             format::read_header(&mut file)?
         };
-        let key_pair = decrypt_pri_key(&cip_pri_key, passphrase)?;
+        let key_pair = decrypt_pri_key(&header.cip_pri_key, passphrase)?;
 
         // 加载 Index：正常读文件尾 Footer；崩溃过则恢复到上一个有效 Footer
         let root = recover_index(&path, &key_pair)?;
 
-        Ok(Container { path, key_pair, root })
+        Ok(Container {
+            path,
+            key_pair,
+            root,
+            cli_version: header.cli_version,
+        })
     }
 
     /// 往容器里追加一个文件（同名则覆盖，旧 blob 成死空间）。
@@ -246,8 +255,10 @@ impl Container {
         Ok(())
     }
 
-    /// 修改容器密码。只用新密码重新加密**私钥**（重写 Header 那一小段 `cip_pri_key`），
+    /// 修改容器密码。只用新密码重新加密**私钥**（重写整个 Header），
     /// 几百 GB 的 blob 一个字节都不动——「两级密钥」设计的红利。
+    ///
+    /// 注意：由于 Header 现在包含可变长度的 CLI 版本字符串，我们需要重写整个文件。
     ///
     /// # 参数
     /// - `new_passphrase`: 新密码（`impl Into<SecretString>`，可直接传 `String`）
@@ -257,13 +268,31 @@ impl Container {
     pub fn change_password(&self, new_passphrase: impl Into<SecretString>) -> Result<()> {
         let new_cip_pri_key = encrypt_pri_key(&self.key_pair, new_passphrase.into())?;
 
+        // 读取旧 Header 获取 CLI 版本
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        let old_cip_pri_key = format::read_header(&mut file)?;
-        if new_cip_pri_key.len() != old_cip_pri_key.len() {
+        let old_header = format::read_header(&mut file)?;
+
+        // 生成新 Header
+        let mut new_header_bytes = Vec::new();
+        format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key)?;
+
+        // 检查新旧 Header 长度是否相同
+        let old_header_len = {
+            let mut temp_file = File::open(&self.path)?;
+            let header = format::read_header(&mut temp_file)?;
+            let mut old_bytes = Vec::new();
+            format::write_header(&mut old_bytes, &header.cli_version, &header.cip_pri_key)?;
+            old_bytes.len()
+        };
+
+        if new_header_bytes.len() != old_header_len {
             return Err(VeilError::Format("密文私钥长度变化，无法原地改密码".into()));
         }
-        file.seek(SeekFrom::Start(format::HEADER_FIXED_LEN))?;
-        file.write_all(&new_cip_pri_key)?;
+
+        // 原地覆盖 Header
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&new_header_bytes)?;
+        file.flush()?;
         Ok(())
     }
 
@@ -618,6 +647,63 @@ impl Container {
         index::get_file(&self.root, virtual_path)
     }
 
+    /// 获取容器创建时使用的 CLI 版本。
+    pub fn cli_version(&self) -> &str {
+        &self.cli_version
+    }
+
+    /// 查找匹配通配符模式的文件路径列表。
+    ///
+    /// 支持 `*`（不匹配 `/`）和 `**`（匹配任意层级）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let paths = container.find_files("**/*.jpg")?;
+    /// ```
+    pub fn find_files(&self, pattern: &str) -> Result<Vec<String>> {
+        let matched = index::match_files(&self.root, pattern)?;
+        Ok(matched.into_iter().map(|(path, _)| path).collect())
+    }
+
+    /// 删除匹配通配符模式的所有文件，返回被删除的文件路径列表。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let deleted = container.remove_matched("temp/*")?;
+    /// ```
+    pub fn remove_matched(&mut self, pattern: &str) -> Result<Vec<String>> {
+        let matched = index::match_files(&self.root, pattern)?;
+        let paths: Vec<String> = matched.iter().map(|(p, _)| p.clone()).collect();
+
+        for path in &paths {
+            index::remove_file(&mut self.root, path);
+        }
+
+        if !paths.is_empty() {
+            self.commit()?;
+        }
+
+        Ok(paths)
+    }
+
+    /// 导出匹配通配符模式的所有文件到指定目录。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// container.extract_matched("photos/**/*.jpg", "./output")?;
+    /// ```
+    pub fn extract_matched(&self, pattern: &str, out_dir: impl AsRef<Path>) -> Result<()> {
+        let matched = index::match_files(&self.root, pattern)?;
+        let out_dir = out_dir.as_ref();
+
+        for (virtual_path, _) in matched {
+            let dest = out_dir.join(&virtual_path);
+            self.extract_file(&virtual_path, dest)?;
+        }
+
+        Ok(())
+    }
+
     /// 把目录树渲染成多行字符串（类似 `tree` 命令）。
     pub fn tree_view(&self) -> String {
         let mut out = String::new();
@@ -821,6 +907,11 @@ mod tests {
         SecretString::from("correct horse".to_owned())
     }
 
+    /// 测试用 CLI 版本
+    fn test_cli_version() -> &'static str {
+        "1.1.0-test"
+    }
+
     /// 容器里的文件总数（辅助断言）。
     fn file_count(c: &Container) -> usize {
         index::list_files(c.root()).len()
@@ -829,7 +920,7 @@ mod tests {
     #[test]
     fn create_open_empty() {
         let path = temp_path("empty.veil");
-        Container::create(&path, pass()).unwrap();
+        Container::create(&path, pass(), test_cli_version()).unwrap();
         let container = Container::open(&path, pass()).unwrap();
         assert!(container.root().is_empty());
         std::fs::remove_file(&path).ok();
@@ -838,7 +929,7 @@ mod tests {
     #[test]
     fn add_read_roundtrip() {
         let path = temp_path("rt.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("a.txt", b"hello").unwrap();
         container.add_file("dir/b.bin", &[0u8, 1, 2, 255]).unwrap();
 
@@ -854,7 +945,7 @@ mod tests {
     #[test]
     fn wrong_passphrase_fails() {
         let path = temp_path("wp.veil");
-        Container::create(&path, pass()).unwrap();
+        Container::create(&path, pass(), test_cli_version()).unwrap();
         assert!(Container::open(&path, SecretString::from("nope".to_owned())).is_err());
         std::fs::remove_file(&path).ok();
     }
@@ -862,7 +953,7 @@ mod tests {
     #[test]
     fn remove_then_missing() {
         let path = temp_path("rm.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("keep.txt", b"1").unwrap();
         container.add_file("gone.txt", b"2").unwrap();
         container.remove_file("gone.txt").unwrap();
@@ -879,7 +970,7 @@ mod tests {
     #[test]
     fn read_missing_file_errors() {
         let path = temp_path("miss.veil");
-        let container = Container::create(&path, pass()).unwrap();
+        let container = Container::create(&path, pass(), test_cli_version()).unwrap();
         assert!(container.read_file("nope.txt").is_err());
         std::fs::remove_file(&path).ok();
     }
@@ -887,7 +978,7 @@ mod tests {
     #[test]
     fn add_file_fills_mime() {
         let path = temp_path("mime.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("a.jpg", b"x").unwrap();
         container.add_file("notes", b"y").unwrap();
 
@@ -901,7 +992,7 @@ mod tests {
     #[test]
     fn add_file_overwrites_same_path() {
         let path = temp_path("overwrite.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("a.txt", b"first").unwrap();
         container.add_file("a.txt", b"second-longer").unwrap();
 
@@ -918,7 +1009,7 @@ mod tests {
     #[test]
     fn change_password_works() {
         let path = temp_path("chpw.veil");
-        let mut container = Container::create(&path, "old-pass".to_string()).unwrap();
+        let mut container = Container::create(&path, "old-pass".to_string(), test_cli_version()).unwrap();
         container.add_file("f.txt", b"data").unwrap();
         container.change_password("new-pass".to_string()).unwrap();
 
@@ -932,7 +1023,7 @@ mod tests {
     #[test]
     fn rename_file_works() {
         let path = temp_path("rename.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("a.txt", b"hi").unwrap();
         container.rename_file("a.txt", "sub/b.md").unwrap();
 
@@ -950,7 +1041,7 @@ mod tests {
     #[test]
     fn extract_dir_subtree() {
         let path = temp_path("exdir.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("photos/2024/a.txt", b"A").unwrap();
         container.add_file("photos/b.txt", b"B").unwrap();
         container.add_file("docs/c.txt", b"C").unwrap();
@@ -973,7 +1064,7 @@ mod tests {
         std::fs::write(src.join("nested/deep.bin"), b"deep").unwrap();
 
         let path = temp_path("adddir.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_dir(&src, "imported").unwrap();
 
         let reopened = Container::open(&path, pass()).unwrap();
@@ -987,7 +1078,7 @@ mod tests {
     #[test]
     fn extract_to_temp_and_auto_cleanup() {
         let path = temp_path("tmp.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("clip.mp4", b"fake video bytes").unwrap();
 
         let temp_file_path;
@@ -1005,7 +1096,7 @@ mod tests {
     #[test]
     fn read_range_random_access() {
         let path = temp_path("range.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("data.bin", b"0123456789ABCDEF").unwrap();
 
         let reopened = Container::open(&path, pass()).unwrap();
@@ -1019,7 +1110,7 @@ mod tests {
     #[test]
     fn crash_recovery_truncates_garbage() {
         let path = temp_path("crash.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("a.txt", b"hello").unwrap();
         container.add_file("b.txt", b"world").unwrap();
         drop(container);
@@ -1042,7 +1133,7 @@ mod tests {
     #[test]
     fn verify_all_detects_corruption() {
         let path = temp_path("verify.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("good.txt", b"ok").unwrap();
         container.add_file("bad.txt", b"will be tampered").unwrap();
         assert!(container.verify_all().is_empty()); // 全好
@@ -1070,7 +1161,7 @@ mod tests {
     #[test]
     fn tamper_is_detected() {
         let path = temp_path("tamper.veil");
-        let mut container = Container::create(&path, pass()).unwrap();
+        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
         container.add_file("secret.txt", b"top secret content").unwrap();
 
         let meta = container.get_file("secret.txt").unwrap();

@@ -6,7 +6,7 @@ fn main() -> veil_core::error::Result<()> {
     let pass = || SecretString::from("correct horse".to_owned());
 
     // 创建 → 加几个文件
-    let mut container = Container::create(path, pass())?;
+    let mut container = Container::create(path, pass(), "1.1.0")?;
     container.add_file("hello.txt", b"Hello, Veil!")?;
     container.add_file("photos/2024/a.jpg", b"fake jpg bytes")?;
     container.add_file("photos/2024/b.jpg", b"another jpg")?;
