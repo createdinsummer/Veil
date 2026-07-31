@@ -19,10 +19,6 @@ mod commands;
 {options}
 ")]
 struct Cli {
-    /// 显示版本信息
-    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
-    version: (),
-
     #[command(subcommand)]
     command: Commands,
 }
