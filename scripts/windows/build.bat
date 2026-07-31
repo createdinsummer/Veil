@@ -1,15 +1,15 @@
 @echo off
-REM Veil Windows 构建脚本 (批处理版本)
-REM 简单易用的批处理构建脚本
+REM Veil Windows Build Script (Batch version)
+REM Simple batch build script
 
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo   Veil Windows 构建脚本
+echo   Veil Windows Build Script
 echo ========================================
 echo.
 
-REM 检查参数
+REM Check arguments
 set BUILD_TYPE=debug
 set RUN_TESTS=0
 set CLEAN=0
@@ -32,50 +32,53 @@ shift
 goto :parse_args
 :end_parse
 
-REM 显示帮助
+goto :main
+
+REM Show help
 :show_help
-echo 用法: build.bat [选项]
+echo Usage: build.bat [options]
 echo.
-echo 选项:
-echo   release, -r        编译 Release 版本
-echo   test, -t           编译后运行测试
-echo   clean, -c          清理构建缓存
-echo   help, -h           显示此帮助
+echo Options:
+echo   release, -r        Build release version
+echo   test, -t           Run tests after build
+echo   clean, -c          Clean build cache
+echo   help, -h           Show this help
 echo.
-echo 示例:
-echo   build.bat              # Debug 编译
-echo   build.bat release      # Release 编译
-echo   build.bat release test # Release 编译并测试
-echo   build.bat clean        # 清理缓存
+echo Examples:
+echo   build.bat              # Debug build
+echo   build.bat release      # Release build
+echo   build.bat release test # Release build and test
+echo   build.bat clean        # Clean cache
 exit /b 0
 
-REM 清理
+:main
+REM Clean
 if %CLEAN%==1 (
-    echo [*] 清理构建缓存...
+    echo [*] Cleaning build cache...
     if exist target (
         rmdir /s /q target
-        echo [+] 构建缓存已清理
+        echo [+] Build cache cleaned
     ) else (
-        echo [*] 无需清理，构建缓存不存在
+        echo [*] No cache to clean
     )
     exit /b 0
 )
 
-REM 检查 Rust
-echo [*] 检查 Rust 环境...
+REM Check Rust
+echo [*] Checking Rust environment...
 where cargo >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] 未找到 Cargo！
-    echo [!] 请先安装 Rust: https://rustup.rs/
+    echo [X] Cargo not found!
+    echo [X] Please install Rust: https://rustup.rs/
     exit /b 1
 )
 
 for /f "tokens=*" %%i in ('cargo --version') do set RUST_VERSION=%%i
-echo [+] 找到 Rust: %RUST_VERSION%
+echo [+] Found Rust: %RUST_VERSION%
 echo.
 
-REM 开始构建
-echo [*] 开始构建 Veil (%BUILD_TYPE% 模式)...
+REM Start build
+echo [*] Building Veil (%BUILD_TYPE% mode)...
 echo.
 
 set START_TIME=%time%
@@ -88,43 +91,41 @@ if "%BUILD_TYPE%"=="release" (
 
 if %errorlevel% neq 0 (
     echo.
-    echo [!] 构建失败
+    echo [X] Build failed
     exit /b 1
 )
 
 echo.
-echo [+] 构建成功！
+echo [+] Build successful!
 
-REM 显示二进制文件信息
+REM Show binary info
 set BINARY_PATH=target\%BUILD_TYPE%\veil.exe
 if exist "%BINARY_PATH%" (
-    for %%A in ("%BINARY_PATH%") do set SIZE=%%~zA
-    set /a SIZE_MB=!SIZE! / 1048576
-    echo [*] 二进制文件: %BINARY_PATH% (!SIZE_MB! MB)
+    echo [*] Binary: %BINARY_PATH%
 )
 
-REM 运行测试
+REM Run tests
 if %RUN_TESTS%==1 (
     echo.
-    echo [*] 运行测试...
+    echo [*] Running tests...
     echo.
     cargo test --workspace
     if %errorlevel% neq 0 (
         echo.
-        echo [!] 测试失败
+        echo [X] Tests failed
         exit /b 1
     )
     echo.
-    echo [+] 所有测试通过！
+    echo [+] All tests passed!
 )
 
-REM 显示下一步
+REM Show next steps
 echo.
-echo [*] 下一步操作:
-echo   1. 运行程序: .\target\%BUILD_TYPE%\veil.exe --help
-echo   2. 运行测试: .\build.bat test
+echo [*] Next steps:
+echo   1. Run program: .\target\%BUILD_TYPE%\veil.exe --help
+echo   2. Run tests: .\build.bat test
 if "%BUILD_TYPE%"=="debug" (
-    echo   3. 编译优化版本: .\build.bat release
+    echo   3. Build release: .\build.bat release
 )
 echo.
 
