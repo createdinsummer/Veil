@@ -600,6 +600,7 @@ fn command_on_nonexistent_container_fails() {
 }
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore)] // Windows上交互式输入会挂起
 fn command_without_password_fails() {
     let temp_dir = setup();
     let container = init_container(&temp_dir, "pass");
