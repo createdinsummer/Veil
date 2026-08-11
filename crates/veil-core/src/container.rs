@@ -550,10 +550,27 @@ impl Container {
     /// - `Ok(())`：文件已解密并写入 `dest`
     /// - `Err(VeilError)`：找不到文件、校验失败或写盘失败
     pub fn extract_file(&self, virtual_path: &str, dest: impl AsRef<Path>) -> Result<()> {
+        self.extract_file_with_progress(virtual_path, dest, |_, _| {})
+    }
+
+    /// 按虚拟路径流式解密**单个**文件到 `dest`，边导出边回调进度。
+    ///
+    /// 回调参数为 `(已导出字节数, 文件总字节数)`，每读完一块调用一次，
+    /// 供进度条等 UI 实时刷新。其余行为与 [`extract_file`](Self::extract_file) 一致。
+    pub fn extract_file_with_progress<F>(
+        &self,
+        virtual_path: &str,
+        dest: impl AsRef<Path>,
+        mut progress_callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64, u64),
+    {
         use std::io::BufWriter;
 
         let dest = dest.as_ref();
         let meta = self.file_meta(virtual_path)?;
+        let total_size = meta.size;
 
         if let Some(parent) = dest.parent()
             && !parent.as_os_str().is_empty()
@@ -568,6 +585,7 @@ impl Container {
         // 边读边校验 hash
         let mut hasher = blake3::Hasher::new();
         let mut buffer = [0u8; 64 * 1024];
+        let mut exported = 0u64;
 
         loop {
             let n = reader.read(&mut buffer)?;
@@ -576,6 +594,8 @@ impl Container {
             }
             hasher.update(&buffer[..n]);
             writer.write_all(&buffer[..n])?;
+            exported += n as u64;
+            progress_callback(exported, total_size);
         }
 
         writer.flush()?;
@@ -608,11 +628,7 @@ impl Container {
             }
             let rel = path.strip_prefix(&prefix).unwrap_or(&path);
             let dest = out_dir.join(rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let plaintext = self.read_file(&path)?;
-            std::fs::write(&dest, plaintext)?;
+            self.extract_file(&path, dest)?;
         }
         Ok(())
     }

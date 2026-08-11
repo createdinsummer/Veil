@@ -206,6 +206,34 @@ fn test_extract_file() {
 }
 
 #[test]
+fn test_extract_file_with_progress() {
+    let temp_dir = TempDir::new("extract_progress");
+    let container_path = temp_dir.path().join("test.veil");
+    let extract_path = temp_dir.path().join("extracted.bin");
+
+    // 内容超过一个 64KB 块，确保回调被调用多次
+    let content = vec![0xABu8; 128 * 1024 + 17];
+
+    let mut container = Container::create(&container_path, "password", "test/1.0.0").unwrap();
+    container.add_file("big.bin", &content).unwrap();
+
+    let mut last = 0u64;
+    let mut calls = 0usize;
+    container
+        .extract_file_with_progress("big.bin", &extract_path, |done, total| {
+            assert!(done > last, "进度只增不减");
+            last = done;
+            assert_eq!(total, content.len() as u64);
+            calls += 1;
+        })
+        .unwrap();
+
+    assert_eq!(last, content.len() as u64);
+    assert!(calls >= 2, "跨块导出时应多次回调");
+    assert_eq!(fs::read(&extract_path).unwrap(), content);
+}
+
+#[test]
 fn test_persistence_after_reopen() {
     let temp_dir = TempDir::new("persistence");
     let container_path = temp_dir.path().join("test.veil");

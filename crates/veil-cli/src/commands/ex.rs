@@ -1,8 +1,26 @@
 use anyhow::Result;
 use colored::Colorize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use veil_core::container::Container;
 use indicatif::{ProgressBar, ProgressStyle};
+
+/// 批量导出文件并实时推进字节进度条。
+fn export_files_with_progress(
+    container: &Container,
+    files: &[(String, u64)],
+    pb: &ProgressBar,
+    mut dest_for: impl FnMut(&str) -> PathBuf,
+) -> Result<()> {
+    let mut exported = 0u64;
+    for (virtual_path, size) in files {
+        let dest = dest_for(virtual_path);
+        container.extract_file_with_progress(virtual_path, dest, |done, _| {
+            pb.set_position(exported + done);
+        })?;
+        exported += *size;
+    }
+    Ok(())
+}
 
 /// 导出文件或目录到本地文件系统。
 ///
@@ -62,19 +80,37 @@ pub fn run(
 
             println!("{} 找到 {} 个匹配的文件", "✓".green(), matched.len());
 
+            let files: Vec<(String, u64)> = matched
+                .iter()
+                .filter_map(|p| container.get_file(p).map(|meta| (p.clone(), meta.size)))
+                .collect();
+            let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
+
             // 创建进度条
-            let pb = ProgressBar::new(matched.len() as u64);
+            let pb = ProgressBar::new(total_size);
             pb.set_style(ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 ({eta})")
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                 .unwrap()
                 .progress_chars("#>-"));
 
-            container.extract_matched(path, output)?;
+            let result = export_files_with_progress(
+                &container,
+                &files,
+                &pb,
+                |virtual_path| PathBuf::from(output).join(virtual_path),
+            );
 
-            pb.set_position(matched.len() as u64);
-            pb.finish_with_message(format!("{}", "完成".green()));
+            match result {
+                Ok(()) => {
+                    pb.finish_with_message(format!("{}", "完成".green()));
+                    println!("{} 导出完成", "✓".green());
+                }
+                Err(e) => {
+                    pb.abandon_with_message(format!("{}", "失败".red()));
+                    return Err(e);
+                }
+            }
 
-            println!("{} 导出完成", "✓".green());
         } else {
             // 精确路径匹配（原有逻辑）
             let output_path = Path::new(output);
@@ -91,35 +127,71 @@ pub fn run(
                     .unwrap()
                     .progress_chars("#>-"));
 
-                container.extract_file(path, output_path)?;
+                let files = vec![(path.to_string(), meta.size)];
+                let result = export_files_with_progress(
+                    &container,
+                    &files,
+                    &pb,
+                    |_| PathBuf::from(output),
+                );
 
-                pb.set_position(meta.size);
-                pb.finish_with_message(format!("{}", "完成".green()));
+                match result {
+                    Ok(()) => {
+                        pb.finish_with_message(format!("{}", "完成".green()));
+                        println!("{} 文件已导出: {}", "✓".green(), output);
+                    }
+                    Err(e) => {
+                        pb.abandon_with_message(format!("{}", "失败".red()));
+                        return Err(e);
+                    }
+                }
 
-                println!("{} 文件已导出: {}", "✓".green(), output);
             } else {
                 // 尝试作为目录导出
                 println!("{} 正在导出目录: {} -> {}", "→".blue(), path, output);
 
-                // 统计目录下的文件数
-                let files = veil_core::index::list_files(container.root());
-                let dir_file_count = files.iter()
-                    .filter(|(p, _)| p.starts_with(path))
-                    .count();
+                let prefix = format!("{}/", path.trim_end_matches('/'));
+                let files: Vec<(String, u64)> = veil_core::index::list_files(container.root())
+                    .into_iter()
+                    .filter(|(p, _)| p.starts_with(&prefix))
+                    .map(|(p, meta)| (p, meta.size))
+                    .collect();
+
+                if files.is_empty() {
+                    println!("{} 目录为空，无文件导出", "→".yellow());
+                    return Ok(());
+                }
+
+                let total_size: u64 = files.iter().map(|(_, size)| *size).sum();
 
                 // 创建进度条
-                let pb = ProgressBar::new(dir_file_count as u64);
+                let pb = ProgressBar::new(total_size);
                 pb.set_style(ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 ({eta})")
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                     .unwrap()
                     .progress_chars("#>-"));
 
-                container.extract_dir(path, output_path)?;
+                let result = export_files_with_progress(
+                    &container,
+                    &files,
+                    &pb,
+                    |virtual_path| {
+                        let rel = virtual_path.strip_prefix(&prefix).unwrap_or(virtual_path);
+                        PathBuf::from(output).join(rel)
+                    },
+                );
 
-                pb.set_position(dir_file_count as u64);
-                pb.finish_with_message(format!("{}", "完成".green()));
+                match result {
+                    Ok(()) => {
+                        pb.finish_with_message(format!("{}", "完成".green()));
+                        println!("{} 目录已导出完成", "✓".green());
+                    }
+                    Err(e) => {
+                        pb.abandon_with_message(format!("{}", "失败".red()));
+                        return Err(e);
+                    }
+                }
 
-                println!("{} 目录已导出完成", "✓".green());
             }
         }
     } else {
