@@ -36,11 +36,11 @@ use veil_core::index;
 ///   总大小: 1234 字节 (0.00 MB)
 /// ```
 pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     let container = Container::open(container_path, password)?;
 
-    println!("\n{}", "容器内容:".cyan().bold());
+    println!("\n{}", crate::i18n::t("free.title").cyan().bold());
     print!("{}", container.tree_view());
 
     // 统计信息
@@ -48,9 +48,9 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
     let file_count = files.len();
     let total_size: u64 = files.iter().map(|(_, meta)| meta.size).sum();
 
-    println!("\n{}", "统计信息:".cyan());
-    println!("  文件数量: {}", file_count);
-    println!("  总大小: {} 字节 ({:.2} MB)", total_size, total_size as f64 / 1_048_576.0);
+    println!("\n{}", crate::i18n::t("free.stats_title").cyan());
+    println!("{}", crate::i18n::t1("free.file_count", "count", &file_count.to_string()));
+    println!("{}", crate::i18n::t2("free.total_size", "bytes", &total_size.to_string(), "mb", &format!("{:.2}", total_size as f64 / 1_048_576.0)));
 
     Ok(())
 }

@@ -25,14 +25,14 @@ use veil_core::container::Container;
 /// veil mv photos.veil -i old.jpg -o archive/old.jpg -p mypass
 /// ```
 pub fn run(container_path: &str, from: &str, to: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
-    println!("{}", "正在打开容器...".cyan());
+    println!("{}", crate::i18n::t("opening_container").cyan());
     let mut container = Container::open(container_path, password)?;
 
-    println!("{} 正在移动: {} -> {}", "→".blue(), from, to);
+    println!("{}", crate::i18n::t2("mv.moving", "from", from, "to", to).blue());
     container.rename_file(from, to)?;
 
-    println!("{} 已移动: {} -> {}", "✓".green(), from, to);
+    println!("{}", crate::i18n::t2("mv.moved", "from", from, "to", to).green());
     Ok(())
 }

@@ -32,14 +32,14 @@ const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
     // 检查文件是否已存在
     if std::path::Path::new(container_path).exists() {
-        anyhow::bail!("容器文件已存在: {}", container_path);
+        anyhow::bail!("{}", crate::i18n::t1("init.exists", "path", container_path));
     }
 
-    println!("{}", "创建新容器...".cyan());
+    println!("{}", crate::i18n::t("init.creating").cyan());
     let password = super::prompt_new_password(password)?;
 
     Container::create(container_path, password, CLI_VERSION)?;
 
-    println!("{} 容器创建成功: {}", "✓".green(), container_path);
+    println!("{}", crate::i18n::t1("init.created", "path", container_path).green());
     Ok(())
 }

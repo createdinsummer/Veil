@@ -28,30 +28,30 @@ use veil_core::container::Container;
 /// veil rm photos.veil "**/*.log" mypass
 /// ```
 pub fn run(container_path: &str, virtual_path: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
-    println!("{}", "正在打开容器...".cyan());
+    println!("{}", crate::i18n::t("opening_container").cyan());
     let mut container = Container::open(container_path, password)?;
 
     // 检查是否包含通配符
     if virtual_path.contains('*') {
         // 通配符模式匹配
-        println!("{} 正在查找匹配的文件: {}", "→".blue(), virtual_path);
+        println!("{}", crate::i18n::t1("rm.searching", "pattern", virtual_path).blue());
         let deleted = container.remove_matched(virtual_path)?;
 
         if deleted.is_empty() {
-            println!("{} 未找到匹配的文件", "⚠".yellow());
+            println!("{}", crate::i18n::t("rm.no_matches").yellow());
         } else {
-            println!("{} 已删除 {} 个文件:", "✓".green(), deleted.len());
+            println!("{}", crate::i18n::t1("rm.deleted_count", "count", &deleted.len().to_string()).green());
             for path in deleted {
                 println!("  - {}", path);
             }
         }
     } else {
         // 精确路径匹配（原有逻辑）
-        println!("{} 正在删除: {}", "→".blue(), virtual_path);
+        println!("{}", crate::i18n::t1("rm.deleting", "path", virtual_path).blue());
         container.remove_file(virtual_path)?;
-        println!("{} 已删除: {}", "✓".green(), virtual_path);
+        println!("{}", crate::i18n::t1("rm.deleted", "path", virtual_path).green());
     }
 
     Ok(())

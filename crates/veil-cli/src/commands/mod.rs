@@ -80,11 +80,11 @@ pub fn prompt_new_password(
     }
 
     // 交互式输入并确认（不回显）
-    let password = rpassword::prompt_password("请输入密码: ")?;
-    let confirm = rpassword::prompt_password("请再次输入密码: ")?;
+    let password = rpassword::prompt_password(crate::i18n::t("prompt.new_password"))?;
+    let confirm = rpassword::prompt_password(crate::i18n::t("prompt.confirm_password"))?;
 
     if password != confirm {
-        anyhow::bail!("两次输入的密码不一致");
+        anyhow::bail!("{}", crate::i18n::t("error.password_mismatch"));
     }
 
     Ok(age::secrecy::SecretString::from(password))

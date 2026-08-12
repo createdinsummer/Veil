@@ -1,23 +1,11 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod commands;
+mod i18n;
 
-/// Veil - 一个简单、安全、高效的文件加密容器工具
+/// (默认中文，运行时根据 VEIL_LANG 覆写)
 #[derive(Parser)]
-#[command(name = "veil")]
-#[command(version)]
-#[command(about = format!("Veil v{} - 一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
-#[command(long_about = format!("Veil v{}\n一个简单、安全、高效的文件加密容器工具", env!("CARGO_PKG_VERSION")))]
-#[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-命令:
-{subcommands}
-
-选项:
-{options}
-")]
+#[command(name = "veil", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -25,275 +13,347 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 创建新容器
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Init {
-        /// 容器文件路径（如 photos.veil）
-        container: String,
-
-        /// 容器密码（位置参数或 -p 选项）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "密码")]
         password: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password", help = "容器密码（选项方式）")]
+        #[arg(short, long, conflicts_with = "password", value_name = "密码")]
         password_opt: Option<String>,
     },
 
-    /// 添加文件或目录到容器
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Add {
-        /// 容器文件路径
-        container: String,
-
-        /// 源文件或目录路径（容器外部，位置参数或 -i）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "源路径")]
         input_pos: Option<String>,
-
-        /// 容器内的目标路径（位置参数或 -o，可选）
+        #[arg(value_name = "目标路径")]
         output_pos: Option<String>,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 源文件或目录路径（选项方式）
-        #[arg(short, long, conflicts_with = "input_pos")]
+        #[arg(short, long, conflicts_with = "input_pos", value_name = "路径")]
         input: Option<String>,
-
-        /// 容器内的目标路径（选项方式）
-        #[arg(short, long, conflicts_with = "output_pos")]
+        #[arg(short, long, conflicts_with = "output_pos", value_name = "路径")]
         output: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 从容器删除文件或目录
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Rm {
-        /// 容器文件路径
-        container: String,
-
-        /// 要删除的虚拟路径
-        path: String,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "路径")]
+        path: Option<String>,
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 移动/重命名容器内的文件
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Mv {
-        /// 容器文件路径
-        container: String,
-
-        /// 源路径（位置参数或 -i，容器内）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "源路径")]
         from_pos: Option<String>,
-
-        /// 目标路径（位置参数或 -o，容器内）
+        #[arg(value_name = "目标路径")]
         to_pos: Option<String>,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 源路径（选项方式，容器内）
-        #[arg(short, long, conflicts_with = "from_pos")]
+        #[arg(short, long, conflicts_with = "from_pos", value_name = "路径")]
         input: Option<String>,
-
-        /// 目标路径（选项方式，容器内）
-        #[arg(short, long, conflicts_with = "to_pos")]
+        #[arg(short, long, conflicts_with = "to_pos", value_name = "路径")]
         output: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 树状显示容器内容
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Free {
-        /// 容器文件路径
-        container: String,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 导出文件或目录
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Ex {
-        /// 容器文件路径
-        container: String,
-
-        /// 容器内的虚拟路径（位置参数或 -i，支持通配符）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "输入路径")]
         input_pos: Option<String>,
-
-        /// 导出到的目标路径（位置参数或 -o）
+        #[arg(value_name = "输出路径")]
         output_pos: Option<String>,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 容器内的虚拟路径（选项方式，支持通配符）
-        #[arg(short, long, conflicts_with = "input_pos")]
+        #[arg(short, long, conflicts_with = "input_pos", value_name = "路径")]
         input: Option<String>,
-
-        /// 导出到的目标路径（选项方式）
-        #[arg(short, long, conflicts_with = "output_pos")]
+        #[arg(short, long, conflicts_with = "output_pos", value_name = "路径")]
         output: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 显示容器信息
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Info {
-        /// 容器文件路径
-        container: String,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 
-    /// 修改容器密码
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Passwd {
-        /// 容器文件路径
-        container: String,
-
-        /// 当前密码（位置参数，可选）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "旧密码")]
         old_password_pos: Option<String>,
-
-        /// 新密码（位置参数，可选）
+        #[arg(value_name = "新密码")]
         new_password_pos: Option<String>,
-
-        /// 当前密码（选项方式）
-        #[arg(short, long, conflicts_with = "old_password_pos")]
+        #[arg(short, long, conflicts_with = "old_password_pos", value_name = "密码")]
         password: Option<String>,
-
-        /// 新密码（选项方式）
-        #[arg(short = 'n', long, conflicts_with = "new_password_pos")]
+        #[arg(short = 'n', long, conflicts_with = "new_password_pos", value_name = "密码")]
         new_password: Option<String>,
     },
 
-    /// 交互式 shell 模式（批处理）
-    #[command(help_template = "\
-{about-with-newline}
-用法: {usage}
-
-参数:
-{positionals}
-
-选项:
-{options}
-")]
+    /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Shell {
-        /// 容器文件路径
-        container: String,
-
-        /// 容器密码（位置参数，可选）
+        #[arg(value_name = "容器文件")]
+        container: Option<String>,
+        #[arg(value_name = "密码")]
         password_pos: Option<String>,
-
-        /// 容器密码（选项方式）
-        #[arg(short, long, conflicts_with = "password_pos")]
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
 }
 
+/// 用当前语言覆写所有 clap 显示字符串（about、usage、help_template、arg value_name / help）
+fn build_localized_command() -> clap::Command {
+    let mut cmd = Cli::command()
+        .about(i18n::clap_about())
+        .long_about(i18n::clap_long_about())
+        .help_template(i18n::t("clap.help_template"));
+
+    let sub_template = i18n::t("clap.sub_help_template");
+    let v_container = i18n::t("arg.container");
+    let v_password = i18n::t("arg.password");
+    let v_path = i18n::t("arg.path");
+    let v_source = i18n::t("arg.source_path");
+    let v_dest = i18n::t("arg.dest_path");
+    let v_input = i18n::t("arg.input_path");
+    let v_output = i18n::t("arg.output_path");
+    let v_old_pw = i18n::t("arg.old_password");
+    let v_new_pw = i18n::t("arg.new_password");
+
+    // --- init ---
+    cmd = cmd.mut_subcommand("init", |sub| {
+        sub.about(i18n::t("cmd.init.about"))
+            .override_usage(i18n::t("cmd.init.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| {
+                a.value_name(v_container)
+                    .help(i18n::t("help.init.container"))
+            })
+            .mut_arg("password", |a| {
+                a.value_name(v_password)
+                    .help(i18n::t("help.init.password"))
+            })
+            .mut_arg("password_opt", |a| {
+                a.value_name(v_password)
+                    .help(i18n::t("help.init.password_opt"))
+            })
+    });
+
+    // --- add ---
+    cmd = cmd.mut_subcommand("add", |sub| {
+        sub.about(i18n::t("cmd.add.about"))
+            .override_usage(i18n::t("cmd.add.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("input_pos", |a| a.value_name(v_input).help(i18n::t("help.add.input_pos")))
+            .mut_arg("output_pos", |a| a.value_name(v_output).help(i18n::t("help.add.output_pos")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("input", |a| a.value_name(v_path).help(i18n::t("help.add.input")))
+            .mut_arg("output", |a| a.value_name(v_path).help(i18n::t("help.add.output")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- rm ---
+    cmd = cmd.mut_subcommand("rm", |sub| {
+        sub.about(i18n::t("cmd.rm.about"))
+            .override_usage(i18n::t("cmd.rm.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("path", |a| a.value_name(v_path).help(i18n::t("help.rm.path")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- mv ---
+    cmd = cmd.mut_subcommand("mv", |sub| {
+        sub.about(i18n::t("cmd.mv.about"))
+            .override_usage(i18n::t("cmd.mv.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("from_pos", |a| a.value_name(v_source).help(i18n::t("help.mv.from_pos")))
+            .mut_arg("to_pos", |a| a.value_name(v_dest).help(i18n::t("help.mv.to_pos")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("input", |a| a.value_name(v_path).help(i18n::t("help.mv.input")))
+            .mut_arg("output", |a| a.value_name(v_path).help(i18n::t("help.mv.output")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- free ---
+    cmd = cmd.mut_subcommand("free", |sub| {
+        sub.about(i18n::t("cmd.free.about"))
+            .override_usage(i18n::t("cmd.free.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- ex ---
+    cmd = cmd.mut_subcommand("ex", |sub| {
+        sub.about(i18n::t("cmd.ex.about"))
+            .override_usage(i18n::t("cmd.ex.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("input_pos", |a| a.value_name(v_input).help(i18n::t("help.ex.input_pos")))
+            .mut_arg("output_pos", |a| a.value_name(v_output).help(i18n::t("help.ex.output_pos")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("input", |a| a.value_name(v_path).help(i18n::t("help.ex.input")))
+            .mut_arg("output", |a| a.value_name(v_path).help(i18n::t("help.ex.output")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- info ---
+    cmd = cmd.mut_subcommand("info", |sub| {
+        sub.about(i18n::t("cmd.info.about"))
+            .override_usage(i18n::t("cmd.info.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    // --- passwd ---
+    cmd = cmd.mut_subcommand("passwd", |sub| {
+        sub.about(i18n::t("cmd.passwd.about"))
+            .override_usage(i18n::t("cmd.passwd.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("old_password_pos", |a| {
+                a.value_name(v_old_pw)
+                    .help(i18n::t("help.passwd.old_password_pos"))
+            })
+            .mut_arg("new_password_pos", |a| {
+                a.value_name(v_new_pw)
+                    .help(i18n::t("help.passwd.new_password_pos"))
+            })
+            .mut_arg("password", |a| {
+                a.value_name(v_password)
+                    .help(i18n::t("help.passwd.password"))
+            })
+            .mut_arg("new_password", |a| {
+                a.value_name(v_password)
+                    .help(i18n::t("help.passwd.new_password"))
+            })
+    });
+
+    // --- shell ---
+    cmd = cmd.mut_subcommand("shell", |sub| {
+        sub.about(i18n::t("cmd.shell.about"))
+            .override_usage(i18n::t("cmd.shell.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| a.value_name(v_container).help(i18n::t("help.container")))
+            .mut_arg("password_pos", |a| a.value_name(v_password).help(i18n::t("help.password_pos")))
+            .mut_arg("password", |a| a.value_name(v_password).help(i18n::t("help.password_opt")))
+    });
+
+    cmd
+}
+
+/// 查找命令用法
+fn cmd_usage(cmd_name: &str) -> &str {
+    match cmd_name {
+        "init" => i18n::t("cmd.init.usage"),
+        "add" => i18n::t("cmd.add.usage"),
+        "rm" => i18n::t("cmd.rm.usage"),
+        "mv" => i18n::t("cmd.mv.usage"),
+        "free" => i18n::t("cmd.free.usage"),
+        "ex" => i18n::t("cmd.ex.usage"),
+        "info" => i18n::t("cmd.info.usage"),
+        "passwd" => i18n::t("cmd.passwd.usage"),
+        "shell" => i18n::t("cmd.shell.usage"),
+        _ => "",
+    }
+}
+
+/// 查找命令选项参数用法
+fn cmd_usage_opt(cmd_name: &str) -> &str {
+    match cmd_name {
+        "init" => i18n::t("cmd.init.usage_opt"),
+        "add" => i18n::t("cmd.add.usage_opt"),
+        "rm" => i18n::t("cmd.rm.usage_opt"),
+        "mv" => i18n::t("cmd.mv.usage_opt"),
+        "free" => i18n::t("cmd.free.usage_opt"),
+        "ex" => i18n::t("cmd.ex.usage_opt"),
+        "info" => i18n::t("cmd.info.usage_opt"),
+        "passwd" => i18n::t("cmd.passwd.usage_opt"),
+        "shell" => i18n::t("cmd.shell.usage_opt"),
+        _ => "",
+    }
+}
+
+
+/// 打印错误 + 两种用法（位置参数 / 选项参数），然后退出
+fn exit_with_help(error_key: &str, cmd_name: &str) -> ! {
+    eprintln!("{}", i18n::t(error_key));
+    eprintln!("\n{}:", i18n::t("label.usage"));
+    eprintln!("  {}", cmd_usage(cmd_name));
+    eprintln!("  {}", cmd_usage_opt(cmd_name));
+    std::process::exit(1);
+}
+
+fn require_container(container: Option<String>, cmd_name: &str) -> String {
+    container.unwrap_or_else(|| exit_with_help("error.require_container", cmd_name))
+}
+
 fn main() {
-    let cli = Cli::parse();
+    i18n::init();
+
+    let cmd = build_localized_command();
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("参数解析失败");
 
     let result = match cli.command {
-        Commands::Init { container, password, password_opt } => {
+        Commands::Init {
+            container,
+            password,
+            password_opt,
+        } => {
+            let container = require_container(container, "init");
             let pwd = password.or(password_opt);
             commands::init::run(&container, pwd)
         }
-        Commands::Add { container, input_pos, output_pos, password_pos, input, output, password } => {
+        Commands::Add {
+            container,
+            input_pos,
+            output_pos,
+            password_pos,
+            input,
+            output,
+            password,
+        } => {
+            let container = require_container(container, "add");
             let inp = input_pos.or(input);
             let out = output_pos.or(output);
             let pwd = password_pos.or(password);
@@ -301,15 +361,33 @@ fn main() {
             if let Some(inp) = inp {
                 commands::add::run(&container, &inp, out.as_deref(), pwd)
             } else {
-                eprintln!("❌ 错误: 请指定输入路径（位置参数或 -i）");
-                std::process::exit(1);
+                exit_with_help("error.require_input_path", "add");
             }
         }
-        Commands::Rm { container, path, password_pos, password } => {
+        Commands::Rm {
+            container,
+            path,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "rm");
             let pwd = password_pos.or(password);
-            commands::rm::run(&container, &path, pwd)
+            if let Some(path) = path {
+                commands::rm::run(&container, &path, pwd)
+            } else {
+                exit_with_help("error.require_delete_path", "rm");
+            }
         }
-        Commands::Mv { container, from_pos, to_pos, password_pos, input, output, password } => {
+        Commands::Mv {
+            container,
+            from_pos,
+            to_pos,
+            password_pos,
+            input,
+            output,
+            password,
+        } => {
+            let container = require_container(container, "mv");
             let from = from_pos.or(input);
             let to = to_pos.or(output);
             let pwd = password_pos.or(password);
@@ -317,15 +395,28 @@ fn main() {
             if let (Some(from), Some(to)) = (from, to) {
                 commands::mv::run(&container, &from, &to, pwd)
             } else {
-                eprintln!("❌ 错误: 请指定源路径和目标路径");
-                std::process::exit(1);
+                exit_with_help("error.require_src_dst", "mv");
             }
         }
-        Commands::Free { container, password_pos, password } => {
+        Commands::Free {
+            container,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "free");
             let pwd = password_pos.or(password);
             commands::free::run(&container, pwd)
         }
-        Commands::Ex { container, input_pos, output_pos, password_pos, input, output, password } => {
+        Commands::Ex {
+            container,
+            input_pos,
+            output_pos,
+            password_pos,
+            input,
+            output,
+            password,
+        } => {
+            let container = require_container(container, "ex");
             let inp = input_pos.or(input);
             let out = output_pos.or(output);
             let pwd = password_pos.or(password);
@@ -333,27 +424,43 @@ fn main() {
             if let Some(out) = out {
                 commands::ex::run(&container, inp.as_deref(), &out, pwd)
             } else {
-                eprintln!("❌ 错误: 请指定输出路径（位置参数或 -o）");
-                std::process::exit(1);
+                exit_with_help("error.require_output_path", "ex");
             }
         }
-        Commands::Info { container, password_pos, password } => {
+        Commands::Info {
+            container,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "info");
             let pwd = password_pos.or(password);
             commands::info::run(&container, pwd)
         }
-        Commands::Passwd { container, old_password_pos, new_password_pos, password, new_password } => {
+        Commands::Passwd {
+            container,
+            old_password_pos,
+            new_password_pos,
+            password,
+            new_password,
+        } => {
+            let container = require_container(container, "passwd");
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
             commands::passwd::run(&container, old_pwd, new_pwd)
         }
-        Commands::Shell { container, password_pos, password } => {
+        Commands::Shell {
+            container,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "shell");
             let pwd = password_pos.or(password);
             commands::shell::run(&container, pwd)
         }
     };
 
     if let Err(e) = result {
-        eprintln!("❌ 错误: {}", e);
+        eprintln!("{}", i18n::t1("error.prefix", "error", &e.to_string()));
         std::process::exit(1);
     }
 }

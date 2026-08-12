@@ -38,18 +38,18 @@ use veil_core::container::Container;
 /// - `help` - 显示帮助
 /// - `exit` / `quit` - 退出 shell
 pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
-    println!("{}", "正在打开容器...".cyan());
+    println!("{}", crate::i18n::t("opening_container").cyan());
     let mut container = Container::open(container_path, password)?;
 
-    println!("{} 容器已打开，进入交互模式", "✓".green());
-    println!("输入 'help' 查看可用命令，'exit' 退出");
+    println!("{}", crate::i18n::t("shell.opened").green());
+    println!("{}", crate::i18n::t("shell.hint"));
     println!();
 
     loop {
         // 显示提示符
-        print!("{}", "veil> ".bright_blue().bold());
+        print!("{}", crate::i18n::t("shell.prompt").bright_blue().bold());
         io::stdout().flush()?;
 
         // 读取用户输入
@@ -75,7 +75,7 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
         // 执行命令
         match cmd {
             "exit" | "quit" => {
-                println!("正在退出...");
+                println!("{}", crate::i18n::t("shell.exiting"));
                 break;
             }
             "help" => {
@@ -112,7 +112,7 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
                 }
             }
             _ => {
-                eprintln!("{} 未知命令: {}. 输入 'help' 查看可用命令", "✗".red(), cmd);
+                eprintln!("{}", crate::i18n::t1("shell.unknown_cmd", "cmd", cmd).red());
             }
         }
     }
@@ -121,51 +121,12 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
 }
 
 fn print_help() {
-    println!("\n{}", "可用命令:".cyan().bold());
-    println!();
-    println!("  文件操作:");
-    println!("    {} <source> [dest]      - 添加文件/目录到容器", "add".green());
-    println!("                                source: 本地文件路径");
-    println!("                                dest: 容器内路径（可选）");
-    println!();
-    println!("    {} <path>               - 删除容器内的文件", "rm".green());
-    println!("                                path: 容器内路径");
-    println!();
-    println!("    {} <from> <to>          - 移动/重命名文件", "mv".green());
-    println!("                                from: 源路径（容器内）");
-    println!("                                to: 目标路径（容器内）");
-    println!();
-    println!("    {} <input> <output>      - 导出文件到本地", "ex".green());
-    println!("    {}                        （别名: export）", "".clear());
-    println!("                                input: 容器内路径");
-    println!("                                output: 本地路径");
-    println!();
-    println!("  查看信息:");
-    println!("    {}                       - 树状显示容器内容", "free".green());
-    println!("    {}                         （别名: ls）", "".clear());
-    println!();
-    println!("    {}                       - 显示容器详细信息", "info".green());
-    println!("                                （大小、文件数、类型分布）");
-    println!();
-    println!("  其他:");
-    println!("    {}                       - 显示此帮助信息", "help".green());
-    println!();
-    println!("    {}                       - 退出 shell 模式", "exit".green());
-    println!("    {}                       - 退出 shell 模式（别名）", "quit".green());
-    println!();
-    println!("  {}:", "示例".yellow().bold());
-    println!("    veil> add photo.jpg photos/vacation.jpg");
-    println!("    veil> free");
-    println!("    veil> mv old.txt archive/old.txt");
-    println!("    veil> ex archive/old.txt ./backup.txt");
-    println!("    veil> rm archive/old.txt");
-    println!("    veil> exit");
-    println!();
+    println!("{}", crate::i18n::t("shell.help"));
 }
 
 fn cmd_add(container: &mut Container, args: &[&str]) -> Result<()> {
     if args.is_empty() {
-        anyhow::bail!("用法: add <source> [dest]");
+        anyhow::bail!("{}", crate::i18n::t("shell.add_usage"));
     }
 
     let source = args[0];
@@ -173,7 +134,7 @@ fn cmd_add(container: &mut Container, args: &[&str]) -> Result<()> {
 
     let source_path = std::path::Path::new(source);
     if !source_path.exists() {
-        anyhow::bail!("源文件不存在: {}", source);
+        anyhow::bail!("{}", crate::i18n::t1("add.source_not_found", "path", source));
     }
 
     if source_path.is_file() {
@@ -181,16 +142,15 @@ fn cmd_add(container: &mut Container, args: &[&str]) -> Result<()> {
             source_path.file_name().unwrap().to_str().unwrap()
         });
 
-        println!("{} 正在添加: {} -> {}", "→".blue(), source, virtual_path);
-        // 使用流式接口
+        println!("{}", crate::i18n::t2("add.adding_file", "source", source, "dest", virtual_path).blue());
         let file = std::fs::File::open(source_path)?;
         container.add_file_streaming(virtual_path, file)?;
-        println!("{} 文件已添加: {}", "✓".green(), virtual_path);
+        println!("{}", crate::i18n::t1("add.file_added", "path", virtual_path).green());
     } else if source_path.is_dir() {
         let dest_prefix = dest.unwrap_or("");
-        println!("{} 正在添加目录: {} -> {}", "→".blue(), source, dest_prefix);
+        println!("{}", crate::i18n::t2("add.adding_file", "source", source, "dest", dest_prefix).blue());
         container.add_dir(source_path, dest_prefix)?;
-        println!("{} 目录已添加", "✓".green());
+        println!("{}", crate::i18n::t("add.dir_added").green());
     }
 
     Ok(())
@@ -198,73 +158,76 @@ fn cmd_add(container: &mut Container, args: &[&str]) -> Result<()> {
 
 fn cmd_rm(container: &mut Container, args: &[&str]) -> Result<()> {
     if args.is_empty() {
-        anyhow::bail!("用法: rm <path>");
+        anyhow::bail!("{}", crate::i18n::t("shell.rm_usage"));
     }
 
     let path = args[0];
-    println!("{} 正在删除: {}", "→".blue(), path);
+    println!("{}", crate::i18n::t1("rm.deleting", "path", path).blue());
     container.remove_file(path)?;
-    println!("{} 已删除: {}", "✓".green(), path);
+    println!("{}", crate::i18n::t1("rm.deleted", "path", path).green());
 
     Ok(())
 }
 
 fn cmd_mv(container: &mut Container, args: &[&str]) -> Result<()> {
     if args.len() < 2 {
-        anyhow::bail!("用法: mv <from> <to>");
+        anyhow::bail!("{}", crate::i18n::t("shell.mv_usage"));
     }
 
     let from = args[0];
     let to = args[1];
 
-    println!("{} 正在移动: {} -> {}", "→".blue(), from, to);
+    println!("{}", crate::i18n::t2("mv.moving", "from", from, "to", to).blue());
     container.rename_file(from, to)?;
-    println!("{} 已移动", "✓".green());
+    println!("{}", crate::i18n::t2("mv.moved", "from", from, "to", to).green());
 
     Ok(())
 }
 
 fn cmd_free(container: &Container) -> Result<()> {
-    println!("\n{}", "容器内容:".cyan().bold());
+    println!("\n{}", crate::i18n::t("free.title").cyan().bold());
     print!("{}", container.tree_view());
 
     let files = veil_core::index::list_files(container.root());
     let file_count = files.len();
     let total_size: u64 = files.iter().map(|(_, meta)| meta.size).sum();
 
-    println!("\n{}", "统计信息:".cyan());
-    println!("  文件数量: {}", file_count);
-    println!("  总大小: {} 字节 ({:.2} MB)", total_size, total_size as f64 / 1_048_576.0);
+    println!("\n{}", crate::i18n::t("free.stats_title").cyan());
+    println!("{}", crate::i18n::t1("free.file_count", "count", &file_count.to_string()));
+    println!("{}", crate::i18n::t2("free.total_size", "bytes", &total_size.to_string(), "mb", &format!("{:.2}", total_size as f64 / 1_048_576.0)));
     println!();
 
     Ok(())
 }
 
 fn cmd_info(container: &Container, container_path: &str) -> Result<()> {
-    println!("\n{}", "容器信息:".cyan().bold());
-    println!("  路径: {}", container_path);
+    println!("\n{}", crate::i18n::t("info.title").cyan().bold());
+    println!("{}", crate::i18n::t1("info.path", "path", container_path));
 
     let metadata = std::fs::metadata(container_path)?;
-    println!("  容器大小: {} 字节 ({:.2} MB)",
-             metadata.len(),
-             metadata.len() as f64 / 1_048_576.0);
+    println!("{}",
+        crate::i18n::t2("info.container_size",
+            "bytes", &metadata.len().to_string(),
+            "mb", &format!("{:.2}", metadata.len() as f64 / 1_048_576.0)));
 
     let files = veil_core::index::list_files(container.root());
     let file_count = files.len();
     let total_size: u64 = files.iter().map(|(_, meta)| meta.size).sum();
 
-    println!("\n{}", "内容统计:".cyan());
-    println!("  文件数量: {}", file_count);
-    println!("  内容总大小: {} 字节 ({:.2} MB)", total_size, total_size as f64 / 1_048_576.0);
+    println!("\n{}", crate::i18n::t("info.content_title").cyan());
+    println!("{}", crate::i18n::t1("info.content_count", "count", &file_count.to_string()));
+    println!("{}", crate::i18n::t2("info.content_size",
+        "bytes", &total_size.to_string(),
+        "mb", &format!("{:.2}", total_size as f64 / 1_048_576.0)));
 
     let mut mime_stats: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (_, meta) in &files {
-        let mime = meta.mime.as_deref().unwrap_or("未知");
+        let mime = meta.mime.as_deref().unwrap_or(crate::i18n::t("unknown"));
         *mime_stats.entry(mime.to_string()).or_insert(0) += 1;
     }
 
     if !mime_stats.is_empty() {
-        println!("\n{}", "文件类型分布:".cyan());
+        println!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
         let mut types: Vec<_> = mime_stats.iter().collect();
         types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         for (mime, count) in types {
@@ -278,7 +241,7 @@ fn cmd_info(container: &Container, container_path: &str) -> Result<()> {
 
 fn cmd_export(container: &Container, args: &[&str]) -> Result<()> {
     if args.len() < 2 {
-        anyhow::bail!("用法: ex <input> <output>");
+        anyhow::bail!("{}", crate::i18n::t("shell.ex_usage"));
     }
 
     let input = args[0];
@@ -286,13 +249,13 @@ fn cmd_export(container: &Container, args: &[&str]) -> Result<()> {
     let output_path = std::path::Path::new(output);
 
     if let Some(_meta) = container.get_file(input) {
-        println!("{} 正在导出: {} -> {}", "→".blue(), input, output);
+        println!("{}", crate::i18n::t2("ex.exporting_file", "source", input, "dest", output).blue());
         container.extract_file(input, output_path)?;
-        println!("{} 文件已导出", "✓".green());
+        println!("{}", crate::i18n::t("ex.file_exported").green());
     } else {
-        println!("{} 正在导出目录: {} -> {}", "→".blue(), input, output);
+        println!("{}", crate::i18n::t2("ex.exporting_dir", "source", input, "dest", output).blue());
         container.extract_dir(input, output_path)?;
-        println!("{} 目录已导出", "✓".green());
+        println!("{}", crate::i18n::t("ex.dir_exported").green());
     }
 
     Ok(())

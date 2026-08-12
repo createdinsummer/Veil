@@ -1,0 +1,601 @@
+{
+
+  "opening_container": {
+    "zh": "正在打开容器...",
+    "en": "Opening container..."
+  },
+  "done_label": {
+    "zh": "完成",
+    "en": "Done"
+  },
+  "failed_label": {
+    "zh": "失败",
+    "en": "Failed"
+  },
+  "unknown": {
+    "zh": "未知",
+    "en": "Unknown"
+  },
+
+  "prompt.container_password": {
+    "zh": "请输入容器密码: ",
+    "en": "Enter container password: "
+  },
+  "prompt.current_password": {
+    "zh": "请输入当前密码: ",
+    "en": "Enter current password: "
+  },
+  "prompt.new_password": {
+    "zh": "请输入密码: ",
+    "en": "Enter password: "
+  },
+  "prompt.confirm_password": {
+    "zh": "请再次输入密码: ",
+    "en": "Confirm password: "
+  },
+
+  "error.password_mismatch": {
+    "zh": "两次输入的密码不一致",
+    "en": "Passwords do not match"
+  },
+  "error.require_container": {
+    "zh": "❌ 错误: 请指定容器文件路径",
+    "en": "❌ Error: Please specify container file path"
+  },
+  "error.require_input_path": {
+    "zh": "❌ 错误: 请指定输入路径（位置参数或 -i）",
+    "en": "❌ Error: Please specify input path (positional argument or -i)"
+  },
+  "error.require_delete_path": {
+    "zh": "❌ 错误: 请指定要删除的路径",
+    "en": "❌ Error: Please specify path to delete"
+  },
+  "error.require_src_dst": {
+    "zh": "❌ 错误: 请指定源路径和目标路径",
+    "en": "❌ Error: Please specify source and destination paths"
+  },
+  "error.require_output_path": {
+    "zh": "❌ 错误: 请指定输出路径（位置参数或 -o）",
+    "en": "❌ Error: Please specify output path (positional argument or -o)"
+  },
+  "error.prefix": {
+    "zh": "❌ 错误: {error}",
+    "en": "❌ Error: {error}"
+  },
+
+  "init.exists": {
+    "zh": "容器文件已存在: {path}",
+    "en": "Container file already exists: {path}"
+  },
+  "init.creating": {
+    "zh": "创建新容器...",
+    "en": "Creating new container..."
+  },
+  "init.created": {
+    "zh": "✓ 容器创建成功: {path}",
+    "en": "✓ Container created successfully: {path}"
+  },
+
+  "add.source_not_found": {
+    "zh": "源文件或目录不存在: {path}",
+    "en": "Source file or directory not found: {path}"
+  },
+  "add.adding_file": {
+    "zh": "→ 正在添加文件: {source} -> {dest}",
+    "en": "→ Adding file: {source} -> {dest}"
+  },
+  "add.file_added": {
+    "zh": "✓ 文件已添加: {path}",
+    "en": "✓ File added: {path}"
+  },
+  "add.scanning_dir": {
+    "zh": "→ 正在扫描目录: {path}",
+    "en": "→ Scanning directory: {path}"
+  },
+  "add.found_files": {
+    "zh": "→ 找到 {count} 个文件，开始添加...",
+    "en": "→ Found {count} files, adding..."
+  },
+  "add.empty_dir": {
+    "zh": "→ 目录为空，无文件添加",
+    "en": "→ Directory is empty, nothing to add"
+  },
+  "add.dir_added": {
+    "zh": "✓ 目录已添加完成",
+    "en": "✓ Directory added"
+  },
+  "add.unsupported_type": {
+    "zh": "不支持的文件类型",
+    "en": "Unsupported file type"
+  },
+
+  "ex.searching": {
+    "zh": "→ 正在查找匹配的文件: {pattern}",
+    "en": "→ Searching for matching files: {pattern}"
+  },
+  "ex.no_matches": {
+    "zh": "⚠ 未找到匹配的文件",
+    "en": "⚠ No matching files found"
+  },
+  "ex.found_matches": {
+    "zh": "✓ 找到 {count} 个匹配的文件",
+    "en": "✓ Found {count} matching files"
+  },
+  "ex.export_done": {
+    "zh": "✓ 导出完成",
+    "en": "✓ Export completed"
+  },
+  "ex.exporting_file": {
+    "zh": "→ 正在导出文件: {source} -> {dest}",
+    "en": "→ Exporting file: {source} -> {dest}"
+  },
+  "ex.file_exported": {
+    "zh": "✓ 文件已导出: {path}",
+    "en": "✓ File exported: {path}"
+  },
+  "ex.exporting_dir": {
+    "zh": "→ 正在导出目录: {source} -> {dest}",
+    "en": "→ Exporting directory: {source} -> {dest}"
+  },
+  "ex.empty_dir": {
+    "zh": "→ 目录为空，无文件导出",
+    "en": "→ Directory is empty, nothing to export"
+  },
+  "ex.dir_exported": {
+    "zh": "✓ 目录已导出完成",
+    "en": "✓ Directory exported"
+  },
+  "ex.specify_path": {
+    "zh": "请指定要导出的路径（位置参数或 -i），使用 \"**/*\" 导出全部",
+    "en": "Please specify a path to export (positional argument or -i), use \"**/*\" to export all"
+  },
+
+  "rm.searching": {
+    "zh": "→ 正在查找匹配的文件: {pattern}",
+    "en": "→ Searching for matching files: {pattern}"
+  },
+  "rm.no_matches": {
+    "zh": "⚠ 未找到匹配的文件",
+    "en": "⚠ No matching files found"
+  },
+  "rm.deleted_count": {
+    "zh": "✓ 已删除 {count} 个文件:",
+    "en": "✓ Deleted {count} files:"
+  },
+  "rm.deleting": {
+    "zh": "→ 正在删除: {path}",
+    "en": "→ Deleting: {path}"
+  },
+  "rm.deleted": {
+    "zh": "✓ 已删除: {path}",
+    "en": "✓ Deleted: {path}"
+  },
+
+  "mv.moving": {
+    "zh": "→ 正在移动: {from} -> {to}",
+    "en": "→ Moving: {from} -> {to}"
+  },
+  "mv.moved": {
+    "zh": "✓ 已移动: {from} -> {to}",
+    "en": "✓ Moved: {from} -> {to}"
+  },
+
+  "free.title": {
+    "zh": "容器内容:",
+    "en": "Container content:"
+  },
+  "free.stats_title": {
+    "zh": "统计信息:",
+    "en": "Statistics:"
+  },
+  "free.file_count": {
+    "zh": "  文件数量: {count}",
+    "en": "  File count: {count}"
+  },
+  "free.total_size": {
+    "zh": "  总大小: {bytes} 字节 ({mb:.2} MB)",
+    "en": "  Total size: {bytes} bytes ({mb:.2} MB)"
+  },
+
+  "info.title": {
+    "zh": "容器信息:",
+    "en": "Container info:"
+  },
+  "info.path": {
+    "zh": "  路径: {path}",
+    "en": "  Path: {path}"
+  },
+  "info.creator_version": {
+    "zh": "  创建版本: {version}",
+    "en": "  Created with version: {version}"
+  },
+  "info.container_size": {
+    "zh": "  容器大小: {bytes} 字节 ({mb:.2} MB)",
+    "en": "  Container size: {bytes} bytes ({mb:.2} MB)"
+  },
+  "info.content_title": {
+    "zh": "内容统计:",
+    "en": "Content statistics:"
+  },
+  "info.content_count": {
+    "zh": "  文件数量: {count}",
+    "en": "  File count: {count}"
+  },
+  "info.content_size": {
+    "zh": "  内容总大小: {bytes} 字节 ({mb:.2} MB)",
+    "en": "  Total content size: {bytes} bytes ({mb:.2} MB)"
+  },
+  "info.mime_dist_title": {
+    "zh": "文件类型分布:",
+    "en": "File type distribution:"
+  },
+
+  "passwd.verifying": {
+    "zh": "正在验证密码...",
+    "en": "Verifying password..."
+  },
+  "passwd.set_new": {
+    "zh": "请设置新密码",
+    "en": "Please set a new password"
+  },
+  "passwd.changing": {
+    "zh": "正在修改密码...",
+    "en": "Changing password..."
+  },
+  "passwd.changed": {
+    "zh": "✓ 密码修改成功",
+    "en": "✓ Password changed successfully"
+  },
+
+  "shell.opened": {
+    "zh": "✓ 容器已打开，进入交互模式",
+    "en": "✓ Container opened, entering interactive mode"
+  },
+  "shell.hint": {
+    "zh": "输入 'help' 查看可用命令，'exit' 退出",
+    "en": "Type 'help' for available commands, 'exit' to quit"
+  },
+  "shell.prompt": {
+    "zh": "veil> ",
+    "en": "veil> "
+  },
+  "shell.exiting": {
+    "zh": "正在退出...",
+    "en": "Exiting..."
+  },
+  "shell.unknown_cmd": {
+    "zh": "✗ 未知命令: {cmd}. 输入 'help' 查看可用命令",
+    "en": "✗ Unknown command: {cmd}. Type 'help' for available commands"
+  },
+  "shell.add_usage": {
+    "zh": "用法: add <source> [dest]",
+    "en": "Usage: add <source> [dest]"
+  },
+  "shell.rm_usage": {
+    "zh": "用法: rm <path>",
+    "en": "Usage: rm <path>"
+  },
+  "shell.mv_usage": {
+    "zh": "用法: mv <from> <to>",
+    "en": "Usage: mv <from> <to>"
+  },
+  "shell.ex_usage": {
+    "zh": "用法: ex <input> <output>",
+    "en": "Usage: ex <input> <output>"
+  },
+  "shell.help": {
+    "zh": "\n可用命令:\n\n  文件操作:\n    add <source> [dest]      - 添加文件/目录到容器\n                                source: 本地文件路径\n                                dest: 容器内路径（可选）\n\n    rm <path>               - 删除容器内的文件\n                                path: 容器内路径\n\n    mv <from> <to>          - 移动/重命名文件\n                                from: 源路径（容器内）\n                                to: 目标路径（容器内）\n\n    ex <input> <output>      - 导出文件到本地\n    （别名: export）\n                                input: 容器内路径\n                                output: 本地路径\n\n  查看信息:\n    free                       - 树状显示容器内容\n    （别名: ls）\n\n    info                       - 显示容器详细信息\n                                （大小、文件数、类型分布）\n\n  其他:\n    help                       - 显示此帮助信息\n\n    exit                       - 退出 shell 模式\n    quit                       - 退出 shell 模式（别名）\n\n  示例:\n    veil> add photo.jpg photos/vacation.jpg\n    veil> free\n    veil> mv old.txt archive/old.txt\n    veil> ex archive/old.txt ./backup.txt\n    veil> rm archive/old.txt\n    veil> exit\n",
+    "en": "\nAvailable commands:\n\n  File operations:\n    add <source> [dest]      - Add files/directories to container\n                                source: Local file path\n                                dest: Virtual path in container (optional)\n\n    rm <path>               - Delete files from container\n                                path: Virtual path in container\n\n    mv <from> <to>          - Move/rename files\n                                from: Source path (in container)\n                                to: Destination path (in container)\n\n    ex <input> <output>      - Export files to local filesystem\n    (alias: export)\n                                input: Virtual path in container\n                                output: Local path\n\n  View information:\n    free                       - Display container content as tree\n    (alias: ls)\n\n    info                       - Display container details\n                                (size, file count, type distribution)\n\n  Other:\n    help                       - Show this help message\n\n    exit                       - Exit shell mode\n    quit                       - Exit shell mode (alias)\n\n  Examples:\n    veil> add photo.jpg photos/vacation.jpg\n    veil> free\n    veil> mv old.txt archive/old.txt\n    veil> ex archive/old.txt ./backup.txt\n    veil> rm archive/old.txt\n    veil> exit\n"
+  },
+
+  "pb.dir_template": {
+    "zh": "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 | {msg}",
+    "en": "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files | {msg}"
+  },
+
+  "clap.about": {
+    "zh": "Veil v{version} - 一个简单、安全、高效的文件加密容器工具",
+    "en": "Veil v{version} - A simple, secure, efficient file encryption container tool"
+  },
+  "clap.long_about": {
+    "zh": "Veil v{version}\n一个简单、安全、高效的文件加密容器工具",
+    "en": "Veil v{version}\nA simple, secure, efficient file encryption container tool"
+  },
+  "clap.help_template": {
+    "zh": "{about-with-newline}\n用法: {usage}\n\n命令:\n{subcommands}\n\n选项:\n{options}\n",
+    "en": "{about-with-newline}\nUsage: {usage}\n\nCommands:\n{subcommands}\n\nOptions:\n{options}\n"
+  },
+  "clap.sub_help_template": {
+    "zh": "{about-with-newline}\n用法: {usage}\n\n参数:\n{positionals}\n\n选项:\n{options}\n",
+    "en": "{about-with-newline}\nUsage: {usage}\n\nArguments:\n{positionals}\n\nOptions:\n{options}\n"
+  },
+
+  "cmd.init.about": {
+    "zh": "创建新容器",
+    "en": "Create a new container"
+  },
+  "cmd.init.usage": {
+    "zh": "veil init <容器文件> [密码]",
+    "en": "veil init <container-file> [password]"
+  },
+  "cmd.init.usage_opt": {
+    "zh": "veil init <容器文件> [-p <密码>]",
+    "en": "veil init <container-file> [-p <password>]"
+  },
+  "cmd.add.about": {
+    "zh": "添加文件或目录到容器",
+    "en": "Add files or directories to container"
+  },
+  "cmd.add.usage": {
+    "zh": "veil add <容器文件> [源路径] [目标路径] [密码]",
+    "en": "veil add <container-file> [source] [destination] [password]"
+  },
+  "cmd.add.usage_opt": {
+    "zh": "veil add <容器文件> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil add <container-file> -i <source> -o <destination> [-p <password>]"
+  },
+  "cmd.rm.about": {
+    "zh": "从容器删除文件或目录",
+    "en": "Delete files or directories from container"
+  },
+  "cmd.rm.usage": {
+    "zh": "veil rm <容器文件> <路径> [密码]",
+    "en": "veil rm <container-file> <path> [password]"
+  },
+  "cmd.rm.usage_opt": {
+    "zh": "veil rm <容器文件> <路径> [-p <密码>]",
+    "en": "veil rm <container-file> <path> [-p <password>]"
+  },
+  "cmd.mv.about": {
+    "zh": "移动/重命名容器内的文件",
+    "en": "Move/rename files in container"
+  },
+  "cmd.mv.usage": {
+    "zh": "veil mv <容器文件> <源路径> <目标路径> [密码]",
+    "en": "veil mv <container-file> <source> <destination> [password]"
+  },
+  "cmd.mv.usage_opt": {
+    "zh": "veil mv <容器文件> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil mv <container-file> -i <source> -o <destination> [-p <password>]"
+  },
+  "cmd.free.about": {
+    "zh": "树状显示容器内容",
+    "en": "Display container content as tree"
+  },
+  "cmd.free.usage": {
+    "zh": "veil free <容器文件> [密码]",
+    "en": "veil free <container-file> [password]"
+  },
+  "cmd.free.usage_opt": {
+    "zh": "veil free <容器文件> [-p <密码>]",
+    "en": "veil free <container-file> [-p <password>]"
+  },
+  "cmd.ex.about": {
+    "zh": "导出文件或目录",
+    "en": "Export files or directories"
+  },
+  "cmd.ex.usage": {
+    "zh": "veil ex <容器文件> [输入路径] [输出路径] [密码]",
+    "en": "veil ex <container-file> [input-path] [output-path] [password]"
+  },
+  "cmd.ex.usage_opt": {
+    "zh": "veil ex <容器文件> -i <输入路径> -o <输出路径> [-p <密码>]",
+    "en": "veil ex <container-file> -i <input-path> -o <output-path> [-p <password>]"
+  },
+  "cmd.info.about": {
+    "zh": "显示容器信息",
+    "en": "Display container information"
+  },
+  "cmd.info.usage": {
+    "zh": "veil info <容器文件> [密码]",
+    "en": "veil info <container-file> [password]"
+  },
+  "cmd.info.usage_opt": {
+    "zh": "veil info <容器文件> [-p <密码>]",
+    "en": "veil info <container-file> [-p <password>]"
+  },
+  "cmd.passwd.about": {
+    "zh": "修改容器密码",
+    "en": "Change container password"
+  },
+  "cmd.passwd.usage": {
+    "zh": "veil passwd <容器文件> [旧密码] [新密码]",
+    "en": "veil passwd <container-file> [old-password] [new-password]"
+  },
+  "cmd.passwd.usage_opt": {
+    "zh": "veil passwd <容器文件> [-p <旧密码>] [-n <新密码>]",
+    "en": "veil passwd <container-file> [-p <old-password>] [-n <new-password>]"
+  },
+  "cmd.shell.about": {
+    "zh": "交互式 shell 模式（批处理）",
+    "en": "Interactive shell mode (batch processing)"
+  },
+  "cmd.shell.usage": {
+    "zh": "veil shell <容器文件> [密码]",
+    "en": "veil shell <container-file> [password]"
+  },
+  "cmd.shell.usage_opt": {
+    "zh": "veil shell <容器文件> [-p <密码>]",
+    "en": "veil shell <container-file> [-p <password>]"
+  },
+
+  "arg.container": {
+    "zh": "容器文件",
+    "en": "container-file"
+  },
+  "arg.password": {
+    "zh": "密码",
+    "en": "password"
+  },
+  "arg.source_path": {
+    "zh": "源路径",
+    "en": "source"
+  },
+  "arg.dest_path": {
+    "zh": "目标路径",
+    "en": "destination"
+  },
+  "arg.path": {
+    "zh": "路径",
+    "en": "path"
+  },
+  "arg.input_path": {
+    "zh": "输入路径",
+    "en": "input-path"
+  },
+  "arg.output_path": {
+    "zh": "输出路径",
+    "en": "output-path"
+  },
+  "arg.old_password": {
+    "zh": "旧密码",
+    "en": "old-password"
+  },
+  "arg.new_password": {
+    "zh": "新密码",
+    "en": "new-password"
+  },
+  "arg.files": {
+    "zh": "文件或目录路径",
+    "en": "file-path"
+  },
+
+  "help.init.container": {
+    "zh": "容器文件路径（如 photos.veil）",
+    "en": "Container file path (e.g. photos.veil)"
+  },
+  "help.init.password": {
+    "zh": "容器密码（位置参数或 -p 选项）",
+    "en": "Container password (positional argument or -p option)"
+  },
+  "help.init.password_opt": {
+    "zh": "容器密码（选项方式）",
+    "en": "Container password (via option)"
+  },
+  "help.container": {
+    "zh": "容器文件路径",
+    "en": "Container file path"
+  },
+  "help.password_pos": {
+    "zh": "容器密码（位置参数，可选）",
+    "en": "Container password (positional argument, optional)"
+  },
+  "help.password_opt": {
+    "zh": "容器密码（选项方式）",
+    "en": "Container password (via option)"
+  },
+  "help.add.input_pos": {
+    "zh": "源文件或目录路径（容器外部，位置参数或 -i）",
+    "en": "Source file or directory path (outside container, positional or -i)"
+  },
+  "help.add.output_pos": {
+    "zh": "容器内的目标路径（位置参数或 -o，可选）",
+    "en": "Destination path in container (positional or -o, optional)"
+  },
+  "help.add.input": {
+    "zh": "源文件或目录路径（选项方式）",
+    "en": "Source file or directory path (via option)"
+  },
+  "help.add.output": {
+    "zh": "容器内的目标路径（选项方式）",
+    "en": "Destination path in container (via option)"
+  },
+  "help.rm.path": {
+    "zh": "要删除的虚拟路径",
+    "en": "Virtual path to delete"
+  },
+  "help.mv.from_pos": {
+    "zh": "源路径（位置参数或 -i，容器内）",
+    "en": "Source path (positional or -i, inside container)"
+  },
+  "help.mv.to_pos": {
+    "zh": "目标路径（位置参数或 -o，容器内）",
+    "en": "Destination path (positional or -o, inside container)"
+  },
+  "help.mv.input": {
+    "zh": "源路径（选项方式，容器内）",
+    "en": "Source path (via option, inside container)"
+  },
+  "help.mv.output": {
+    "zh": "目标路径（选项方式，容器内）",
+    "en": "Destination path (via option, inside container)"
+  },
+  "help.ex.input_pos": {
+    "zh": "容器内的虚拟路径（位置参数或 -i，支持通配符）",
+    "en": "Virtual path in container (positional or -i, supports wildcards)"
+  },
+  "help.ex.output_pos": {
+    "zh": "导出到的目标路径（位置参数或 -o）",
+    "en": "Export destination path (positional or -o)"
+  },
+  "help.ex.input": {
+    "zh": "容器内的虚拟路径（选项方式，支持通配符）",
+    "en": "Virtual path in container (via option, supports wildcards)"
+  },
+  "help.ex.output": {
+    "zh": "导出到的目标路径（选项方式）",
+    "en": "Export destination path (via option)"
+  },
+  "help.passwd.old_password_pos": {
+    "zh": "当前密码（位置参数，可选）",
+    "en": "Current password (positional argument, optional)"
+  },
+  "help.passwd.new_password_pos": {
+    "zh": "新密码（位置参数，可选）",
+    "en": "New password (positional argument, optional)"
+  },
+  "help.passwd.password": {
+    "zh": "当前密码（选项方式）",
+    "en": "Current password (via option)"
+  },
+  "help.passwd.new_password": {
+    "zh": "新密码（选项方式）",
+    "en": "New password (via option)"
+  },
+
+  "label.usage": {
+    "zh": "用法",
+    "en": "Usage"
+  },
+  "label.examples": {
+    "zh": "示例",
+    "en": "Examples"
+  },
+
+  "example.init": {
+    "zh": "\n示例:\n  veil init photos.veil\n  veil init photos.veil mypassword\n  veil init photos.veil -p mypassword",
+    "en": "\nExamples:\n  veil init photos.veil\n  veil init photos.veil mypassword\n  veil init photos.veil -p mypassword"
+  },
+  "example.add": {
+    "zh": "\n示例:\n  veil add photos.veil photo.jpg\n  veil add photos.veil photo.jpg 2024/photo.jpg\n  veil add photos.veil ~/Pictures backup/\n  veil add photos.veil -i photo.jpg -o 2024/photo.jpg -p mypass",
+    "en": "\nExamples:\n  veil add photos.veil photo.jpg\n  veil add photos.veil photo.jpg 2024/photo.jpg\n  veil add photos.veil ~/Pictures backup/\n  veil add photos.veil -i photo.jpg -o 2024/photo.jpg -p mypass"
+  },
+  "example.rm": {
+    "zh": "\n示例:\n  veil rm photos.veil archive/old.jpg\n  veil rm photos.veil \"temp/*.tmp\"\n  veil rm photos.veil \"**/*.log\"",
+    "en": "\nExamples:\n  veil rm photos.veil archive/old.jpg\n  veil rm photos.veil \"temp/*.tmp\"\n  veil rm photos.veil \"**/*.log\""
+  },
+  "example.mv": {
+    "zh": "\n示例:\n  veil mv photos.veil old.jpg archive/old.jpg\n  veil mv photos.veil -i old.jpg -o archive/old.jpg",
+    "en": "\nExamples:\n  veil mv photos.veil old.jpg archive/old.jpg\n  veil mv photos.veil -i old.jpg -o archive/old.jpg"
+  },
+  "example.free": {
+    "zh": "\n示例:\n  veil free photos.veil\n  veil free photos.veil -p mypass",
+    "en": "\nExamples:\n  veil free photos.veil\n  veil free photos.veil -p mypass"
+  },
+  "example.ex": {
+    "zh": "\n示例:\n  veil ex photos.veil photo.jpg ./output.jpg\n  veil ex photos.veil \"**/*\" ./all-files/\n  veil ex photos.veil \"*.jpg\" ./jpg-files/\n  veil ex photos.veil -i photo.jpg -o ./out.jpg -p mypass",
+    "en": "\nExamples:\n  veil ex photos.veil photo.jpg ./output.jpg\n  veil ex photos.veil \"**/*\" ./all-files/\n  veil ex photos.veil \"*.jpg\" ./jpg-files/\n  veil ex photos.veil -i photo.jpg -o ./out.jpg -p mypass"
+  },
+  "example.info": {
+    "zh": "\n示例:\n  veil info photos.veil\n  veil info photos.veil -p mypass",
+    "en": "\nExamples:\n  veil info photos.veil\n  veil info photos.veil -p mypass"
+  },
+  "example.passwd": {
+    "zh": "\n示例:\n  veil passwd photos.veil\n  veil passwd photos.veil oldpass newpass\n  veil passwd photos.veil -p oldpass -n newpass",
+    "en": "\nExamples:\n  veil passwd photos.veil\n  veil passwd photos.veil oldpass newpass\n  veil passwd photos.veil -p oldpass -n newpass"
+  },
+  "example.shell": {
+    "zh": "\n示例:\n  veil shell photos.veil\n  veil shell photos.veil -p mypass",
+    "en": "\nExamples:\n  veil shell photos.veil\n  veil shell photos.veil -p mypass"
+  }
+}

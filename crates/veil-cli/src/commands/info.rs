@@ -39,38 +39,41 @@ use veil_core::index;
 ///   application/pdf                1
 /// ```
 pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     let container = Container::open(container_path, password)?;
 
-    println!("\n{}", "容器信息:".cyan().bold());
-    println!("  路径: {}", container_path);
-    println!("  创建版本: {}", container.cli_version());
+    println!("\n{}", crate::i18n::t("info.title").cyan().bold());
+    println!("{}", crate::i18n::t1("info.path", "path", container_path));
+    println!("{}", crate::i18n::t1("info.creator_version", "version", container.cli_version()));
 
     // 文件大小
     let metadata = std::fs::metadata(container_path)?;
-    println!("  容器大小: {} 字节 ({:.2} MB)",
-             metadata.len(),
-             metadata.len() as f64 / 1_048_576.0);
+    println!("{}",
+        crate::i18n::t2("info.container_size",
+            "bytes", &metadata.len().to_string(),
+            "mb", &format!("{:.2}", metadata.len() as f64 / 1_048_576.0)));
 
     // 统计文件
     let files = index::list_files(container.root());
     let file_count = files.len();
     let total_size: u64 = files.iter().map(|(_, meta)| meta.size).sum();
 
-    println!("\n{}", "内容统计:".cyan());
-    println!("  文件数量: {}", file_count);
-    println!("  内容总大小: {} 字节 ({:.2} MB)", total_size, total_size as f64 / 1_048_576.0);
+    println!("\n{}", crate::i18n::t("info.content_title").cyan());
+    println!("{}", crate::i18n::t1("info.content_count", "count", &file_count.to_string()));
+    println!("{}", crate::i18n::t2("info.content_size",
+        "bytes", &total_size.to_string(),
+        "mb", &format!("{:.2}", total_size as f64 / 1_048_576.0)));
 
     // MIME 类型统计
     let mut mime_stats: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (_, meta) in &files {
-        let mime = meta.mime.as_deref().unwrap_or("未知");
+        let mime = meta.mime.as_deref().unwrap_or(crate::i18n::t("unknown"));
         *mime_stats.entry(mime.to_string()).or_insert(0) += 1;
     }
 
     if !mime_stats.is_empty() {
-        println!("\n{}", "文件类型分布:".cyan());
+        println!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
         let mut types: Vec<_> = mime_stats.iter().collect();
         types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         for (mime, count) in types {

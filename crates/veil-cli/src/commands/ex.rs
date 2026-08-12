@@ -61,24 +61,24 @@ pub fn run(
     output: &str,
     password: Option<String>,
 ) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
-    println!("{}", "正在打开容器...".cyan());
+    println!("{}", crate::i18n::t("opening_container").cyan());
     let container = Container::open(container_path, password)?;
 
     if let Some(path) = virtual_path {
         // 检查是否包含通配符
         if path.contains('*') {
             // 通配符模式匹配
-            println!("{} 正在查找匹配的文件: {}", "→".blue(), path);
+            println!("{}", crate::i18n::t1("ex.searching", "pattern", path).blue());
             let matched = container.find_files(path)?;
 
             if matched.is_empty() {
-                println!("{} 未找到匹配的文件", "⚠".yellow());
+                println!("{}", crate::i18n::t("ex.no_matches").yellow());
                 return Ok(());
             }
 
-            println!("{} 找到 {} 个匹配的文件", "✓".green(), matched.len());
+            println!("{}", crate::i18n::t1("ex.found_matches", "count", &matched.len().to_string()).green());
 
             let files: Vec<(String, u64)> = matched
                 .iter()
@@ -102,23 +102,23 @@ pub fn run(
 
             match result {
                 Ok(()) => {
-                    pb.finish_with_message(format!("{}", "完成".green()));
-                    println!("{} 导出完成", "✓".green());
+                    pb.finish_with_message(crate::i18n::t("done_label").green().to_string());
+                    println!("{}", crate::i18n::t("ex.export_done").green());
                 }
                 Err(e) => {
-                    pb.abandon_with_message(format!("{}", "失败".red()));
+                    pb.abandon_with_message(crate::i18n::t("failed_label").red().to_string());
                     return Err(e);
                 }
             }
 
         } else {
             // 精确路径匹配（原有逻辑）
-            let output_path = Path::new(output);
+            let _output_path = Path::new(output);
 
             // 判断是文件还是目录
             if let Some(meta) = container.get_file(path) {
                 // 是文件
-                println!("{} 正在导出文件: {} -> {}", "→".blue(), path, output);
+                println!("{}", crate::i18n::t2("ex.exporting_file", "source", path, "dest", output).blue());
 
                 // 创建进度条
                 let pb = ProgressBar::new(meta.size);
@@ -137,18 +137,18 @@ pub fn run(
 
                 match result {
                     Ok(()) => {
-                        pb.finish_with_message(format!("{}", "完成".green()));
-                        println!("{} 文件已导出: {}", "✓".green(), output);
+                        pb.finish_with_message(crate::i18n::t("done_label").green().to_string());
+                        println!("{}", crate::i18n::t1("ex.file_exported", "path", output).green());
                     }
                     Err(e) => {
-                        pb.abandon_with_message(format!("{}", "失败".red()));
+                        pb.abandon_with_message(crate::i18n::t("failed_label").red().to_string());
                         return Err(e);
                     }
                 }
 
             } else {
                 // 尝试作为目录导出
-                println!("{} 正在导出目录: {} -> {}", "→".blue(), path, output);
+                println!("{}", crate::i18n::t2("ex.exporting_dir", "source", path, "dest", output).blue());
 
                 let prefix = format!("{}/", path.trim_end_matches('/'));
                 let files: Vec<(String, u64)> = veil_core::index::list_files(container.root())
@@ -158,7 +158,7 @@ pub fn run(
                     .collect();
 
                 if files.is_empty() {
-                    println!("{} 目录为空，无文件导出", "→".yellow());
+                    println!("{}", crate::i18n::t("ex.empty_dir").yellow());
                     return Ok(());
                 }
 
@@ -183,11 +183,11 @@ pub fn run(
 
                 match result {
                     Ok(()) => {
-                        pb.finish_with_message(format!("{}", "完成".green()));
-                        println!("{} 目录已导出完成", "✓".green());
+                        pb.finish_with_message(crate::i18n::t("done_label").green().to_string());
+                        println!("{}", crate::i18n::t("ex.dir_exported").green());
                     }
                     Err(e) => {
-                        pb.abandon_with_message(format!("{}", "失败".red()));
+                        pb.abandon_with_message(crate::i18n::t("failed_label").red().to_string());
                         return Err(e);
                     }
                 }
@@ -195,7 +195,7 @@ pub fn run(
             }
         }
     } else {
-        anyhow::bail!("请指定要导出的路径（位置参数或 -i），使用 \"**/*\" 导出全部");
+        anyhow::bail!("{}", crate::i18n::t("ex.specify_path"));
     }
 
     Ok(())

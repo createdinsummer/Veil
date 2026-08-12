@@ -75,15 +75,15 @@ impl<R: Read> Read for ProgressReader<R> {
 /// veil add photos.veil -i photo.jpg -o 2024/photo.jpg -p mypass
 /// ```
 pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password("请输入容器密码: ", password)?;
+    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
-    println!("{}", "正在打开容器...".cyan());
+    println!("{}", crate::i18n::t("opening_container").cyan());
     let mut container = Container::open(container_path, password)?;
 
     let source_path = Path::new(source);
 
     if !source_path.exists() {
-        anyhow::bail!("源文件或目录不存在: {}", source);
+        anyhow::bail!("{}", crate::i18n::t1("add.source_not_found", "path", source));
     }
 
     if source_path.is_file() {
@@ -94,7 +94,7 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
 
         let file_size = source_path.metadata()?.len();
 
-        println!("{} 正在添加文件: {} -> {}", "→".blue(), source, virtual_path);
+        println!("{}", crate::i18n::t2("add.adding_file", "source", source, "dest", virtual_path).blue());
 
         // 创建进度条
         let pb = ProgressBar::new(file_size);
@@ -112,12 +112,12 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
         // 确保进度条被清理
         match result {
             Ok(_) => {
-                pb.finish_with_message(format!("{}", "完成".green()));
-                println!("{} 文件已添加: {}", "✓".green(), virtual_path);
+                pb.finish_with_message(crate::i18n::t("done_label").green().to_string());
+                println!("{}", crate::i18n::t1("add.file_added", "path", virtual_path).green());
                 Ok(())
             }
             Err(e) => {
-                pb.abandon_with_message(format!("{}", "失败".red()));
+                pb.abandon_with_message(crate::i18n::t("failed_label").red().to_string());
                 Err(e)
             }
         }?;
@@ -125,12 +125,12 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
         // 添加目录
         let dest_prefix = dest.unwrap_or("");
 
-        println!("{} 正在扫描目录: {}", "→".blue(), source);
+        println!("{}", crate::i18n::t1("add.scanning_dir", "path", source).blue());
 
         // 不在 CLI 层扫描，让 core 层扫描并通过回调返回总数
         let pb = ProgressBar::new(0); // 初始为 0，回调里更新
         pb.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} 文件 | {msg}")
+            .template(crate::i18n::t("pb.dir_template"))
             .unwrap()
             .progress_chars("#>-"));
 
@@ -139,7 +139,7 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
             // 第一次回调时设置总数
             if pb.length() == Some(0) {
                 pb.set_length(total as u64);
-                println!("{} 找到 {} 个文件，开始添加...", "→".blue(), total);
+                println!("{}", crate::i18n::t1("add.found_files", "count", &total.to_string()).blue());
             }
             pb.set_position((processed + 1) as u64);
             let file_name = file_path.file_name()
@@ -155,25 +155,25 @@ pub fn run(container_path: &str, source: &str, dest: Option<&str>, password: Opt
                     if len == 0 {
                         // 空目录情况
                         pb.finish_and_clear();
-                        println!("{} 目录为空，无文件添加", "→".yellow());
+                        println!("{}", crate::i18n::t("add.empty_dir").yellow());
                     } else {
                         pb.set_position(len);
-                        pb.finish_with_message(format!("{}", "完成".green()));
-                        println!("{} 目录已添加完成", "✓".green());
+                        pb.finish_with_message(crate::i18n::t("done_label").green().to_string());
+                        println!("{}", crate::i18n::t("add.dir_added").green());
                     }
                 } else {
                     pb.finish_and_clear();
-                    println!("{} 目录为空，无文件添加", "→".yellow());
+                    println!("{}", crate::i18n::t("add.empty_dir").yellow());
                 }
                 Ok(())
             }
             Err(e) => {
-                pb.abandon_with_message(format!("{}", "失败".red()));
+                pb.abandon_with_message(crate::i18n::t("failed_label").red().to_string());
                 Err(e)
             }
         }?;
     } else {
-        anyhow::bail!("不支持的文件类型");
+        anyhow::bail!("{}", crate::i18n::t("add.unsupported_type"));
     }
 
     Ok(())
