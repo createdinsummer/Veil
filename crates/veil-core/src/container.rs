@@ -372,35 +372,7 @@ impl Container {
         Ok(())
     }
 
-    /// 把一个 blob 追加到**已打开文件**的当前位置并插入目录树，**不 fsync、不提交**。
-    ///
-    /// 供 [`add_dir`](Self::add_dir) 等批量场景用；调用方负责最后统一 `sync_all` + `commit`。
-    /// `offset` 传入该 blob 的起始偏移，返回时更新为下一个 blob 的偏移。
-    fn stage_blob(
-        &mut self,
-        file: &mut File,
-        offset: &mut u64,
-        virtual_path: &str,
-        plaintext: &[u8],
-    ) -> Result<()> {
-        let content_hash: [u8; 32] = blake3::hash(plaintext).into();
-        let blob_cipher = encrypt_bytes(&self.key_pair.to_public(), plaintext)?;
-        file.write_all(&blob_cipher)?;
-
-        let meta = FileMeta {
-            size: plaintext.len() as u64,
-            blob_offset: *offset,
-            blob_len: blob_cipher.len() as u64,
-            content_hash,
-            mime: crate::mime::guess_mime(virtual_path),
-            mtime: None,
-        };
-        *offset += blob_cipher.len() as u64;
-        index::insert_file(&mut self.root, virtual_path, meta);
-        Ok(())
-    }
-
-    /// 流式版本的 `stage_blob`（供 `add_dir` 批量场景用）。
+    /// 流式写入一个 blob 到已打开文件并插入目录树，**不 fsync、不提交**（供 `add_dir` 批量场景用）。
     fn stage_blob_streaming(
         &mut self,
         file: &mut File,
