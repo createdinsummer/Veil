@@ -32,9 +32,3 @@ echo "✓ 打包完成！"
 echo ""
 echo "发布目录: release/"
 ls -lh release/bin/veil
-
-# 清理临时目录
-echo ""
-echo "清理临时目录..."
-rm -rf "$SCRIPT_DIR/release"
-echo "✓ 已清理"

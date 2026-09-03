@@ -38,6 +38,24 @@ fi
 
 info "检测到 Cargo 版本: $(cargo --version)"
 
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+cd "$PROJECT_ROOT"
+
+# 调用 build.sh 进行打包
+info "调用构建脚本进行打包..."
+"$SCRIPT_DIR/build.sh"
+
+# 查找打包产物
+BINARY_PATH="release/bin/veil"
+
+if [ ! -f "$BINARY_PATH" ]; then
+    error "找不到打包产物: $BINARY_PATH"
+    exit 1
+fi
+
 # 获取安装目标路径
 INSTALL_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 
@@ -47,27 +65,6 @@ if [ ! -d "$INSTALL_DIR" ]; then
 fi
 
 info "安装目录: $INSTALL_DIR"
-
-# 清理旧的编译产物
-info "清理旧的编译产物..."
-cargo clean
-
-# 编译项目
-info "开始编译 Veil (Release 模式)..."
-if ! cargo build --release --bin veil; then
-    error "编译失败"
-    exit 1
-fi
-
-success "编译完成"
-
-# 查找编译产物
-BINARY_PATH="target/release/veil"
-
-if [ ! -f "$BINARY_PATH" ]; then
-    error "找不到编译产物: $BINARY_PATH"
-    exit 1
-fi
 
 # 安装二进制文件
 info "正在安装 veil 到 $INSTALL_DIR..."
