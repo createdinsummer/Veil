@@ -11,6 +11,10 @@ cd "$PROJECT_ROOT"
 
 echo "开始打包 Veil CLI..."
 
+# 清理旧的编译产物
+echo "清理旧的编译产物..."
+cargo clean
+
 # 编译（仅 CLI，跳过测试节省空间）
 echo "编译 release 版本..."
 cargo build --release --package veil-cli
