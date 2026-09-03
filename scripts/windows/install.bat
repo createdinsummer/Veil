@@ -1,6 +1,6 @@
 @echo off
-REM Veil Windows Installation Script (Batch version)
-REM Corresponds to install.sh for Linux/macOS
+REM Veil Windows Installation Script
+REM Corresponds to scripts/unix/install.sh
 REM Compiles and installs veil to user directory
 
 setlocal enabledelayedexpansion
@@ -24,15 +24,12 @@ echo     install.bat
 echo.
 echo What it does:
 echo     1. Checks for Rust/Cargo
-echo     2. Builds veil in release mode
+echo     2. Calls build.bat to build veil
 echo     3. Installs to user .cargo\bin directory
 echo     4. Verifies installation
 echo.
 echo Requirements:
 echo     - Rust toolchain
-echo.
-echo For advanced options, use PowerShell version:
-echo     .\install.ps1 -Help
 echo.
 exit /b 0
 
@@ -45,14 +42,40 @@ if %errorlevel% neq 0 (
     echo [X] Cargo not found!
     echo.
     echo Please install Rust from: https://rustup.rs/
-    echo.
-    echo Or use the PowerShell installer for automatic setup:
-    echo   .\scripts\windows\install.ps1
     exit /b 1
 )
 
 for /f "tokens=*" %%i in ('cargo --version') do set CARGO_VERSION=%%i
 echo [+] Found Cargo: !CARGO_VERSION!
+
+REM Get script and project directories
+set SCRIPT_DIR=%~dp0
+cd /d "%SCRIPT_DIR%..\..\"
+set PROJECT_ROOT=%CD%
+
+REM Call build script
+echo [*] Calling build script...
+set BUILD_SCRIPT=%SCRIPT_DIR%build.bat
+
+if not exist "%BUILD_SCRIPT%" (
+    echo [X] Build script not found: %BUILD_SCRIPT%
+    exit /b 1
+)
+
+call "%BUILD_SCRIPT%"
+if %errorlevel% neq 0 (
+    echo [X] Build failed
+    exit /b 1
+)
+
+echo.
+
+REM Find build artifact
+set BINARY_PATH=%PROJECT_ROOT%\release\bin\veil.exe
+if not exist "%BINARY_PATH%" (
+    echo [X] Binary not found: %BINARY_PATH%
+    exit /b 1
+)
 
 REM Get install directory
 if defined CARGO_HOME (
@@ -67,31 +90,6 @@ if not exist "!INSTALL_DIR!" (
 )
 
 echo [*] Install directory: !INSTALL_DIR!
-
-REM Clean old artifacts
-echo [*] Cleaning old build artifacts...
-cargo clean >nul 2>&1
-
-REM Build project
-echo [*] Building Veil (Release mode)...
-echo.
-
-cargo build --release --package veil-cli
-if %errorlevel% neq 0 (
-    echo.
-    echo [X] Build failed
-    exit /b 1
-)
-
-echo.
-echo [+] Build completed
-
-REM Find binary
-set BINARY_PATH=target\release\veil.exe
-if not exist "%BINARY_PATH%" (
-    echo [X] Binary not found: %BINARY_PATH%
-    exit /b 1
-)
 
 REM Install binary
 echo [*] Installing veil to !INSTALL_DIR!...
