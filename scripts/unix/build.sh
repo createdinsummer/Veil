@@ -9,8 +9,22 @@ echo "开始打包 Veil CLI..."
 echo "编译 release 版本..."
 cargo build --release --package veil-cli
 
+# 打包
+echo "创建发布包..."
+rm -rf release
+mkdir -p release/bin
+
+# 复制文件
+cp target/release/veil release/bin/
+
 echo ""
 echo "✓ 打包完成！"
 echo ""
-echo "二进制文件位置: target/release/veil"
-ls -lh target/release/veil
+echo "发布目录: release/"
+ls -lh release/bin/veil
+
+# 清理临时目录
+echo ""
+echo "清理临时目录..."
+rm -rf release
+echo "✓ 已清理"
