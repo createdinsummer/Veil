@@ -17,13 +17,9 @@ cargo build --release --package veil-cli
 echo "创建发布包..."
 rm -rf release
 mkdir -p release/bin
-mkdir -p release/docs
 
 # 复制文件
 cp target/release/veil release/bin/
-cp crates/veil-cli/README.md release/docs/CLI_README.md
-cp crates/veil-core/README.md release/docs/CORE_README.md
-cp INSTALL.md release/
 
 echo ""
 echo "✓ 打包完成！"
