@@ -1096,6 +1096,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // 显示版本信息
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("🔓 Veil 容器暴力破解工具 v{}", VERSION);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
