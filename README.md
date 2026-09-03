@@ -60,17 +60,19 @@ veil shell vault.veil
 ```
 Veil/
 ├── crates/
-│   ├── veil-core/      # 核心加密库
-│   └── veil-cli/       # 命令行工具
-├── build.sh            # 打包脚本
-├── INSTALL.md          # 安装指南
-└── README.md           # 本文件
+│   ├── veil-core/         # 核心加密库
+│   ├── veil-cli/          # 命令行工具
+│   └── veil-brute-force/  # 暴力破解工具（安全测试）
+├── build.sh               # 打包脚本
+├── INSTALL.md             # 安装指南
+└── README.md              # 本文件
 ```
 
 ## 核心组件
 
 - **[veil-core](crates/veil-core/README.md)** - 核心加密库，提供容器管理 API
 - **[veil-cli](crates/veil-cli/README.md)** - 命令行工具，9 个命令 + 批处理模式
+- **[veil-brute-force](crates/veil-brute-force/README.md)** - 密码强度测试工具（仅供教育目的）
 
 ## 加密技术
 
@@ -179,6 +181,20 @@ veil> exit
 - ✅ **完整性校验**：BLAKE3 哈希验证
 - ✅ **崩溃安全**：追加写入 + Footer 提交点
 - ✅ **零泄漏**：私钥仅在内存中，进程结束自动销毁
+
+### 密码强度测试
+
+Veil 提供了暴力破解工具用于测试密码强度：
+
+```bash
+# 运行密码强度测试
+cargo run -p veil-brute-force --release
+
+# 测试弱密码容器（演示目的）
+# 支持字典攻击、字符集暴力破解、组词攻击等多种模式
+```
+
+⚠️ **重要**：此工具仅用于测试自己创建的容器，请勿用于攻击他人数据。详见 [暴力破解工具文档](crates/veil-brute-force/README.md)。
 
 ## 开发
 

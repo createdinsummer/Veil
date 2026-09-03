@@ -1,0 +1,6 @@
+# 测试容器
+*.veil
+
+# 自定义密码字典
+*.txt
+!common_passwords.txt

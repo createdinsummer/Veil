@@ -1,0 +1,17 @@
+[package]
+name = "veil-brute-force"
+version = "1.1.2"
+edition = "2021"
+authors = ["Veil Contributors"]
+description = "Veil 容器暴力破解工具 - 用于密码强度测试和安全教育"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+veil-core = { path = "../veil-core" }
+age = { version = "0.12", features = ["cli-common"] }
+rayon = "1.12"
+num_cpus = "1.0"
+
+[[bin]]
+name = "veil-brute-force"
+path = "src/main.rs"

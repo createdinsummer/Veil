@@ -327,8 +327,49 @@ fn require_container(container: Option<String>, cmd_name: &str) -> String {
     container.unwrap_or_else(|| exit_with_help("error.require_container", cmd_name))
 }
 
+/// 显示版本和安全信息
+fn show_version_and_security_info() {
+    use colored::Colorize;
+
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    // 检测构建模式
+    #[cfg(debug_assertions)]
+    let is_debug = true;
+    #[cfg(not(debug_assertions))]
+    let is_debug = false;
+
+    // 检测版本类型
+    let is_dev = VERSION.contains("dev") || VERSION.contains("alpha") || VERSION.contains("beta");
+
+    println!("\n{} {}", "Veil".cyan().bold(), format!("v{}", VERSION).cyan());
+
+    if is_dev {
+        println!("{}", "⚠️  开发版本 - 仅供测试使用".yellow().bold());
+    }
+
+    if is_debug {
+        println!();
+        println!("{}", "⚠️  警告: Debug 构建模式".yellow().bold());
+        println!("{}", "   密钥强度: scrypt N=2^12 (较弱)".yellow());
+        println!("{}", "   破解速度: ~50 次/秒".yellow());
+        println!();
+        println!("{}", "💡 强烈建议使用 Release 模式:".bright_yellow());
+        println!("   cargo build --release --package veil-cli");
+        println!("{}", "   密钥强度提升 64 倍 (scrypt N=2^18)".green());
+        println!();
+    } else {
+        println!("{}", "✅ Release 模式 - 高安全强度 (scrypt N=2^18)".green());
+    }
+
+    println!();
+}
+
 fn main() {
     i18n::init();
+
+    // 显示版本和安全信息
+    show_version_and_security_info();
 
     let cmd = build_localized_command();
     let matches = cmd.get_matches();
