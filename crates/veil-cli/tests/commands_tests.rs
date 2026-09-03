@@ -23,8 +23,7 @@ fn veil(password: &str) -> Command {
 fn init_container(temp_dir: &TempDir, password: &str) -> std::path::PathBuf {
     let container = temp_dir.path().join("test.veil");
     veil(password)
-        .arg("init")
-        .arg(&container)
+        .args(&["init", &container.to_string_lossy(), password])
         .assert()
         .success();
     container
@@ -40,8 +39,7 @@ fn init_creates_new_container() {
     let container = temp_dir.path().join("new.veil");
 
     veil("password123")
-        .arg("init")
-        .arg(&container)
+        .args(&["init", &container.to_string_lossy(), "password123"])
         .assert()
         .success()
         .stdout(predicate::str::contains("容器创建成功"));
@@ -55,8 +53,7 @@ fn init_fails_if_file_exists() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("init")
-        .arg(&container)
+        .args(&["init", &container.to_string_lossy(), "pass"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("容器文件已存在"));
@@ -68,8 +65,7 @@ fn init_with_empty_password() {
     let container = temp_dir.path().join("test.veil");
 
     veil("")
-        .arg("init")
-        .arg(&container)
+        .args(&["init", &container.to_string_lossy(), ""])
         .assert()
         .success();
 
@@ -88,9 +84,7 @@ fn add_single_file() {
     fs::write(&file, "content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加"));
@@ -104,10 +98,7 @@ fn add_file_with_custom_path() {
     fs::write(&file, "content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
-        .arg("custom/path.txt")
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy(), "custom/path.txt"])
         .assert()
         .success();
 }
@@ -122,9 +113,7 @@ fn add_directory() {
     fs::write(dir.join("file2.txt"), "content2").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&dir)
+        .args(&["add", &container.to_string_lossy(), &dir.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加"));
@@ -136,9 +125,7 @@ fn add_nonexistent_file_fails() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg("nonexistent.txt")
+        .args(&["add", &container.to_string_lossy(), "nonexistent.txt"])
         .assert()
         .failure();
 }
@@ -151,9 +138,7 @@ fn add_with_wrong_password_fails() {
     fs::write(&file, "content").unwrap();
 
     veil("wrong")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .failure();
 }
@@ -171,17 +156,13 @@ fn rm_existing_file() {
 
     // 先添加
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     // 再删除
     veil("pass")
-        .arg("rm")
-        .arg(&container)
-        .arg("test.txt")
+        .args(&["rm", &container.to_string_lossy(), "test.txt"])
         .assert()
         .success()
         .stdout(predicate::str::contains("已删除"));
@@ -193,9 +174,7 @@ fn rm_nonexistent_file_fails() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("rm")
-        .arg(&container)
-        .arg("nonexistent.txt")
+        .args(&["rm", &container.to_string_lossy(), "nonexistent.txt"])
         .assert()
         .failure();
 }
@@ -210,18 +189,14 @@ fn rm_with_wildcard() {
         let file = temp_dir.path().join(format!("file{}.txt", i));
         fs::write(&file, format!("content{}", i)).unwrap();
         veil("pass")
-            .arg("add")
-            .arg(&container)
-            .arg(&file)
+            .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
             .assert()
             .success();
     }
 
     // 用通配符删除
     veil("pass")
-        .arg("rm")
-        .arg(&container)
-        .arg("*.txt")
+        .args(&["rm", &container.to_string_lossy(), "*.txt"])
         .assert()
         .success();
 }
@@ -238,17 +213,12 @@ fn mv_rename_file() {
     fs::write(&file, "content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     veil("pass")
-        .arg("mv")
-        .arg(&container)
-        .arg("old.txt")
-        .arg("new.txt")
+        .args(&["mv", &container.to_string_lossy(), "old.txt", "new.txt"])
         .assert()
         .success()
         .stdout(predicate::str::contains("已移动"));
@@ -262,17 +232,12 @@ fn mv_to_subdirectory() {
     fs::write(&file, "content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     veil("pass")
-        .arg("mv")
-        .arg(&container)
-        .arg("test.txt")
-        .arg("subdir/test.txt")
+        .args(&["mv", &container.to_string_lossy(), "test.txt", "subdir/test.txt"])
         .assert()
         .success();
 }
@@ -283,10 +248,7 @@ fn mv_nonexistent_file_fails() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("mv")
-        .arg(&container)
-        .arg("nonexistent.txt")
-        .arg("new.txt")
+        .args(&["mv", &container.to_string_lossy(), "nonexistent.txt", "new.txt"])
         .assert()
         .failure();
 }
@@ -301,8 +263,7 @@ fn free_shows_empty_container() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .success();
 }
@@ -316,15 +277,12 @@ fn free_shows_files() {
     let file = temp_dir.path().join("test.txt");
     fs::write(&file, "content").unwrap();
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     veil("pass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("test.txt"));
@@ -342,24 +300,17 @@ fn free_shows_directory_structure() {
     fs::write(&file2, "content2").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file1)
-        .arg("dir/file1.txt")
+        .args(&["add", &container.to_string_lossy(), &file1.to_string_lossy(), "dir/file1.txt"])
         .assert()
         .success();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file2)
-        .arg("file2.txt")
+        .args(&["add", &container.to_string_lossy(), &file2.to_string_lossy(), "file2.txt"])
         .assert()
         .success();
 
     veil("pass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("dir"))
@@ -378,18 +329,13 @@ fn ex_extract_single_file() {
     fs::write(&file, "original content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     let output = temp_dir.path().join("extracted.txt");
     veil("pass")
-        .arg("ex")
-        .arg(&container)
-        .arg("source.txt")
-        .arg(&output)
+        .args(&["ex", &container.to_string_lossy(), "source.txt", &output.to_string_lossy()])
         .assert()
         .success();
 
@@ -405,9 +351,7 @@ fn ex_extract_to_directory() {
     fs::write(&file, "content").unwrap();
 
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
@@ -416,10 +360,7 @@ fn ex_extract_to_directory() {
 
     // 导出到目录时需要指定完整的输出路径
     veil("pass")
-        .arg("ex")
-        .arg(&container)
-        .arg("test.txt")
-        .arg(output_dir.join("test.txt"))
+        .args(&["ex", &container.to_string_lossy(), "test.txt", &output_dir.join("test.txt").to_string_lossy()])
         .assert()
         .success();
 
@@ -436,9 +377,7 @@ fn ex_extract_with_wildcard() {
         let file = temp_dir.path().join(format!("image{}.png", i));
         fs::write(&file, format!("data{}", i)).unwrap();
         veil("pass")
-            .arg("add")
-            .arg(&container)
-            .arg(&file)
+            .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
             .assert()
             .success();
     }
@@ -447,10 +386,7 @@ fn ex_extract_with_wildcard() {
     fs::create_dir(&output_dir).unwrap();
 
     veil("pass")
-        .arg("ex")
-        .arg(&container)
-        .arg("*.png")
-        .arg(&output_dir)
+        .args(&["ex", &container.to_string_lossy(), "*.png", &output_dir.to_string_lossy()])
         .assert()
         .success();
 
@@ -466,10 +402,7 @@ fn ex_nonexistent_file_fails() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("ex")
-        .arg(&container)
-        .arg("nonexistent.txt")
-        .arg("output.txt")
+        .args(&["ex", &container.to_string_lossy(), "nonexistent.txt", "output.txt"])
         .assert()
         .failure();
 }
@@ -484,8 +417,7 @@ fn info_shows_container_metadata() {
     let container = init_container(&temp_dir, "pass");
 
     veil("pass")
-        .arg("info")
-        .arg(&container)
+        .args(&["info", &container.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("容器"))
@@ -501,15 +433,12 @@ fn info_shows_file_count() {
     let file = temp_dir.path().join("test.txt");
     fs::write(&file, "content").unwrap();
     veil("pass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     veil("pass")
-        .arg("info")
-        .arg(&container)
+        .args(&["info", &container.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("1"));
@@ -521,8 +450,7 @@ fn info_with_wrong_password_fails() {
     let container = init_container(&temp_dir, "correct");
 
     veil("wrong")
-        .arg("info")
-        .arg(&container)
+        .args(&["info", &container.to_string_lossy()])
         .assert()
         .failure();
 }
@@ -540,31 +468,25 @@ fn passwd_changes_password() {
     let file = temp_dir.path().join("test.txt");
     fs::write(&file, "content").unwrap();
     veil("oldpass")
-        .arg("add")
-        .arg(&container)
-        .arg(&file)
+        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
         .assert()
         .success();
 
     // 修改密码
     veil("oldpass")
-        .arg("passwd")
-        .arg(&container)
-        .env("VEIL_NEW_PASSWORD", "newpass")
+        .args(&["passwd", &container.to_string_lossy(), "oldpass", "newpass"])
         .assert()
         .success();
 
     // 用旧密码失败
     veil("oldpass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .failure();
 
     // 用新密码成功
     veil("newpass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .success()
         .stdout(predicate::str::contains("test.txt"));
@@ -576,9 +498,7 @@ fn passwd_with_wrong_old_password_fails() {
     let container = init_container(&temp_dir, "correct");
 
     veil("wrong")
-        .arg("passwd")
-        .arg(&container)
-        .env("VEIL_NEW_PASSWORD", "newpass")
+        .args(&["passwd", &container.to_string_lossy(), "wrong", "newpass"])
         .assert()
         .failure();
 }
@@ -593,22 +513,20 @@ fn command_on_nonexistent_container_fails() {
     let container = temp_dir.path().join("nonexistent.veil");
 
     veil("pass")
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .failure();
 }
 
 #[test]
-#[cfg_attr(target_os = "windows", ignore)] // Windows上交互式输入会挂起
+#[ignore] // 交互式输入会挂起测试
 fn command_without_password_fails() {
     let temp_dir = setup();
     let container = init_container(&temp_dir, "pass");
 
     Command::cargo_bin("veil")
         .unwrap()
-        .arg("free")
-        .arg(&container)
+        .args(&["free", &container.to_string_lossy()])
         .assert()
         .failure();
 }

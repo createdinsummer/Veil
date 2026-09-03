@@ -22,14 +22,13 @@ fn test_shell_help_command() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // 测试 help 命令
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("help\nexit\n");
 
     cmd.assert()
@@ -54,14 +53,13 @@ fn test_shell_add_and_list() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // Shell 模式：添加文件并查看
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin(format!("add {}\nfree\nexit\n", test_file.display()));
 
     cmd.assert()
@@ -83,14 +81,13 @@ fn test_shell_batch_operations() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // 批量操作
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin(format!(
         "add {}\nadd {} data/file2.txt\nfree\nexit\n",
         file1.display(),
@@ -114,21 +111,18 @@ fn test_shell_rm_command() {
 
     // 创建容器并添加文件
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     cmd_with_password("testpass")
-        .arg("add")
-        .arg(&container_path)
-        .arg(&test_file)
+        .args(&["add", &container_path.to_string_lossy(), &test_file.to_string_lossy()])
         .assert()
         .success();
 
     // Shell 模式：删除文件
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("rm test.txt\nfree\nexit\n");
 
     cmd.assert()
@@ -147,21 +141,18 @@ fn test_shell_mv_command() {
 
     // 创建容器并添加文件
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     cmd_with_password("testpass")
-        .arg("add")
-        .arg(&container_path)
-        .arg(&test_file)
+        .args(&["add", &container_path.to_string_lossy(), &test_file.to_string_lossy()])
         .assert()
         .success();
 
     // Shell 模式：移动文件
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("mv test.txt renamed.txt\nfree\nexit\n");
 
     cmd.assert()
@@ -177,14 +168,13 @@ fn test_shell_info_command() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // Shell 模式：查看信息
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("info\nexit\n");
 
     cmd.assert()
@@ -205,22 +195,18 @@ fn test_shell_export_command() {
 
     // 创建容器并添加文件
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     cmd_with_password("testpass")
-        .arg("add")
-        .arg(&container_path)
-        .arg(&input_file)
-        .arg("test.txt")
+        .args(&["add", &container_path.to_string_lossy(), &input_file.to_string_lossy(), "test.txt"])
         .assert()
         .success();
 
     // Shell 模式：导出文件
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin(format!("ex test.txt {}\nexit\n", output_file.display()));
 
     cmd.assert()
@@ -239,14 +225,13 @@ fn test_shell_unknown_command() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // Shell 模式：未知命令（错误输出到 stderr）
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("unknown_command\nexit\n");
 
     cmd.assert()
@@ -261,14 +246,13 @@ fn test_shell_ls_alias() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // Shell 模式：使用 ls 别名
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("ls\nexit\n");
 
     cmd.assert()
@@ -284,14 +268,13 @@ fn test_shell_quit_alias() {
 
     // 创建容器
     cmd_with_password("testpass")
-        .arg("init")
-        .arg(&container_path)
+        .args(&["init", &container_path.to_string_lossy(), "testpass"])
         .assert()
         .success();
 
     // Shell 模式：使用 quit 别名
     let mut cmd = cmd_with_password("testpass");
-    cmd.arg("shell").arg(&container_path);
+    cmd.args(&["shell", &container_path.to_string_lossy()]);
     cmd.write_stdin("quit\n");
 
     cmd.assert()
