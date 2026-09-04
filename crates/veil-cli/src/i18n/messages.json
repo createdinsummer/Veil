@@ -193,8 +193,8 @@
     "en": "  File count: {count}"
   },
   "free.total_size": {
-    "zh": "  总大小: {bytes} 字节 ({mb:.2} MB)",
-    "en": "  Total size: {bytes} bytes ({mb:.2} MB)"
+    "zh": "  总大小: {bytes} 字节 ({mb} MB)",
+    "en": "  Total size: {bytes} bytes ({mb} MB)"
   },
 
   "info.title": {
@@ -210,8 +210,8 @@
     "en": "  Created with version: {version}"
   },
   "info.container_size": {
-    "zh": "  容器大小: {bytes} 字节 ({mb:.2} MB)",
-    "en": "  Container size: {bytes} bytes ({mb:.2} MB)"
+    "zh": "  容器大小: {bytes} 字节 ({mb} MB)",
+    "en": "  Container size: {bytes} bytes ({mb} MB)"
   },
   "info.content_title": {
     "zh": "内容统计:",
@@ -222,8 +222,8 @@
     "en": "  File count: {count}"
   },
   "info.content_size": {
-    "zh": "  内容总大小: {bytes} 字节 ({mb:.2} MB)",
-    "en": "  Total content size: {bytes} bytes ({mb:.2} MB)"
+    "zh": "  内容总大小: {bytes} 字节 ({mb} MB)",
+    "en": "  Total content size: {bytes} bytes ({mb} MB)"
   },
   "info.mime_dist_title": {
     "zh": "文件类型分布:",
