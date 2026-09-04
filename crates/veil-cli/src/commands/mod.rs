@@ -8,6 +8,22 @@ pub mod info;
 pub mod passwd;
 pub mod shell;
 
+/// 密码输入辅助函数（自适应显示编码，跨平台）
+///
+/// 在所有平台上统一处理密码提示的显示编码转换
+fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
+    use std::io::Write;
+
+    // 将提示文本编码为显示环境可识别的字节序列（跨平台）
+    let prompt_bytes = crate::output_encoding::encode_for_display(prompt);
+    std::io::stdout().write_all(&prompt_bytes)?;
+    std::io::stdout().flush()?;
+
+    // 使用 rpassword 读取密码（它会处理不回显）
+    // 注意：密码输入始终返回 UTF-8 String，不需要编码转换
+    rpassword::read_password()
+}
+
 /// 提示用户输入密码（不回显）。
 ///
 /// 支持三种方式（优先级从高到低）：
@@ -43,7 +59,7 @@ pub fn prompt_password(
     }
 
     // 最后交互式读取（不回显）
-    let password = rpassword::prompt_password(prompt)?;
+    let password = prompt_password_adaptive(prompt)?;
     Ok(age::secrecy::SecretString::from(password))
 }
 
@@ -80,8 +96,8 @@ pub fn prompt_new_password(
     }
 
     // 交互式输入并确认（不回显）
-    let password = rpassword::prompt_password(crate::i18n::t("prompt.new_password"))?;
-    let confirm = rpassword::prompt_password(crate::i18n::t("prompt.confirm_password"))?;
+    let password = prompt_password_adaptive(crate::i18n::t("prompt.new_password"))?;
+    let confirm = prompt_password_adaptive(crate::i18n::t("prompt.confirm_password"))?;
 
     if password != confirm {
         anyhow::bail!("{}", crate::i18n::t("error.password_mismatch"));

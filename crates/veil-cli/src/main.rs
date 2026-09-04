@@ -2,6 +2,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod commands;
 mod i18n;
+mod output_encoding;
 
 /// (默认中文，运行时根据 VEIL_LANG 覆写)
 #[derive(Parser)]
@@ -366,6 +367,11 @@ fn show_version_and_security_info() {
 }
 
 fn main() {
+    // 初始化（自动检测显示编码，跨平台）
+    let _encoding = output_encoding::get_display_encoding();
+    // 可选：如果需要在启动时显示编码信息用于调试
+    // eprintln!("检测到显示编码: {:?}", _encoding);
+
     i18n::init();
 
     // 显示版本和安全信息
