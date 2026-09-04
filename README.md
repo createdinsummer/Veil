@@ -100,11 +100,11 @@ Veil 内置跨平台的输出编码自适应模块，确保在不同编码环境
 
 ```
 用户密码
-    ↓ scrypt(N=32768, r=8, p=1)
+    ↓ Argon2id (256MB, 3 iterations, parallelism=4)
 密钥派生
-    ↓ age encrypt
+    ↓ ChaCha20-Poly1305 encrypt
 加密私钥 (存储在 Header)
-    ↓ age decrypt
+    ↓ ChaCha20-Poly1305 decrypt
 容器私钥 (内存中)
     ↓
 加密/解密文件内容
@@ -116,7 +116,7 @@ Veil 内置跨平台的输出编码自适应模块，确保在不同编码环境
 
 | 用途 | 算法 | 说明 |
 |------|------|------|
-| 密钥派生 | scrypt | 抗暴力破解 |
+| 密钥派生 | Argon2id | 抗暴力破解 |
 | 密钥交换 | X25519 | Curve25519 |
 | 对称加密 | ChaCha20-Poly1305 | AEAD 流密码 |
 | 哈希校验 | BLAKE3 | 256-bit |
@@ -197,7 +197,7 @@ veil> exit
 ## 安全性
 
 - ✅ **加密算法**：军事级 ChaCha20-Poly1305 AEAD
-- ✅ **密钥派生**：scrypt 抗暴力破解
+- ✅ **密钥派生**：Argon2id 抗暴力破解
 - ✅ **完整性校验**：BLAKE3 哈希验证
 - ✅ **崩溃安全**：追加写入 + Footer 提交点
 - ✅ **零泄漏**：私钥仅在内存中，进程结束自动销毁
@@ -279,5 +279,5 @@ Apache License 2.0
 
 基于以下优秀的开源项目：
 - [age](https://github.com/str4d/rage) - 现代加密工具
-- [scrypt](https://en.wikipedia.org/wiki/Scrypt) - 密钥派生算法
+- [Argon2](https://github.com/P-H-C/phc-winner-argon2) - 密钥派生算法
 - [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - 快速哈希算法
