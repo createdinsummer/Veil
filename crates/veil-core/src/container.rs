@@ -13,7 +13,7 @@
 //! |   flags               = u16                               |
 //! |   cip_pri_key_len     = u32                               |
 //! |   cip_pri_key         = bytes                             |
-//! |        └─ age(用户密码, 容器 x25519 私钥串)；scrypt 只此一次 |
+//! |        └─ age(用户密码, 容器 x25519 私钥串)；Argon2id 派生 |
 //! +-----------------------------------------------------------+
 //! | Blob 区（追加增长，昂贵的密文数据永不重写）                 |
 //! |   blob_0 = age(pub_key, 文件0内容)  ← 各自完整 age STREAM   |
@@ -33,7 +33,7 @@
 //!
 //! - **公钥 `pub_key`**：只加密（写 blob / 写 Index）；
 //! - **私钥 `key_pair`**：只解密（读 blob / 读 Index），本身被密码加密成 `cip_pri_key`；
-//! - **密码**：只在加密/解密 `cip_pri_key` 处出现，经 scrypt 派生，每容器一生一次。
+//! - **密码**：只在加密/解密 `cip_pri_key` 处出现，经 Argon2id 派生，每容器一生一次。
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -75,13 +75,14 @@ impl Container {
     pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>, cli_version: &str) -> Result<Container> {
         let passphrase = passphrase.into();
         let key_pair = age::x25519::Identity::generate();
+        // 使用 Argon2id 加密私钥
         let cip_pri_key = encrypt_pri_key(&key_pair, passphrase)?;
 
         // 写 Header（文件开头）
         {
             let file = File::create(path.as_ref())?;
             let mut writer = BufWriter::new(file);
-            format::write_header(&mut writer, cli_version, &cip_pri_key)?;
+            format::write_header(&mut writer, cli_version, &cip_pri_key, crate::kdf::KdfType::Argon2id)?;
             writer.flush()?;
         }
 
@@ -111,6 +112,8 @@ impl Container {
             let mut file = File::open(&path)?;
             format::read_header(&mut file)?
         };
+
+        // 使用 Argon2id 解密私钥
         let key_pair = decrypt_pri_key(&header.cip_pri_key, passphrase)?;
 
         // 加载 Index：正常读文件尾 Footer；崩溃过则恢复到上一个有效 Footer
@@ -266,22 +269,23 @@ impl Container {
     /// - `Ok(())`：Header 的密文私钥已用新密码重写
     /// - `Err(VeilError)`：加密或写文件失败
     pub fn change_password(&self, new_passphrase: impl Into<SecretString>) -> Result<()> {
+        // 使用 Argon2id 加密新密码
         let new_cip_pri_key = encrypt_pri_key(&self.key_pair, new_passphrase.into())?;
 
         // 读取旧 Header 获取 CLI 版本
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let old_header = format::read_header(&mut file)?;
 
-        // 生成新 Header
+        // 生成新 Header（使用 Argon2id）
         let mut new_header_bytes = Vec::new();
-        format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key)?;
+        format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key, crate::kdf::KdfType::Argon2id)?;
 
         // 检查新旧 Header 长度是否相同
         let old_header_len = {
             let mut temp_file = File::open(&self.path)?;
             let header = format::read_header(&mut temp_file)?;
             let mut old_bytes = Vec::new();
-            format::write_header(&mut old_bytes, &header.cli_version, &header.cip_pri_key)?;
+            format::write_header(&mut old_bytes, &header.cli_version, &header.cip_pri_key, header.kdf_type)?;
             old_bytes.len()
         };
 

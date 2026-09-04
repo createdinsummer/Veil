@@ -3,6 +3,7 @@ pub mod container;
 pub mod error;
 pub mod format;
 pub mod index;
+pub mod kdf;
 pub mod keys;
 pub mod mime;
 pub mod slice_reader;

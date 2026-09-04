@@ -1,0 +1,100 @@
+//! # kdf —— 密钥派生函数（KDF）类型与参数
+//!
+//! 本模块定义 Veil 支持的 KDF 类型及其参数。
+
+use crate::error::{Result, VeilError};
+
+/// KDF 类型标识
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KdfType {
+    /// Argon2id
+    Argon2id = 0x1,
+}
+
+impl KdfType {
+    /// 从容器 flags 字段解析 KDF 类型
+    pub fn from_flags(flags: u16) -> Result<Self> {
+        match flags & 0x0F {
+            0x1 => Ok(Self::Argon2id),
+            n => Err(VeilError::Format(format!("未知的 KDF 类型: 0x{:x}", n))),
+        }
+    }
+
+    /// 转换为 flags 字段值
+    pub fn to_flags(self) -> u16 {
+        self as u16
+    }
+}
+
+/// Argon2id 参数配置
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Params {
+    /// 内存消耗（KB）
+    pub memory_kb: u32,
+    /// 迭代次数
+    pub iterations: u32,
+    /// 并行度（线程数）
+    pub parallelism: u32,
+}
+
+impl Argon2Params {
+    /// 标准安全级别（OWASP 推荐）
+    /// - 内存：256 MB
+    /// - 时间：约 1.5 秒
+    /// - 防御强度：良好
+    pub const STANDARD: Self = Self {
+        memory_kb: 256 * 1024,  // 256 MB
+        iterations: 3,
+        parallelism: 4,
+    };
+
+    /// 高安全级别
+    /// - 内存：512 MB
+    /// - 时间：约 3 秒
+    /// - 防御强度：很好
+    pub const HIGH: Self = Self {
+        memory_kb: 512 * 1024,  // 512 MB
+        iterations: 4,
+        parallelism: 4,
+    };
+
+    /// 极高安全级别
+    /// - 内存：1 GB
+    /// - 时间：约 6 秒
+    /// - 防御强度：极好
+    pub const MAXIMUM: Self = Self {
+        memory_kb: 1024 * 1024, // 1 GB
+        iterations: 5,
+        parallelism: 4,
+    };
+}
+
+impl Default for Argon2Params {
+    fn default() -> Self {
+        Self::STANDARD
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kdf_type_roundtrip() {
+        let argon2 = KdfType::Argon2id;
+        assert_eq!(KdfType::from_flags(argon2.to_flags()).unwrap(), argon2);
+    }
+
+    #[test]
+    fn unknown_kdf_type() {
+        assert!(KdfType::from_flags(0xFF).is_err());
+    }
+
+    #[test]
+    fn argon2_params_constants() {
+        let standard = Argon2Params::STANDARD;
+        assert_eq!(standard.memory_kb, 256 * 1024);
+        assert_eq!(standard.iterations, 3);
+        assert_eq!(standard.parallelism, 4);
+    }
+}

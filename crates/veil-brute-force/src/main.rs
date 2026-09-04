@@ -1105,12 +1105,13 @@ fn main() {
     println!("⚠️  警告: 仅用于测试自己创建的容器!");
     println!();
 
-    // scrypt 强度提示
-    println!("🔐 密钥派生强度说明:");
-    println!("   Debug 容器   - scrypt N=2^12");
-    println!("   Release 容器 - scrypt N=2^18");
+    // Argon2id 强度提示
+    println!("🔐 密钥派生算法: Argon2id");
+    println!("   内存消耗: 256 MB");
+    println!("   迭代次数: 3");
+    println!("   并行度: 4");
     println!();
-    println!("💡 提示: 使用 Release 模式创建的容器更安全");
+    println!("💡 提示: Argon2id 是 2015 年密码哈希竞赛获胜者，OWASP/NIST 推荐");
     println!();
 
     // 获取初始容器路径（命令行参数或交互式输入）

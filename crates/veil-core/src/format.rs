@@ -7,6 +7,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::error::{Result, VeilError};
+use crate::kdf::KdfType;
 
 /// Header 数据结构
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub struct Header {
     pub cli_version: String,
     /// 密文私钥
     pub cip_pri_key: Vec<u8>,
+    /// KDF 类型（从 flags 字段解析）
+    pub kdf_type: KdfType,
 }
 
 /// 文件开头魔数，用来一眼确认"这是个 veil 容器"
@@ -35,6 +38,7 @@ pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2;
 /// - `writer`:      输出目标（文件或内存缓冲）
 /// - `cli_version`: CLI 版本字符串（如 "1.1.0"）
 /// - `cip_pri_key`: 密文私钥（keys::encrypt_pri_key 的产物）
+/// - `kdf_type`:    KDF 类型（Argon2id）
 ///
 /// # 返回
 /// - `Ok(u64)`：写入的字节数（= Header 长度，也是后续第一个 blob 的起始偏移）
@@ -43,17 +47,22 @@ pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2;
 /// 结构：
 /// - 8 字节 magic：确认这是个 veil 容器
 /// - 2 字节 version：当前容器格式版本
-/// - 2 字节 flags：预留，暂 0
+/// - 2 字节 flags：bit 0-3 = KDF 类型，bit 4-15 保留
 /// - 4 字节 cli_version_len：CLI 版本字符串字节数
 /// - N 字节 cli_version：CLI 版本字符串 UTF-8
 /// - 4 字节 cip_pri_key_len：密文私钥字节数
 /// - M 字节 cip_pri_key：密文私钥内容
-pub fn write_header<W: Write>(writer: &mut W, cli_version: &str, cip_pri_key: &[u8]) -> Result<u64> {
+pub fn write_header<W: Write>(
+    writer: &mut W,
+    cli_version: &str,
+    cip_pri_key: &[u8],
+    kdf_type: KdfType,
+) -> Result<u64> {
     let cli_version_bytes = cli_version.as_bytes();
 
     writer.write_all(MAGIC)?;                                           // 8 字节
     writer.write_all(&VERSION.to_le_bytes())?;                          // 2 字节
-    writer.write_all(&0u16.to_le_bytes())?;                             // 2 字节 flags（预留，暂 0）
+    writer.write_all(&kdf_type.to_flags().to_le_bytes())?;             // 2 字节 flags（KDF 类型）
     writer.write_all(&(cli_version_bytes.len() as u32).to_le_bytes())?; // 4 字节 cli_version 长度
     writer.write_all(cli_version_bytes)?;                               // N 字节 cli_version 内容
     writer.write_all(&(cip_pri_key.len() as u32).to_le_bytes())?;       // 4 字节 cip_pri_key 长度
@@ -62,7 +71,7 @@ pub fn write_header<W: Write>(writer: &mut W, cli_version: &str, cip_pri_key: &[
     Ok(8 + 2 + 2 + 4 + cli_version_bytes.len() as u64 + 4 + cip_pri_key.len() as u64)
 }
 
-/// 读 Header，校验 magic/version，返回 Header 结构（包含 cli_version 和 cip_pri_key）。
+/// 读 Header，校验 magic/version，返回 Header 结构（包含 cli_version、cip_pri_key 和 kdf_type）。
 pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
@@ -77,7 +86,10 @@ pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
         return Err(VeilError::Format(format!("不支持的容器版本: {version}")));
     }
 
-    reader.read_exact(&mut u16buf)?; // flags，暂时读掉不用
+    // 读取 flags 并解析 KDF 类型
+    reader.read_exact(&mut u16buf)?;
+    let flags = u16::from_le_bytes(u16buf);
+    let kdf_type = KdfType::from_flags(flags)?;
 
     // 读取 cli_version
     let mut u32buf = [0u8; 4];
@@ -97,6 +109,7 @@ pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
     Ok(Header {
         cli_version,
         cip_pri_key,
+        kdf_type,
     })
 }
 
@@ -137,7 +150,7 @@ mod tests {
 
         let fake_cip_pri_key = b"pretend-this-is-cip-pri-key";
         let cli_version = "1.1.0";
-        let header_len = write_header(&mut buf, cli_version, fake_cip_pri_key).unwrap();
+        let header_len = write_header(&mut buf, cli_version, fake_cip_pri_key, KdfType::Argon2id).unwrap();
         write_footer(&mut buf, 111, 222).unwrap();
         println!("header 长度 = {header_len} 字节");
 
@@ -146,9 +159,24 @@ mod tests {
         let header = read_header(&mut buf).unwrap();
         assert_eq!(header.cip_pri_key, fake_cip_pri_key);
         assert_eq!(header.cli_version, cli_version);
+        assert_eq!(header.kdf_type, KdfType::Argon2id);
 
         // 读末尾 Footer
         let (offset, len) = read_footer(&mut buf).unwrap();
         assert_eq!((offset, len), (111, 222));
+    }
+
+    #[test]
+    fn header_argon2_roundtrip() {
+        let mut buf = Cursor::new(Vec::new());
+        let fake_cip_pri_key = b"argon2-encrypted-key";
+        let cli_version = "2.0.0";
+
+        write_header(&mut buf, cli_version, fake_cip_pri_key, KdfType::Argon2id).unwrap();
+
+        buf.set_position(0);
+        let header = read_header(&mut buf).unwrap();
+        assert_eq!(header.kdf_type, KdfType::Argon2id);
+        assert_eq!(header.cip_pri_key, fake_cip_pri_key);
     }
 }

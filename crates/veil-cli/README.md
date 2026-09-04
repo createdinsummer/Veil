@@ -306,7 +306,7 @@ veil passwd photos.veil
 
 ```
 用户密码
-  ↓ (scrypt)
+  ↓ (Argon2id)
 加密私钥 (存储在 Header)
   ↓
 容器私钥 (内存中)
@@ -419,7 +419,7 @@ veil> exit
 ## 技术细节
 
 ### 加密算法
-- **密钥派生**：scrypt（N=32768, r=8, p=1）
+- **密钥派生**：Argon2id（256MB, 3 iterations, parallelism=4）
 - **非对称加密**：X25519（密钥交换）
 - **对称加密**：ChaCha20-Poly1305（数据加密）
 - **哈希**：BLAKE3（完整性校验）

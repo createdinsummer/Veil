@@ -4,40 +4,24 @@
 //!
 //! - 容器随机生成一对 **x25519 非对称密钥** `key_pair`（含私钥、可用 `.to_public()`
 //!   导出公钥 `pub_key`）：公钥加密、`key_pair` 解密；
-//! - 用户只记一个**密码**，密码经 scrypt 派生后把 `key_pair` 的私钥**加密**成
+//! - 用户只记一个**密码**，密码经 Argon2id 派生后把 `key_pair` 的私钥**加密**成
 //!   `cip_pri_key`（密文私钥），存进 Header（[`encrypt_pri_key`]）；
 //! - 打开容器时用密码把 `cip_pri_key` **解密**，取回 `key_pair`（[`decrypt_pri_key`]）。
 //!
-//! 设计要点：scrypt（昂贵 KDF）**每个容器一生只在加密/解密密文私钥时各跑一次**，
+//! 设计要点：Argon2id（昂贵 KDF）**每个容器一生只在加密/解密密文私钥时各跑一次**，
 //! 之后开每个文件都是廉价的非对称解密。私钥与密码全程不打印、不落盘。
 
 use age::secrecy::{ExposeSecret, SecretString};
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    ChaCha20Poly1305, Nonce,
+};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
 use crate::error::{Result, VeilError};
-
-/// 固定的 scrypt 工作因子 `N = 2^log_n`。
-///
-/// 不用 age 的自动校准（会按「创建时的机器/构建」定强度——debug 构建会校准出偏弱的
-/// log_n≈14）。固定一个足够强的值，保证任何环境创建的容器强度一致。
-///
-/// 创建容器时用的 scrypt 工作因子（N = 2^log_n）。
-///
-/// **按构建模式区分**（`debug_assertions` 在 `cargo run`/`cargo test` 等 debug 构建为真、
-/// release 为假）：release 用强因子保证安全；debug 用低因子，避免开发时 scrypt 未优化、
-/// 每次新建/打开容器都卡十几秒。
-///
-/// ⚠️ 后果：**用 debug 构建创建的容器强度较弱（12）；正式使用请用 release 构建创建（18）。**
-#[cfg(not(debug_assertions))]
-const SCRYPT_WORK_FACTOR: u8 = 18;
-#[cfg(debug_assertions)]
-const SCRYPT_WORK_FACTOR: u8 = 12;
-
-/// 打开容器时**接受的**工作因子上限（反 DoS：拒绝恶意容器声称的超大因子）。
-///
-/// 与构建模式无关，取一个足够高的天花板，保证任何正常容器（无论 debug/release 创建）都能打开。
-const SCRYPT_MAX_WORK_FACTOR: u8 = 22;
+use crate::kdf::Argon2Params;
 
 /// 用「用户密码 `passphrase`」把 `key_pair` 的私钥加密成密文私钥 `cip_pri_key`
 /// （即写进 Header 的那串字节）。
@@ -47,39 +31,53 @@ const SCRYPT_MAX_WORK_FACTOR: u8 = 22;
 ///   不夺走所有权，调用方之后还能继续用它（比如导出公钥去加密文件）。
 /// - `passphrase`: 用户输入的密码，用来加密 `key_pair` 的私钥。
 ///   用 `SecretString`（非 `String`）承载，避免被误打进日志；
-///   这里按值传入，因为下面要把它移交给 age 的加密器。
+///   这里按值传入，因为下面要把它移交给加密器。
 ///
 /// # 返回
 /// - `Ok(Vec<u8>)`:    密文私钥 `cip_pri_key`（可直接写进容器 Header）。
-/// - `Err(VeilError)`: 加密过程中的 I/O 或 age 错误（经 `?` 自动转换）。
+/// - `Err(VeilError)`: 加密过程中的错误。
 ///
-/// 注意：scrypt（昂贵 KDF）只在这里发生，整个容器一生只跑这一次这类操作。
+/// 注意：Argon2id（昂贵 KDF）只在这里发生，整个容器一生只跑这一次这类操作。
 pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretString) -> Result<Vec<u8>> {
-    // 取私钥的字符串形式 "AGE-SECRET-KEY-..."；仍用 SecretString 包着，切勿打印
+    // 1. 提取私钥字符串
     let pri_key_str: SecretString = key_pair.to_string();
 
-    // 用密码构造 scrypt 收件人，并**固定工作因子**（不用 with_user_passphrase 的自动校准）
-    let mut recipient = age::scrypt::Recipient::new(passphrase);
-    recipient.set_work_factor(SCRYPT_WORK_FACTOR);
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
+    // 2. 生成随机盐值
+    let mut salt = [0u8; 16];
+    getrandom::getrandom(&mut salt)
+        .map_err(|e| VeilError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-    // 准备一个内存缓冲区当输出目标（Vec<u8> 实现了 Write）
-    let mut out = Vec::new();
+    // 3. Argon2id 派生密钥
+    let params = Argon2Params::STANDARD;
+    let argon2_params = Params::new(params.memory_kb, params.iterations, params.parallelism, Some(32))
+        .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
 
-    // wrap_output(w)：把 w 包成「加密写入器」——往里写明文，它自动加密后写进 w(=out)
-    // &mut out：把 out 可变借给加密器，加密器只管写，所有权仍在 out
-    // 末尾的 ? ：若返回 io::Error，经 #[from] 自动变成 VeilError::Io 并提前返回
-    let mut writer = encryptor.wrap_output(&mut out)?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
 
-    // 把私钥明文喂进加密流。expose_secret() 显式取出 &str，再 as_bytes() 转 &[u8]
-    writer.write_all(pri_key_str.expose_secret().as_bytes())?;
+    let mut derived_key = [0u8; 32];
+    argon2
+        .hash_password_into(passphrase.expose_secret().as_bytes(), &salt, &mut derived_key)
+        .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
 
-    // finish() 必须调用：写出最后一段密文 + 认证标签；漏掉则密文残缺、日后必解密失败
-    writer.finish()?;
+    // 4. 使用派生密钥加密私钥（ChaCha20-Poly1305）
+    let cipher = ChaCha20Poly1305::new(&derived_key.into());
+    let nonce_array = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = Nonce::from(nonce_array);
 
-    // 加密完成，把密文私钥交还调用方
-    Ok(out)
+    let ciphertext = cipher
+        .encrypt(&nonce, pri_key_str.expose_secret().as_bytes())
+        .map_err(|e| VeilError::Format(format!("ChaCha20-Poly1305 加密失败: {}", e)))?;
+
+    // 5. 组装输出：salt(16) || nonce(12) || ciphertext_with_tag
+    let mut output = Vec::with_capacity(16 + 12 + ciphertext.len());
+    output.extend_from_slice(&salt);
+    output.extend_from_slice(nonce.as_slice());
+    output.extend_from_slice(&ciphertext);
+
+    // 6. 清理敏感数据
+    derived_key.zeroize();
+
+    Ok(output)
 }
 
 /// 用「用户密码 `passphrase`」解密密文私钥 `cip_pri_key`，还原出非对称密钥 `key_pair`。
@@ -91,38 +89,56 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
 ///
 /// # 返回
 /// - `Ok(Identity)`:   密码正确时还原出的非对称密钥 `key_pair`。
-/// - `Err(VeilError)`: 密码错误或数据被篡改时，age 返回 DecryptError（不会吐垃圾）。
+/// - `Err(VeilError)`: 密码错误或数据被篡改。
 pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<age::x25519::Identity> {
-    // 密码派生的解密方（age::scrypt::Identity）：与加密时用的 scrypt 密码配对
-    // 注意它不是我们的 key_pair，只是「用密码解密」这一步的解密器；passphrase 在此交给它
-    let mut scrypt_identity = age::scrypt::Identity::new(passphrase);
-    // age 默认拒绝工作因子过高的密文（反 DoS）；放宽到固定天花板，
-    // 保证 debug(12)/release(18) 建的容器都能打开
-    scrypt_identity.set_max_work_factor(SCRYPT_MAX_WORK_FACTOR);
+    // 1. 解析格式：salt(16) || nonce(12) || ciphertext_with_tag
+    if cip_pri_key.len() < 28 {
+        return Err(VeilError::Format("密文数据过短".into()));
+    }
 
-    // Decryptor::new 读取 age 头部。&[u8] 自身实现 Read，可直接当输入源
-    // ? ：密文头损坏等 → DecryptError → 经 #[from] 变 VeilError::Decrypt
-    let decryptor = age::Decryptor::new(cip_pri_key)?;
+    let salt = &cip_pri_key[0..16];
+    let nonce_bytes = &cip_pri_key[16..28];
+    let ciphertext = &cip_pri_key[28..];
 
-    // decrypt 传入「一串候选解密方」（age::Identity trait，即能解密的私钥/密码等）；
-    // 这里只有一个，用 iter::once 包成迭代器
-    // as &dyn age::Identity：把具体类型转成 trait object 引用（age 要 dyn）
-    // 返回可读的 StreamReader；密码错也在这一步报错
-    let mut reader = decryptor.decrypt(std::iter::once(&scrypt_identity as &dyn age::Identity))?;
+    // 2. Argon2id 派生密钥
+    let params = Argon2Params::STANDARD;
+    let argon2_params = Params::new(params.memory_kb, params.iterations, params.parallelism, Some(32))
+        .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
 
-    // 把解密出的明文（私钥字符串）读进 pri_key_str
-    let mut pri_key_str = String::new();
-    reader.read_to_string(&mut pri_key_str)?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
 
-    // 把字符串解析回 x25519 私钥。
-    // parse 的错误类型是 &str，不是 VeilError，所以用 map_err 手动转成 VeilError::Format
-    let result = pri_key_str
+    let mut derived_key = [0u8; 32];
+    argon2
+        .hash_password_into(passphrase.expose_secret().as_bytes(), salt, &mut derived_key)
+        .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
+
+    // 3. 解密私钥
+    let cipher = ChaCha20Poly1305::new(&derived_key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| {
+            // ChaCha20Poly1305 解密失败通常是密码错误
+            VeilError::Decrypt(age::DecryptError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("密码错误或数据已损坏: {}", e),
+            )))
+        })?;
+
+    // 4. 解析私钥字符串
+    let mut pri_key_str =
+        String::from_utf8(plaintext).map_err(|_| VeilError::Format("私钥不是有效的 UTF-8".into()))?;
+
+    let key_pair = pri_key_str
         .parse::<age::x25519::Identity>()
-        .map_err(|e| VeilError::Format(format!("私钥解析失败: {e}")));
+        .map_err(|e| VeilError::Format(format!("私钥解析失败: {}", e)))?;
 
-    // 清零内存里的明文私钥字符串（zeroize），不留残迹
+    // 5. 清理敏感数据
+    derived_key.zeroize();
     pri_key_str.zeroize();
-    result
+
+    Ok(key_pair)
 }
 
 /// 用公钥 `pub_key` 把一段明文加密成 age 密文字节。
@@ -136,8 +152,7 @@ pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<a
 pub fn encrypt_bytes(pub_key: &age::x25519::Recipient, plaintext: &[u8]) -> Result<Vec<u8>> {
     // with_recipients 要「一串实现了 age::Recipient 的东西」；我们只有一个公钥
     // as &dyn age::Recipient：把具体类型转成 trait object 引用
-    let encryptor =
-        age::Encryptor::with_recipients(std::iter::once(pub_key as &dyn age::Recipient))?;
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(pub_key as &dyn age::Recipient))?;
 
     let mut out = Vec::new();
     let mut writer = encryptor.wrap_output(&mut out)?;
@@ -177,14 +192,13 @@ mod tests {
         let cip_pri_key =
             encrypt_pri_key(&key_pair, SecretString::from("correct horse".to_owned())).unwrap();
         println!(
-            "② 密码加密私钥 → cip_pri_key: {} 字节，前 16 字节 = {:02x?}",
+            "② Argon2id 加密私钥 → cip_pri_key: {} 字节，前 16 字节（盐值） = {:02x?}",
             cip_pri_key.len(),
             &cip_pri_key[..16]
         );
 
         // 正确密码 → 还原出的私钥，其公钥应与原来完全一致（证明往返无损）
-        let restored =
-            decrypt_pri_key(&cip_pri_key, SecretString::from("correct horse".to_owned())).unwrap();
+        let restored = decrypt_pri_key(&cip_pri_key, SecretString::from("correct horse".to_owned())).unwrap();
         println!("③ 正确密码解密成功，公钥 = {}", restored.to_public());
         assert_eq!(format!("{}", restored.to_public()), pub_key);
 

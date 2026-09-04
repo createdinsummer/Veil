@@ -352,15 +352,15 @@ fn show_version_and_security_info() {
     if is_debug {
         println!();
         println!("{}", "⚠️  警告: Debug 构建模式".yellow().bold());
-        println!("{}", "   密钥强度: scrypt N=2^12 (较弱)".yellow());
-        println!("{}", "   破解速度: ~50 次/秒".yellow());
+        println!("{}", "   密钥强度: Argon2id (开发测试参数)".yellow());
+        println!("{}", "   破解速度: 较快".yellow());
         println!();
         println!("{}", "💡 强烈建议使用 Release 模式:".bright_yellow());
         println!("   cargo build --release --package veil-cli");
-        println!("{}", "   密钥强度提升 64 倍 (scrypt N=2^18)".green());
+        println!("{}", "   密钥强度: Argon2id 标准安全级别".green());
         println!();
     } else {
-        println!("{}", "✅ Release 模式 - 高安全强度 (scrypt N=2^18)".green());
+        println!("{}", "✅ Release 模式 - 高安全强度 (Argon2id)".green());
     }
 
     println!();

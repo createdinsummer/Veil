@@ -6,7 +6,7 @@
 
 这个暴力破解工具用于：
 1. **评估密码强度** - 测试你的密码是否容易被破解
-2. **验证 scrypt 保护** - 演示 scrypt 工作因子如何减缓暴力破解
+2. **验证 Argon2id 保护** - 演示 Argon2id 如何减缓暴力破解
 3. **安全教育** - 理解弱密码的危险性
 
 ## 攻击模式
@@ -46,26 +46,26 @@ cargo build -p veil-brute-force --release
 
 ## 性能说明
 
-暴力破解速度主要取决于 **scrypt 工作因子**：
+暴力破解速度主要取决于 **Argon2id 密钥派生成本**：
 
-| 容器创建模式 | scrypt work_factor | 尝试速度 | 破解难度 |
-|------------|-------------------|---------|----------|
-| Debug 构建 | 12 | ~50-100 次/秒 | 较低 |
-| Release 构建 | 18 | ~1-5 次/秒 | 高 64 倍 |
+| 参数 | 值 | 影响 |
+|------|------|------|
+| 内存 | 256 MB | 防御 GPU/ASIC 攻击 |
+| 迭代 | 3 | 计算时间成本 |
+| 并行度 | 4 | 多线程优化 |
+| 单次派生时间 | ~1.5 秒 | 破解速度瓶颈 |
+| 实际破解速度 | ~0.67 次/秒 | 8 核 CPU |
 
 ### 实际示例
 
 假设密码是 6 位纯数字 (1,000,000 种可能)：
 
-- **Debug 容器 (work_factor=12)**
-  - 速度: 50 次/秒
-  - 平均破解时间: 1,000,000 / 50 / 2 = 10,000 秒 ≈ 2.8 小时
+- **Argon2id 保护**
+  - 速度: 0.67 次/秒
+  - 平均破解时间: 1,000,000 / 0.67 / 2 ≈ 746,268 秒 ≈ 8.6 天
+  - GPU 加速收益有限（内存硬度限制）
 
-- **Release 容器 (work_factor=18)**
-  - 速度: 2 次/秒
-  - 平均破解时间: 1,000,000 / 2 / 2 = 250,000 秒 ≈ 69 小时
-
-**结论**: Release 模式的 scrypt 因子将暴力破解速度降低了 25-50 倍！
+**结论**: Argon2id 的内存硬度使暴力破解极其困难！
 
 ## 创建测试容器
 
@@ -180,14 +180,15 @@ MyF@v0rite_B00k$2024!
 
 ## 技术细节
 
-### Scrypt 参数
+### Argon2id 参数
 
-Veil 使用的 scrypt KDF 参数：
-- **work_factor (N)**: 2^18 (release) 或 2^12 (debug)
-- **r**: 8
-- **p**: 1
+Veil 使用的 Argon2id KDF 参数：
+- **内存**: 256 MB (262144 KB)
+- **迭代**: 3
+- **并行度**: 4
+- **输出长度**: 32 字节
 
-work_factor 每增加 1，计算时间翻倍。从 12 到 18 意味着增加了 2^6 = 64 倍的计算成本。
+Argon2id 是 2015 年密码哈希竞赛获胜者，被 OWASP 和 NIST 推荐，提供强大的内存硬度保护。
 
 ### Age 加密
 
@@ -233,27 +234,22 @@ fn apply_rules(word: &str) -> Vec<String> {
 use rayon::prelude::*;
 
 // 使用多线程并行尝试
-// 注意: Veil 的 scrypt 已经是 CPU 密集型，并行收益有限
+// 注意: Argon2id 已经是 CPU + 内存密集型，并行收益有限
 ```
 
 ## 实验与学习
 
-### 实验 1: 测量 scrypt 成本
+### 实验 1: 测量 Argon2id 成本
 
-创建两个容器，分别在 debug 和 release 模式：
+创建测试容器并测量破解速度：
 
 ```bash
-# Debug 模式容器
-cargo build
-./target/debug/veil-cli create test_debug.veil  # 密码: test
-
-# Release 模式容器  
+# Release 模式容器
 cargo build --release
-./target/release/veil-cli create test_release.veil  # 密码: test
+./target/release/veil init test.veil  # 密码: test
 
-# 测量破解速度差异
+# 测量破解速度
 time cargo run -p veil-brute-force --release
-# 分别测试两个容器
 ```
 
 ### 实验 2: 密码熵分析
@@ -273,12 +269,11 @@ time cargo run -p veil-brute-force --release
 
 这个工具演示了：
 1. **弱密码极易被破解** - 常见密码在秒级被破解
-2. **Scrypt 是有效防护** - 大幅减缓暴力破解速度
+2. **Argon2id 是有效防护** - 大幅减缓暴力破解速度
 3. **密码强度很重要** - 长随机密码是最佳防御
 
 **记住**: 
 - 永远使用强密码
-- Release 模式创建容器
 - 定期更换密码
 - 不要重复使用密码
 

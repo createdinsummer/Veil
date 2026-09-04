@@ -13,7 +13,7 @@ Veil的核心加密库 —— 提供单文件容器的加密、索引和读写�
 - 📦 **单文件容器**：所有数据存储在 `.veil` 文件中
 - 🌲 **嵌套目录树**：支持完整的目录结构
 - 💾 **流式处理**：大文件边读边加密，内存占用恒定（~64KB）
-- 🔐 **密钥派生**：使用 scrypt 安全派生密钥
+- 🔐 **密钥派生**：使用 Argon2id 安全派生密钥
 - ✅ **完整性校验**：BLAKE3 哈希验证
 - 🎯 **MIME 识别**：自动识别文件类型
 - 💪 **崩溃安全**：追加写入 + Footer 提交点
@@ -64,11 +64,11 @@ veil-core
 
 ```
 用户密码 (password)
-    ↓ scrypt(N=32768, r=8, p=1)
+    ↓ Argon2id (256MB, 3 iterations, parallelism=4)
 密钥派生
-    ↓ age encrypt
+    ↓ ChaCha20-Poly1305 encrypt
 加密私钥 (cip_pri_key) ← 存储在 Header
-    ↓ age decrypt
+    ↓ ChaCha20-Poly1305 decrypt
 容器私钥 (key_pair) ← 保存在内存
     ↓
 加密/解密文件内容 (blobs)
@@ -77,14 +77,14 @@ veil-core
 ### 优势
 
 - ✅ **修改密码快**：只需重新加密私钥
-- ✅ **安全性高**：密码通过 scrypt 派生，抗暴力破解
+- ✅ **安全性高**：密码通过 Argon2id 派生，抗暴力破解
 - ✅ **性能好**：私钥在内存中复用，避免重复解密
 
 ## 加密算法
 
 | 用途 | 算法 | 说明 |
 |------|------|------|
-| 密钥派生 | scrypt | N=32768, r=8, p=1 |
+| 密钥派生 | Argon2id | 256MB, 3 iterations, parallelism=4 |
 | 非对称加密 | X25519 | 密钥交换 |
 | 对称加密 | ChaCha20-Poly1305 | 流密码数据加密（通过 age） |
 | 哈希 | BLAKE3 | 完整性校验 |
@@ -173,6 +173,7 @@ container.add_file(path, &data)?;
 
 - `age` - 加密库（X25519 + ChaCha20-Poly1305）
 - `blake3` - 哈希算法
-- `scrypt` - 密钥派生
+- `argon2` - 密钥派生
+- `chacha20poly1305` - 对称加密
 - `serde` - 序列化（Index）
 - `infer` - MIME 类型识别
