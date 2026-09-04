@@ -367,10 +367,17 @@ fn show_version_and_security_info() {
 }
 
 fn main() {
-    // 初始化（自动检测显示编码，跨平台）
-    let _encoding = output_encoding::get_display_encoding();
-    // 可选：如果需要在启动时显示编码信息用于调试
-    // eprintln!("检测到显示编码: {:?}", _encoding);
+    // Windows: 启用 UTF-8 控制台模式（Windows 10+ 支持）
+    #[cfg(target_os = "windows")]
+    {
+        unsafe {
+            unsafe extern "system" {
+                fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+            }
+            const CP_UTF8: u32 = 65001;
+            SetConsoleOutputCP(CP_UTF8);
+        }
+    }
 
     i18n::init();
 
