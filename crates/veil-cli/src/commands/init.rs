@@ -1,45 +1,80 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::container::Container;
+use veil_core::config::GlobalConfig;
+use veil_core::workspace::WorkspaceConfig;
+use veil_core::workspace_ops::WorkspaceManager;
 
-/// CLI 版本（从 Cargo.toml 读取）
-const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// 创建新的加密容器。
+/// 创建新的加密容器（工作区架构）。
 ///
-/// 创建一个空的 `.veil` 容器文件，使用用户提供的密码加密私钥。
-/// 容器创建后可以使用 `add` 命令添加文件。
+/// 创建一个工作区目录，初始化 .veil-meta 元数据文件。
+/// 工作区中的文件独立加密，支持并发读写。
 ///
 /// # 参数
-/// - `container_path`: 容器文件路径（如 "photos.veil"）
+/// - `container_name`: 容器名称（如 "photos"）
 /// - `password`: 用户密码（`Option<String>`，`None` 则交互式输入）
 ///
 /// # 返回
 /// - `Ok(())`: 容器创建成功
-/// - `Err(anyhow::Error)`: 创建失败（文件已存在、加密失败或写入失败）
+/// - `Err(anyhow::Error)`: 创建失败
 ///
 /// # 示例
 /// ```bash
-/// # 位置参数方式
-/// veil init photos.veil mypassword
+/// # 交互式输入密码
+/// veil init photos
 ///
-/// # 选项方式
-/// veil init photos.veil -p mypassword
-///
-/// # 交互式
-/// veil init photos.veil
+/// # 命令行提供密码
+/// veil init photos mypassword
 /// ```
-pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
-    // 检查文件是否已存在
-    if std::path::Path::new(container_path).exists() {
-        anyhow::bail!("{}", crate::i18n::t1("init.exists", "path", container_path));
+pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
+    // 加载全局配置
+    let mut config = GlobalConfig::load()?;
+
+    // 确保默认工作区配置存在
+    if config.workspace.default.is_none() {
+        config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
+    }
+
+    // 检查容器是否已存在
+    if config.containers.contains_key(container_name) {
+        anyhow::bail!("{}", crate::i18n::t1("init.exists", "path", container_name));
+    }
+
+    // 使用默认工作区
+    let workspace_root = config.workspace.default.as_ref().unwrap().path.clone();
+    let container_path = workspace_root.join(container_name);
+
+    // 检查目录是否已存在
+    if container_path.exists() {
+        anyhow::bail!("{}", crate::i18n::t1("init.exists", "path", &container_path.display().to_string()));
     }
 
     println!("{}", crate::i18n::t("init.creating").cyan());
-    let password = super::prompt_new_password(password)?;
+    let password_str = super::prompt_new_password(password)?;
 
-    Container::create(container_path, password, CLI_VERSION)?;
+    // 使用 SecretString 的 expose_secret() 获取字符串
+    use age::secrecy::ExposeSecret;
+    let password = password_str.expose_secret();
 
-    println!("{}", crate::i18n::t1("init.created", "path", container_path).green());
+    // 创建工作区管理器并初始化
+    let manager = WorkspaceManager::new(container_path.clone());
+    manager.init_container(container_name, "default", password)?;
+
+    // 更新全局配置
+    use veil_core::config::ContainerConfig;
+    let container_config = ContainerConfig {
+        workspace: Some("default".to_string()),
+        container_dir: Some(container_name.to_string()),
+        workspace_path: None,
+        dedicated: false,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        last_accessed: None,
+    };
+
+    config.containers.insert(container_name.to_string(), container_config);
+    config.save()?;
+
+    println!("{}", crate::i18n::t1("init.created", "path", container_name).green());
+    println!("{}", format!("  工作区: {}", container_path.display()).bright_black());
+
     Ok(())
 }

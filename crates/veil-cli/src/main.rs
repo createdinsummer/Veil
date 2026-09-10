@@ -133,6 +133,32 @@ enum Commands {
         #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
     },
+
+    /// 打包工作区到 .veil 文件
+    Pack {
+        #[arg(value_name = "容器名称")]
+        container: Option<String>,
+        #[arg(short, long, value_name = "输出文件")]
+        output: Option<String>,
+        #[arg(value_name = "密码")]
+        password_pos: Option<String>,
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
+        password: Option<String>,
+    },
+
+    /// 解包 .veil 文件到工作区
+    Unpack {
+        #[arg(value_name = "容器文件")]
+        file: Option<String>,
+        #[arg(short = 'n', long, value_name = "容器名称")]
+        name: Option<String>,
+        #[arg(short = 'w', long, value_name = "工作区")]
+        workspace: Option<String>,
+        #[arg(value_name = "密码")]
+        password_pos: Option<String>,
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
+        password: Option<String>,
+    },
 }
 
 /// 用当前语言覆写所有 clap 显示字符串（about、usage、help_template、arg value_name / help）
@@ -510,6 +536,27 @@ fn main() {
             let container = require_container(container, "shell");
             let pwd = password_pos.or(password);
             commands::shell::run(&container, pwd)
+        }
+        Commands::Pack {
+            container,
+            output,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "pack");
+            let pwd = password_pos.or(password);
+            commands::pack_workspace::run_workspace(&container, output.as_deref(), pwd)
+        }
+        Commands::Unpack {
+            file,
+            name,
+            workspace,
+            password_pos,
+            password,
+        } => {
+            let file = file.unwrap_or_else(|| exit_with_help("error.require_container", "unpack"));
+            let pwd = password_pos.or(password);
+            commands::unpack_workspace::run_workspace(&file, name.as_deref(), workspace.as_deref(), pwd)
         }
     };
 

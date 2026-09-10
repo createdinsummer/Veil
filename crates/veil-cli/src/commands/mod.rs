@@ -8,6 +8,15 @@ pub mod info;
 pub mod passwd;
 pub mod shell;
 
+// 工作区架构命令
+pub mod init_workspace;
+pub mod add_workspace;
+pub mod list_workspace;
+pub mod rm_workspace;
+pub mod extract_workspace;
+pub mod pack_workspace;
+pub mod unpack_workspace;
+
 /// 密码输入辅助函数（自适应显示编码，跨平台）
 ///
 /// 在所有平台上统一处理密码提示的显示编码转换

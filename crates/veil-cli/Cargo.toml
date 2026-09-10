@@ -35,6 +35,13 @@ serde_json = "1.0"
 # 文件遍历（用于进度条统计）
 walkdir = "2.4"
 
+# 时间处理
+chrono = "0.4"
+
+# 加密相关（用于 unpack）
+chacha20poly1305 = "0.10"
+zeroize = "1.9"
+
 # Windows 控制台 API（用于编码检测和转换）
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["consoleapi", "winnls", "processenv", "stringapiset"] }

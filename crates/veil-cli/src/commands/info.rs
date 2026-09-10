@@ -1,63 +1,49 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::container::Container;
-use veil_core::index;
+use veil_core::config::GlobalConfig;
+use veil_core::workspace_ops::WorkspaceManager;
 
-/// 显示容器详细信息。
+/// 显示容器详细信息（工作区架构）。
 ///
-/// 输出容器的元数据（路径、大小）、内容统计（文件数量、内容总大小）和 MIME 类型分布。
+/// 输出容器的元数据和内容统计。
 ///
 /// # 参数
-/// - `container_path`: 容器文件路径
+/// - `container_name`: 容器名称
 /// - `password`: 容器密码（`None` 则交互式输入）
 ///
 /// # 返回
 /// - `Ok(())`: 成功显示信息
-/// - `Err(anyhow::Error)`: 失败（密码错误或读取失败）
+/// - `Err(anyhow::Error)`: 失败
 ///
 /// # 示例
 /// ```bash
-/// # 位置参数方式
-/// veil info photos.veil mypass
-///
-/// # 选项方式
-/// veil info photos.veil -p mypass
+/// veil info photos
 /// ```
-///
-/// # 输出示例
-/// ```text
-/// 容器信息:
-///   路径: photos.veil
-///   容器大小: 5678 字节 (0.01 MB)
-///
-/// 内容统计:
-///   文件数量: 4
-///   内容总大小: 1234 字节 (0.00 MB)
-///
-/// 文件类型分布:
-///   image/jpeg                     3
-///   application/pdf                1
-/// ```
-pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
-    let password = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
+    // 加载配置
+    let config = GlobalConfig::load()?;
 
-    let container = Container::open(container_path, password)?;
+    // 获取容器工作区路径
+    let workspace_path = config.get_container_workspace_path(container_name)?;
+
+    let password_str = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+
+    use age::secrecy::ExposeSecret;
+    let password = password_str.expose_secret();
+
+    // 读取元数据
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let metadata = manager.read_meta(password)?;
 
     println!("\n{}", crate::i18n::t("info.title").cyan().bold());
-    println!("{}", crate::i18n::t1("info.path", "path", container_path));
-    println!("{}", crate::i18n::t1("info.creator_version", "version", container.cli_version()));
-
-    // 文件大小
-    let metadata = std::fs::metadata(container_path)?;
-    println!("{}",
-        crate::i18n::t2("info.container_size",
-            "bytes", &metadata.len().to_string(),
-            "mb", &format!("{:.2}", metadata.len() as f64 / 1_048_576.0)));
+    println!("  容器名称: {}", metadata.container_name);
+    println!("  工作区路径: {}", workspace_path.display());
+    println!("  工作区类型: {}", metadata.workspace_type);
+    println!("  创建时间: {}", metadata.created_at);
 
     // 统计文件
-    let files = index::list_files(container.root());
-    let file_count = files.len();
-    let total_size: u64 = files.iter().map(|(_, meta)| meta.size).sum();
+    let file_count = metadata.files.len();
+    let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
 
     println!("\n{}", crate::i18n::t("info.content_title").cyan());
     println!("{}", crate::i18n::t1("info.content_count", "count", &file_count.to_string()));
@@ -65,21 +51,18 @@ pub fn run(container_path: &str, password: Option<String>) -> Result<()> {
         "bytes", &total_size.to_string(),
         "mb", &format!("{:.2}", total_size as f64 / 1_048_576.0)));
 
-    // MIME 类型统计
-    let mut mime_stats: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (_, meta) in &files {
-        let mime = meta.mime.as_deref().unwrap_or(crate::i18n::t("unknown"));
-        *mime_stats.entry(mime.to_string()).or_insert(0) += 1;
-    }
-
-    if !mime_stats.is_empty() {
-        println!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
-        let mut types: Vec<_> = mime_stats.iter().collect();
-        types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        for (mime, count) in types {
-            println!("  {:<30} {}", mime, count);
+    // 列出文件
+    if !metadata.files.is_empty() {
+        println!("\n文件列表:");
+        for (idx, file) in metadata.files.iter().enumerate() {
+            println!("  {}. {} ({} bytes)",
+                idx + 1,
+                file.original_name,
+                file.size
+            );
         }
     }
 
+    println!();
     Ok(())
 }

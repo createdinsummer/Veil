@@ -23,6 +23,31 @@ pub enum VeilError {
     // 没有现成错误类型可转的、我们自己判定的格式错误
     #[error("容器格式错误: {0}")]
     Format(String),
+
+    // 工作区相关错误
+    #[error("工作区错误: {0}")]
+    WorkspaceError(String),
+
+    #[error("配置错误: {0}")]
+    ConfigError(String),
+
+    #[error("容器未找到: {0}")]
+    ContainerNotFound(String),
+
+    #[error("无效的格式: {0}")]
+    InvalidFormat(String),
+
+    #[error("序列化错误: {0}")]
+    SerializationError(String),
+
+    #[error("加密错误: {0}")]
+    EncryptionError(String),
+
+    #[error("解密错误: {0}")]
+    DecryptionError(String),
+
+    #[error("密钥派生错误: {0}")]
+    KeyDerivationError(String),
 }
 
 /// 库内部统一用这个 Result 别名，少写一遍错误类型。

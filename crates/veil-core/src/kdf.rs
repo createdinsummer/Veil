@@ -98,3 +98,30 @@ mod tests {
         assert_eq!(standard.parallelism, 4);
     }
 }
+
+/// 使用 Argon2id 派生密钥
+///
+/// # 参数
+/// - `password`: 用户密码
+/// - `salt`: 盐值（推荐 32 字节）
+/// - `output`: 输出密钥缓冲区（通常 32 字节）
+pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<()> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+
+    let params = Argon2Params::STANDARD;
+    let argon2_params = Params::new(
+        params.memory_kb,
+        params.iterations,
+        params.parallelism,
+        Some(output.len()),
+    )
+    .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
+
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
+
+    argon2
+        .hash_password_into(password, salt, output)
+        .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
+
+    Ok(())
+}
