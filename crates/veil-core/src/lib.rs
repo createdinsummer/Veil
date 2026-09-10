@@ -12,5 +12,6 @@ pub mod metadata;
 pub mod mime;
 pub mod slice_reader;
 pub mod temp;
+pub mod volume;
 pub mod workspace;
 pub mod workspace_ops;

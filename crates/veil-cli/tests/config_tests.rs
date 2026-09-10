@@ -61,8 +61,9 @@ fn init_creates_a_reusable_veil_link() {
     let link_path = env.link_path("demo");
     assert!(link_path.exists());
     let link = std::fs::read_to_string(&link_path).unwrap();
+    assert!(link.contains("veil_id = \"veil-"));
     assert!(link.contains("container_name = \"demo\""));
-    assert!(link.contains("workspace_type = \"default\""));
+    assert!(link.contains("volume_id = "));
 
     let source = env.write_file("note.txt", "hello");
     env.command()
@@ -88,6 +89,16 @@ fn missing_link_is_rebuilt_from_config() {
         .success();
 
     let link_path = env.work.path().join("custom.veil-link");
+    let original = std::fs::read(&link_path).unwrap();
+    let original_hex = original
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    let config = std::fs::read_to_string(env.home.path().join(".veil/config.toml")).unwrap();
+    assert!(config.contains(&format!("raw_hex = \"{}\"", original_hex)));
+    assert!(config.contains("volume_id = "));
+    assert!(config.contains("mount_path = "));
+
     std::fs::rename(&link_path, env.work.path().join("custom.veil-link.bak")).unwrap();
 
     env.command()
@@ -98,6 +109,7 @@ fn missing_link_is_rebuilt_from_config() {
         .stdout(predicate::str::contains("已为你重建"));
 
     assert!(link_path.exists());
+    assert_eq!(std::fs::read(&link_path).unwrap(), original);
 }
 
 #[test]

@@ -19,6 +19,9 @@ pub enum MetaTag {
     Algorithm = 0x03,
     KdfParams = 0x04,
     Nonce = 0x05,
+    VeilId = 0x06,
+    ContainerName = 0x07,
+    WorkspaceType = 0x08,
     Custom = 0xF0,
     EndMarker = 0xFF,
 }
@@ -31,6 +34,9 @@ impl MetaTag {
             0x03 => Some(Self::Algorithm),
             0x04 => Some(Self::KdfParams),
             0x05 => Some(Self::Nonce),
+            0x06 => Some(Self::VeilId),
+            0x07 => Some(Self::ContainerName),
+            0x08 => Some(Self::WorkspaceType),
             0xF0 => Some(Self::Custom),
             0xFF => Some(Self::EndMarker),
             _ => None,
@@ -77,16 +83,35 @@ pub struct MetaHeader {
 
     /// 格式版本
     pub version: u16,
+
+    /// 恢复用明文容器 ID；不包含路径或敏感内容。
+    pub veil_id: String,
+
+    /// 恢复用明文容器名称；仅用于识别容器。
+    pub container_name: String,
+
+    /// 恢复用明文工作区类型。
+    pub workspace_type: String,
 }
 
 impl MetaHeader {
     /// 创建新的头部
-    pub fn new(salt: [u8; 32], nonce: [u8; 12], algorithm: AlgorithmId) -> Self {
+    pub fn new(
+        salt: [u8; 32],
+        nonce: [u8; 12],
+        algorithm: AlgorithmId,
+        veil_id: String,
+        container_name: String,
+        workspace_type: String,
+    ) -> Self {
         Self {
             salt,
             nonce,
             algorithm,
             version: 1,
+            veil_id,
+            container_name,
+            workspace_type,
         }
     }
 
@@ -106,6 +131,23 @@ impl MetaHeader {
         write_tlv(&mut buf, MetaTag::Salt, &self.salt)?;
         write_tlv(&mut buf, MetaTag::Algorithm, &[self.algorithm as u8])?;
         write_tlv(&mut buf, MetaTag::Nonce, &self.nonce)?;
+        if !self.veil_id.is_empty() {
+            write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
+        }
+        if !self.container_name.is_empty() {
+            write_tlv(
+                &mut buf,
+                MetaTag::ContainerName,
+                self.container_name.as_bytes(),
+            )?;
+        }
+        if !self.workspace_type.is_empty() {
+            write_tlv(
+                &mut buf,
+                MetaTag::WorkspaceType,
+                self.workspace_type.as_bytes(),
+            )?;
+        }
 
         // 回填 header_len
         let header_len = (buf.len() - 10) as u16;
@@ -138,6 +180,9 @@ impl MetaHeader {
         let mut salt = None;
         let mut algorithm = None;
         let mut nonce = None;
+        let mut veil_id = String::new();
+        let mut container_name = String::new();
+        let mut workspace_type = String::new();
         let mut pos = 10;
 
         while pos < header_end {
@@ -162,6 +207,15 @@ impl MetaHeader {
                     arr.copy_from_slice(value);
                     nonce = Some(arr);
                 }
+                Some(MetaTag::VeilId) => {
+                    veil_id = String::from_utf8_lossy(value).into_owned();
+                }
+                Some(MetaTag::ContainerName) => {
+                    container_name = String::from_utf8_lossy(value).into_owned();
+                }
+                Some(MetaTag::WorkspaceType) => {
+                    workspace_type = String::from_utf8_lossy(value).into_owned();
+                }
                 _ => {} // 跳过未知或长度不匹配的 tag
             }
 
@@ -171,8 +225,16 @@ impl MetaHeader {
         Ok(Self {
             salt: salt.ok_or_else(|| VeilError::InvalidFormat("缺少 salt".to_string()))?,
             nonce: nonce.ok_or_else(|| VeilError::InvalidFormat("缺少 nonce".to_string()))?,
-            algorithm: algorithm.ok_or_else(|| VeilError::InvalidFormat("缺少算法 ID".to_string()))?,
+            algorithm: algorithm
+                .ok_or_else(|| VeilError::InvalidFormat("缺少算法 ID".to_string()))?,
             version: version.unwrap_or(1),
+            veil_id: if veil_id.is_empty() {
+                return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
+            } else {
+                veil_id
+            },
+            container_name,
+            workspace_type,
         })
     }
 
@@ -189,6 +251,9 @@ impl MetaHeader {
 /// 容器元数据（加密存储）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaData {
+    /// 不随容器名称变化的稳定身份。
+    pub veil_id: String,
+
     /// 容器名称
     pub container_name: String,
 
@@ -206,6 +271,7 @@ impl MetaData {
     /// 创建新的元数据
     pub fn new(container_name: String, workspace_type: String) -> Self {
         Self {
+            veil_id: generate_veil_id(),
             container_name,
             workspace_type,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -215,16 +281,14 @@ impl MetaData {
 
     /// 序列化为 JSON
     pub fn to_json(&self) -> Result<Vec<u8>, VeilError> {
-        serde_json::to_vec(self).map_err(|e| {
-            VeilError::SerializationError(format!("序列化元数据失败: {}", e))
-        })
+        serde_json::to_vec(self)
+            .map_err(|e| VeilError::SerializationError(format!("序列化元数据失败: {}", e)))
     }
 
     /// 从 JSON 反序列化
     pub fn from_json(bytes: &[u8]) -> Result<Self, VeilError> {
-        serde_json::from_slice(bytes).map_err(|e| {
-            VeilError::SerializationError(format!("反序列化元数据失败: {}", e))
-        })
+        serde_json::from_slice(bytes)
+            .map_err(|e| VeilError::SerializationError(format!("反序列化元数据失败: {}", e)))
     }
 
     /// 添加文件
@@ -234,7 +298,11 @@ impl MetaData {
 
     /// 删除文件
     pub fn remove_file(&mut self, encrypted_name: &str) -> Option<FileEntry> {
-        if let Some(pos) = self.files.iter().position(|f| f.encrypted_name == encrypted_name) {
+        if let Some(pos) = self
+            .files
+            .iter()
+            .position(|f| f.encrypted_name == encrypted_name)
+        {
             Some(self.files.remove(pos))
         } else {
             None
@@ -248,8 +316,16 @@ impl MetaData {
 
     /// 通过加密名查找文件
     pub fn find_file_by_encrypted_name(&self, encrypted_name: &str) -> Option<&FileEntry> {
-        self.files.iter().find(|f| f.encrypted_name == encrypted_name)
+        self.files
+            .iter()
+            .find(|f| f.encrypted_name == encrypted_name)
     }
+}
+
+pub fn generate_veil_id() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("无法生成容器 ID");
+    format!("veil-{}", hex::encode(bytes))
 }
 
 /// 文件条目
@@ -276,12 +352,7 @@ pub struct FileEntry {
 
 impl FileEntry {
     /// 创建新的文件条目
-    pub fn new(
-        encrypted_name: String,
-        original_name: String,
-        size: u64,
-        nonce: [u8; 12],
-    ) -> Self {
+    pub fn new(encrypted_name: String, original_name: String, size: u64, nonce: [u8; 12]) -> Self {
         Self {
             encrypted_name,
             original_name,

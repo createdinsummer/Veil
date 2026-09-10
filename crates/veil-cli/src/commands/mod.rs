@@ -23,12 +23,20 @@ pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
     let mut config = GlobalConfig::load()?;
     let mut resolved = config.resolve_container(input)?;
 
+    if resolved.recovered_link {
+        if let Some(link_path) = resolved.link_path.as_deref() {
+            crate::hints::show_link_recovery_hint(link_path);
+        }
+    }
+
     if let Some(link_path) = resolved.missing_link_path.clone() {
         config.register_link(&resolved.name, &link_path)?;
         crate::hints::show_link_recovery_hint(&link_path);
         resolved.link_path = Some(link_path);
         resolved.missing_link_path = None;
     }
+
+    config.sync_workspace_links(&resolved.workspace_path)?;
 
     if let Some(ambiguity) = resolved.ambiguity.as_ref() {
         crate::hints::show_file_type_ambiguity_hint(

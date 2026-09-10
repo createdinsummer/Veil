@@ -36,6 +36,8 @@ enum Commands {
         workspace_path: Option<String>,
         #[arg(long, help = "工作区由该容器独占")]
         dedicated: bool,
+        #[arg(long, help = "强制将工作区放在链接文件所在的卷")]
+        portable: bool,
     },
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
@@ -267,6 +269,7 @@ fn build_localized_command() -> clap::Command {
                     .help(i18n::t("help.init.workspace_path"))
             })
             .mut_arg("dedicated", |a| a.help(i18n::t("help.init.dedicated")))
+            .mut_arg("portable", |a| a.help(i18n::t("help.init.portable")))
     });
 
     // --- add ---
@@ -701,6 +704,7 @@ fn main() {
             workspace,
             workspace_path,
             dedicated,
+            portable,
         } => {
             let container = require_container(container, "init");
             let pwd = password.or(password_opt);
@@ -711,6 +715,7 @@ fn main() {
                 workspace.as_deref(),
                 workspace_path.map(Into::into),
                 dedicated,
+                portable,
             )
         }
         Commands::Add {

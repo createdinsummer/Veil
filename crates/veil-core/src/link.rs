@@ -1,8 +1,7 @@
 //! `.veil-link` 链接文件模型。
-//!
-//! 链接文件是用户日常操作的轻量入口，指向真正保存加密数据的工作区目录。
 
 use crate::error::VeilError;
+use crate::volume;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -25,13 +24,17 @@ pub struct VeilLink {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkWorkspace {
-    #[serde(default)]
+    pub veil_id: String,
     pub container_name: String,
+
+    /// 工作区相对于卷根目录的路径。
     pub path: PathBuf,
-    #[serde(default = "default_workspace_type")]
-    pub workspace_type: String,
-    #[serde(default)]
-    pub dedicated: bool,
+
+    /// 稳定卷 ID；为空时兼容旧格式，按链接文件所在目录解析。
+    pub volume_id: String,
+
+    pub volume_label: String,
+
     #[serde(default = "now")]
     pub created_at: String,
 }
@@ -63,20 +66,22 @@ pub struct LinkMetadata {
 
 impl VeilLink {
     pub fn new(
+        veil_id: impl Into<String>,
         container_name: impl Into<String>,
-        workspace_path: PathBuf,
-        workspace_type: impl Into<String>,
-        dedicated: bool,
+        relative_path: PathBuf,
+        volume_id: impl Into<String>,
+        volume_label: impl Into<String>,
     ) -> Self {
         let now = now();
         Self {
             version: default_version(),
             created_at: now.clone(),
             workspace: LinkWorkspace {
+                veil_id: veil_id.into(),
                 container_name: container_name.into(),
-                path: workspace_path,
-                workspace_type: workspace_type.into(),
-                dedicated,
+                path: relative_path,
+                volume_id: volume_id.into(),
+                volume_label: volume_label.into(),
                 created_at: now,
             },
             encryption: LinkEncryption::default(),
@@ -108,13 +113,27 @@ impl VeilLink {
     }
 
     pub fn resolve_workspace_path(&self, link_path: &Path) -> Result<PathBuf, VeilError> {
-        let path = expand_tilde(&self.workspace.path)?;
-        if path.is_absolute() {
-            Ok(path)
-        } else {
-            let parent = link_path.parent().unwrap_or_else(|| Path::new("."));
-            Ok(parent.join(path))
+        let link_volume = volume::volume_for_path(link_path)?;
+        if link_volume.volume_id == self.workspace.volume_id {
+            return Ok(link_volume.mount_path.join(&self.workspace.path));
         }
+
+        Err(VeilError::VolumeUnavailable(format!(
+            "卷 {} ({}) 未挂载；链接位于卷 {}",
+            self.workspace.volume_id, self.workspace.volume_label, link_volume.volume_label
+        )))
+    }
+
+    pub fn resolve_workspace_path_with_mount(
+        &self,
+        link_path: &Path,
+        mount_path: Option<&Path>,
+    ) -> Result<PathBuf, VeilError> {
+        if let Some(mount_path) = mount_path {
+            return Ok(mount_path.join(&self.workspace.path));
+        }
+
+        self.resolve_workspace_path(link_path)
     }
 
     pub fn container_name(&self, link_path: &Path) -> String {
@@ -130,43 +149,12 @@ impl VeilLink {
     }
 }
 
-pub fn portable_workspace_path(path: &Path) -> PathBuf {
-    let Some(home) = dirs::home_dir() else {
-        return path.to_path_buf();
-    };
-
-    match path.strip_prefix(&home) {
-        Ok(relative) => PathBuf::from("~").join(relative),
-        Err(_) => path.to_path_buf(),
-    }
-}
-
-fn expand_tilde(path: &Path) -> Result<PathBuf, VeilError> {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir()
-            .ok_or_else(|| VeilError::ConfigError("无法获取用户主目录".to_string()));
-    }
-
-    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        let home = dirs::home_dir()
-            .ok_or_else(|| VeilError::ConfigError("无法获取用户主目录".to_string()))?;
-        return Ok(home.join(rest));
-    }
-
-    Ok(path.to_path_buf())
-}
-
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
 fn default_version() -> String {
     "1.0".to_string()
-}
-
-fn default_workspace_type() -> String {
-    "default".to_string()
 }
 
 fn default_algorithm() -> String {
@@ -186,33 +174,17 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let link_path = dir.path().join("photos.veil-link");
         let link = VeilLink::new(
+            "veil-1234",
             "photos",
-            PathBuf::from("~/.veil/workspaces/default/photos"),
-            "default",
-            false,
+            PathBuf::from(".veil/workspaces/default/photos"),
+            "fs:abcd",
+            "MyUSB",
         );
 
         link.save(&link_path).unwrap();
         let loaded = VeilLink::load(&link_path).unwrap();
 
+        assert_eq!(loaded.workspace.veil_id, "veil-1234");
         assert_eq!(loaded.container_name(&link_path), "photos");
-        assert_eq!(loaded.workspace.workspace_type, "default");
-    }
-
-    #[test]
-    fn resolves_relative_workspace_from_link_directory() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let link_path = dir.path().join("photos.veil-link");
-        let link = VeilLink::new(
-            "photos",
-            PathBuf::from("workspaces/photos"),
-            "default",
-            false,
-        );
-
-        assert_eq!(
-            link.resolve_workspace_path(&link_path).unwrap(),
-            dir.path().join("workspaces/photos")
-        );
     }
 }

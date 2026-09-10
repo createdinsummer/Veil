@@ -56,14 +56,6 @@ pub fn run_workspace(
         config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
     }
 
-    // 检查容器是否已存在
-    if config.containers.contains_key(&name) {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1("unpack.already_exists", "name", &name)
-        );
-    }
-
     // 确定工作区路径
     let workspace_root = if let Some(ws_name) = workspace_name {
         if ws_name == "default" {
@@ -165,6 +157,8 @@ pub fn run_workspace(
 
     // 更新配置
     let container_config = ContainerConfig {
+        veil_id: metadata.veil_id.clone(),
+        container_name: name.clone(),
         workspace: Some(workspace_name.unwrap_or("default").to_string()),
         container_dir: Some(name.clone()),
         workspace_path: None,
@@ -174,9 +168,11 @@ pub fn run_workspace(
         links: Vec::new(),
     };
 
-    config.containers.insert(name.clone(), container_config);
+    config
+        .containers
+        .insert(metadata.veil_id.clone(), container_config);
     config.save()?;
-    config.register_link(&name, &link_path)?;
+    config.register_link_at(&metadata.veil_id, &name, &container_dir, &link_path)?;
 
     println!(
         "{}",

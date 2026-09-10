@@ -18,8 +18,10 @@ fn init_creates_workspace_and_link() {
     assert!(link.exists());
 
     let content = std::fs::read_to_string(link).unwrap();
+    assert!(content.contains("veil_id = \"veil-"));
     assert!(content.contains("container_name = \"photos\""));
-    assert!(content.contains("workspace_type = \"default\""));
+    assert!(content.contains("volume_id = "));
+    assert!(content.contains("volume_label = "));
 }
 
 #[test]

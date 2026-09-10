@@ -31,11 +31,10 @@ impl WorkspaceManager {
         container_name: &str,
         workspace_type: &str,
         password: &str,
-    ) -> Result<(), VeilError> {
+    ) -> Result<MetaData, VeilError> {
         // 创建容器目录
-        fs::create_dir_all(&self.workspace_path).map_err(|e| {
-            VeilError::WorkspaceError(format!("创建容器目录失败: {}", e))
-        })?;
+        fs::create_dir_all(&self.workspace_path)
+            .map_err(|e| VeilError::WorkspaceError(format!("创建容器目录失败: {}", e)))?;
 
         // 生成随机 salt 和 nonce
         let salt = generate_random_bytes::<32>();
@@ -45,7 +44,14 @@ impl WorkspaceManager {
         let meta_data = MetaData::new(container_name.to_string(), workspace_type.to_string());
 
         // 创建头部
-        let header = MetaHeader::new(salt, nonce, AlgorithmId::Aes256Gcm);
+        let header = MetaHeader::new(
+            salt,
+            nonce,
+            AlgorithmId::Aes256Gcm,
+            meta_data.veil_id.clone(),
+            meta_data.container_name.clone(),
+            meta_data.workspace_type.clone(),
+        );
 
         // 派生密钥
         let master_key = derive_master_key(password, &salt)?;
@@ -53,7 +59,7 @@ impl WorkspaceManager {
         // 加密并写入元数据
         self.write_meta(&header, &meta_data, &master_key)?;
 
-        Ok(())
+        Ok(meta_data)
     }
 
     /// 读取元数据
@@ -64,9 +70,7 @@ impl WorkspaceManager {
             return Err(VeilError::InvalidFormat("元数据文件不存在".to_string()));
         }
 
-        let bytes = fs::read(&meta_path).map_err(|e| {
-            VeilError::Io(e)
-        })?;
+        let bytes = fs::read(&meta_path).map_err(|e| VeilError::Io(e))?;
 
         // 解析头部
         let header = MetaHeader::from_bytes(&bytes)?;
@@ -84,6 +88,13 @@ impl WorkspaceManager {
         let meta_data = MetaData::from_json(&decrypted)?;
 
         Ok(meta_data)
+    }
+
+    /// 不输入密码，只读取恢复所需的明文身份信息。
+    pub fn read_meta_header(&self) -> Result<MetaHeader, VeilError> {
+        let meta_path = self.workspace_path.join(".veil-meta");
+        let bytes = fs::read(&meta_path).map_err(VeilError::Io)?;
+        MetaHeader::from_bytes(&bytes)
     }
 
     /// 写入元数据
@@ -139,11 +150,7 @@ impl WorkspaceManager {
     }
 
     /// 添加文件到容器
-    pub fn add_file(
-        &self,
-        file_path: &Path,
-        password: &str,
-    ) -> Result<String, VeilError> {
+    pub fn add_file(&self, file_path: &Path, password: &str) -> Result<String, VeilError> {
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -222,11 +229,7 @@ impl WorkspaceManager {
     }
 
     /// 删除文件
-    pub fn remove_file(
-        &self,
-        original_name: &str,
-        password: &str,
-    ) -> Result<(), VeilError> {
+    pub fn remove_file(&self, original_name: &str, password: &str) -> Result<(), VeilError> {
         // 读取元数据
         let meta_data = self.read_meta(password)?;
 
@@ -282,7 +285,14 @@ impl WorkspaceManager {
         let new_encrypted_data = encrypt_aes256gcm(&new_master_key, &json_bytes, &new_nonce)?;
 
         // 创建新头部
-        let new_header = MetaHeader::new(new_salt, new_nonce, AlgorithmId::Aes256Gcm);
+        let new_header = MetaHeader::new(
+            new_salt,
+            new_nonce,
+            AlgorithmId::Aes256Gcm,
+            old_header.veil_id.clone(),
+            old_header.container_name.clone(),
+            old_header.workspace_type.clone(),
+        );
 
         // 写入新元数据
         let mut new_meta_bytes = new_header.to_bytes()?;
@@ -295,7 +305,8 @@ impl WorkspaceManager {
 
             // 用旧密码解密
             let encrypted_file_data = fs::read(&encrypted_path)?;
-            let plaintext = decrypt_aes256gcm(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
+            let plaintext =
+                decrypt_aes256gcm(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
 
             // 用新密码重新加密（保持相同的 nonce）
             let new_encrypted = encrypt_aes256gcm(&new_master_key, &plaintext, &file_entry.nonce)?;
@@ -323,7 +334,8 @@ impl WorkspaceManager {
         let mut meta_data = MetaData::from_json(&decrypted)?;
 
         // 查找源文件
-        let file_entry = meta_data.find_file(from)
+        let file_entry = meta_data
+            .find_file(from)
             .ok_or_else(|| VeilError::FileNotFound(from.to_string()))?
             .clone();
 
@@ -365,7 +377,11 @@ fn derive_master_key(password: &str, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 3
 }
 
 /// AES-256-GCM 加密
-fn encrypt_aes256gcm(key: &[u8; 32], plaintext: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>, VeilError> {
+fn encrypt_aes256gcm(
+    key: &[u8; 32],
+    plaintext: &[u8],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, VeilError> {
     use chacha20poly1305::aead::generic_array::GenericArray;
 
     let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(key));
@@ -377,7 +393,11 @@ fn encrypt_aes256gcm(key: &[u8; 32], plaintext: &[u8], nonce: &[u8; 12]) -> Resu
 }
 
 /// AES-256-GCM 解密
-fn decrypt_aes256gcm(key: &[u8; 32], ciphertext: &[u8], nonce: &[u8; 12]) -> Result<Vec<u8>, VeilError> {
+fn decrypt_aes256gcm(
+    key: &[u8; 32],
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, VeilError> {
     use chacha20poly1305::aead::generic_array::GenericArray;
 
     let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(key));

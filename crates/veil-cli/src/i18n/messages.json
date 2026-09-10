@@ -519,12 +519,12 @@
     "en": "Create a new container"
   },
   "cmd.init.usage": {
-    "zh": "veil init <容器名称> [密码] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--link <链接文件>]",
-    "en": "veil init <container-name> [password] [--workspace <workspace> | --workspace-path <path> --dedicated] [--link <link-file>]"
+    "zh": "veil init <容器名称> [密码] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--portable] [--link <链接文件>]",
+    "en": "veil init <container-name> [password] [--workspace <workspace> | --workspace-path <path> --dedicated] [--portable] [--link <link-file>]"
   },
   "cmd.init.usage_opt": {
-    "zh": "veil init <容器名称> [-p <密码>] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--link <链接文件>]",
-    "en": "veil init <container-name> [-p <password>] [--workspace <workspace> | --workspace-path <path> --dedicated] [--link <link-file>]"
+    "zh": "veil init <容器名称> [-p <密码>] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--portable] [--link <链接文件>]",
+    "en": "veil init <container-name> [-p <password>] [--workspace <workspace> | --workspace-path <path> --dedicated] [--portable] [--link <link-file>]"
   },
   "cmd.add.about": {
     "zh": "添加文件或目录到容器",
@@ -736,6 +736,10 @@
     "zh": "工作区由该容器独占",
     "en": "Give this container a dedicated workspace"
   },
+  "help.init.portable": {
+    "zh": "强制将工作区放在链接文件所在的卷",
+    "en": "Force the workspace onto the link file's volume"
+  },
   "help.container": {
     "zh": "容器名称或 .veil-link 路径",
     "en": "Container name or .veil-link path"
@@ -890,6 +894,14 @@
     "zh": "  类型: 共享工作区 ({workspace})",
     "en": "  Type: shared workspace ({workspace})"
   },
+  "init.portable_workspace": {
+    "zh": "便携模式：工作区将创建在: {path}",
+    "en": "Portable mode: workspace will be created at: {path}"
+  },
+  "init.external_workspace": {
+    "zh": "检测到外接卷，工作区将创建在: {path}",
+    "en": "External volume detected. Workspace will be created at: {path}"
+  },
   "pack.output_exists": {
     "zh": "输出文件已存在: {path}",
     "en": "Output file already exists: {path}"
@@ -973,6 +985,14 @@
   "config.container_count": {
     "zh": "容器数量: {count}",
     "en": "Containers: {count}"
+  },
+  "config.volume_count": {
+    "zh": "已知磁盘卷: {count}",
+    "en": "Known volumes: {count}"
+  },
+  "config.link_count": {
+    "zh": "已缓存链接: {count}",
+    "en": "Cached links: {count}"
   },
   "config.env_override": {
     "zh": "环境变量 VEIL_HINTS={level} 正在覆盖配置文件",

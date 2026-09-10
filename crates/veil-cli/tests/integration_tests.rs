@@ -116,6 +116,98 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
 }
 
 #[test]
+fn duplicate_container_names_are_distinguished_by_veil_id() {
+    let env = TestEnv::new("test-password");
+    let first_workspace = env.work.path().join("disk-a");
+    let second_workspace = env.work.path().join("disk-b");
+    let first_link = env.work.path().join("first.veil-link");
+    let second_link = env.work.path().join("second.veil-link");
+
+    env.command()
+        .args([
+            "init",
+            "photos",
+            "test-password",
+            "--workspace-path",
+            &env.path(&first_workspace),
+            "--link",
+            &env.path(&first_link),
+        ])
+        .assert()
+        .success();
+    env.command()
+        .args([
+            "init",
+            "photos",
+            "test-password",
+            "--workspace-path",
+            &env.path(&second_workspace),
+            "--link",
+            &env.path(&second_link),
+        ])
+        .assert()
+        .success();
+
+    let first = std::fs::read_to_string(&first_link).unwrap();
+    let second = std::fs::read_to_string(&second_link).unwrap();
+    let first_id = first
+        .lines()
+        .find(|line| line.starts_with("veil_id = "))
+        .unwrap();
+    let second_id = second
+        .lines()
+        .find(|line| line.starts_with("veil_id = "))
+        .unwrap();
+    assert_ne!(first_id, second_id);
+
+    let source = env.write_file("note.txt", "content");
+    env.command()
+        .args(["add", &env.path(&first_link), &env.path(&source)])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["free", &env.path(&first_link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("note.txt"));
+    env.command()
+        .args(["free", &env.path(&second_link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(空)"));
+}
+
+#[test]
+fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
+    let env = TestEnv::new("test-password");
+    let portable_dir = env.work.path().join("portable");
+    std::fs::create_dir_all(&portable_dir).unwrap();
+    let link = portable_dir.join("photos.veil-link");
+
+    env.command()
+        .args([
+            "init",
+            "photos",
+            "test-password",
+            "--portable",
+            "--link",
+            &env.path(&link),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("工作区将创建在"));
+
+    assert!(portable_dir
+        .join(".veil/workspaces/default/photos/.veil-meta")
+        .exists());
+
+    let link_content = std::fs::read_to_string(link).unwrap();
+    assert!(link_content.contains(".veil/workspaces/default/photos"));
+    assert!(!link_content.contains("mount_path = "));
+}
+
+#[test]
 fn help_files_is_available_in_english() {
     Command::cargo_bin("veil")
         .unwrap()

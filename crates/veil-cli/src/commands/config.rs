@@ -63,6 +63,22 @@ fn show_config() -> Result<()> {
             &config.containers.len().to_string()
         )
     );
+    println!(
+        "  {}",
+        i18n::t1(
+            "config.volume_count",
+            "count",
+            &config.volumes.len().to_string()
+        )
+    );
+    println!(
+        "  {}",
+        i18n::t1(
+            "config.link_count",
+            "count",
+            &config.links.len().to_string()
+        )
+    );
     println!();
 
     Ok(())

@@ -127,9 +127,16 @@ Veil 当前的容器设计是将多个加密文件拼接成单一容器文件。
 **共享工作区示例**：
 ```toml
 # myfiles.veil-link 内容示例
+version = "1.0"
+created_at = "2026-09-10T10:00:00Z"
+
 [workspace]
-path = "~/.veil/workspaces/default/myfiles"  # 指向容器目录（子目录）
-workspace_type = "default"
+veil_id = "veil-..."
+container_name = "myfiles"
+# 相对于 volume_id 对应卷根目录的路径
+path = ".veil/workspaces/default/myfiles"
+volume_id = "fs-uuid:..."
+volume_label = "MyUSB"
 created_at = "2026-09-10T10:00:00Z"
 
 [encryption]
@@ -137,13 +144,15 @@ algorithm = "AES-256-GCM"
 key_derivation = "Argon2id"
 ```
 
-**专属工作区示例**：
+**本地工作区示例**：
 ```toml
 # secrets.veil-link 内容示例
 [workspace]
-path = "~/EncryptedVolume/veil"      # 指向工作区根目录（无子目录）
-workspace_type = "dedicated"
-dedicated = true
+veil_id = "veil-..."
+container_name = "secrets"
+path = ".veil/workspaces/default/secrets"
+volume_id = "fs-uuid:..."
+volume_label = "local-system"
 created_at = "2026-09-10T11:00:00Z"
 
 [encryption]
@@ -168,6 +177,7 @@ key_derivation = "Argon2id"
 - 专属工作区：`~/EncryptedVolume/veil/.veil-meta`（直接在根目录）
 
 **作用**：
+- 明文恢复区记录 `veil_id`、容器名称和工作区类型，不包含任何路径
 - 记录文件名映射（加密文件名 ↔ 原始文件名）
 - 记录加密参数（salt、nonce 等）
 - 记录容器统计信息
@@ -176,6 +186,7 @@ key_derivation = "Argon2id"
 ```json
 {
   "version": "1.0",
+  "veil_id": "veil-...",
   "container_name": "myfiles",
   "workspace_type": "default",
   "created_at": "2026-09-10T10:00:00Z",

@@ -33,6 +33,7 @@ pub fn run(
     workspace_name: Option<&str>,
     workspace_path: Option<PathBuf>,
     dedicated: bool,
+    portable: bool,
 ) -> Result<()> {
     let target_path = Path::new(target);
     let container_name = if target_path.extension().and_then(|ext| ext.to_str())
@@ -74,6 +75,18 @@ pub fn run(
         );
     }
 
+    let absolute_link_path = if link_path.is_absolute() {
+        link_path.clone()
+    } else {
+        std::env::current_dir()?.join(&link_path)
+    };
+    let link_dir = absolute_link_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let external_location = is_external_volume(link_dir);
+    let portable_mode =
+        workspace_name.is_none() && workspace_path.is_none() && (portable || external_location);
+
     // 加载全局配置
     let mut config = GlobalConfig::load()?;
 
@@ -82,16 +95,10 @@ pub fn run(
         config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
     }
 
-    // 检查容器是否已存在
-    if config.containers.contains_key(&container_name) {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1("init.exists", "path", &container_name)
-        );
-    }
-
     // 确定工作区路径
-    let workspace_root = if let Some(path) = workspace_path {
+    let workspace_root = if portable_mode {
+        link_dir.join(".veil/workspaces/default")
+    } else if let Some(path) = workspace_path {
         path
     } else if let Some(name) = workspace_name {
         if name == "default" {
@@ -129,6 +136,17 @@ pub fn run(
     }
 
     println!("{}", crate::i18n::t("init.creating").cyan());
+    if portable_mode {
+        let message_key = if portable {
+            "init.portable_workspace"
+        } else {
+            "init.external_workspace"
+        };
+        println!(
+            "{}",
+            crate::i18n::t1(message_key, "path", &container_path.display().to_string()).cyan()
+        );
+    }
     let password_str = super::prompt_new_password(password)?;
 
     // 使用 SecretString 的 expose_secret() 获取字符串
@@ -145,12 +163,14 @@ pub fn run(
     };
 
     let manager = WorkspaceManager::new(container_path.clone());
-    manager.init_container(&container_name, workspace_type, password)?;
+    let metadata = manager.init_container(&container_name, workspace_type, password)?;
 
     // 更新全局配置
     use veil_core::config::ContainerConfig;
     let container_config = if dedicated {
         ContainerConfig {
+            veil_id: metadata.veil_id.clone(),
+            container_name: container_name.clone(),
             workspace: None,
             container_dir: None,
             workspace_path: Some(workspace_root),
@@ -161,6 +181,8 @@ pub fn run(
         }
     } else {
         ContainerConfig {
+            veil_id: metadata.veil_id.clone(),
+            container_name: container_name.clone(),
             workspace: Some(workspace_name.unwrap_or("default").to_string()),
             container_dir: Some(container_name.clone()),
             workspace_path: None,
@@ -173,9 +195,14 @@ pub fn run(
 
     config
         .containers
-        .insert(container_name.clone(), container_config);
+        .insert(metadata.veil_id.clone(), container_config);
     config.save()?;
-    config.register_link(&container_name, &link_path)?;
+    config.register_link_at(
+        &metadata.veil_id,
+        &container_name,
+        &container_path,
+        &link_path,
+    )?;
 
     println!(
         "{}",
@@ -214,4 +241,72 @@ pub fn run(
     crate::hints::show_first_init_hint(&container_name, &link_path);
 
     Ok(())
+}
+
+fn is_external_volume(path: &Path) -> bool {
+    let probe = nearest_existing_path(path);
+    if probe.as_os_str().is_empty() {
+        return false;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if probe.starts_with("/Volumes") {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::path::Component;
+
+        fn root_key(path: &Path) -> Option<String> {
+            match path.components().next()? {
+                Component::Prefix(prefix) => {
+                    Some(prefix.as_os_str().to_string_lossy().into_owned())
+                }
+                _ => None,
+            }
+        }
+
+        if let (Some(location), Some(home)) = (
+            root_key(&probe),
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .as_deref()
+                .and_then(root_key),
+        ) {
+            return !location.eq_ignore_ascii_case(&home);
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let location_device = std::fs::metadata(&probe).ok().map(|meta| meta.dev());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home_device = home
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.dev());
+
+        if let (Some(location), Some(home)) = (location_device, home_device) {
+            return location != home;
+        }
+    }
+
+    false
+}
+
+fn nearest_existing_path(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    loop {
+        if current.exists() {
+            return std::fs::canonicalize(&current).unwrap_or(current);
+        }
+        if !current.pop() {
+            return PathBuf::new();
+        }
+    }
 }

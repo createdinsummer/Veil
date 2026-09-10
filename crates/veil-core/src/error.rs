@@ -54,6 +54,9 @@ pub enum VeilError {
 
     #[error("文件已存在: {0}")]
     FileAlreadyExists(String),
+
+    #[error("卷不可用: {0}")]
+    VolumeUnavailable(String),
 }
 
 /// 库内部统一用这个 Result 别名，少写一遍错误类型。
