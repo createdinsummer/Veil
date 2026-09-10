@@ -1,18 +1,11 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::config::GlobalConfig;
 use veil_core::workspace_ops::WorkspaceManager;
 
 /// 列出容器中的所有文件
-pub fn run_workspace(
-    container_name: &str,
-    password: Option<String>,
-) -> Result<()> {
-    // 加载配置
-    let config = GlobalConfig::load()?;
-
-    // 获取容器工作区路径
-    let workspace_path = config.get_container_workspace_path(container_name)?;
+pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+    let resolved = super::resolve_container(container_name)?;
+    let workspace_path = resolved.workspace_path;
 
     let password_str = super::prompt_password("请输入容器密码: ", password)?;
 
@@ -24,11 +17,22 @@ pub fn run_workspace(
     let files = manager.list_files(password)?;
 
     if files.is_empty() {
-        println!("{}", "容器为空".yellow());
+        println!("{}", crate::i18n::t("common.empty").yellow());
         return Ok(());
     }
 
-    println!("\n{}", format!("容器 '{}' 包含 {} 个文件:", container_name, files.len()).cyan().bold());
+    println!(
+        "\n{}",
+        crate::i18n::t2(
+            "list.workspace_title",
+            "name",
+            container_name,
+            "count",
+            &files.len().to_string()
+        )
+        .cyan()
+        .bold()
+    );
     println!();
 
     // 计算总大小
@@ -48,7 +52,10 @@ pub fn run_workspace(
     }
 
     println!();
-    println!("{}", format!("总大小: {}", format_size(total_size)).bright_black());
+    println!(
+        "{}",
+        crate::i18n::t1("list.total_size", "size", &format_size(total_size)).bright_black()
+    );
     println!();
 
     Ok(())

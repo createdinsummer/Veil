@@ -57,14 +57,14 @@
    - ✅ `pack_workspace.rs` - 打包容器
    - ✅ `unpack_workspace.rs` - 解包容器
 
-2. **测试工具** (`veil-ws`)
-   - ✅ 独立的测试二进制
-   - ✅ 支持所有工作区命令
+2. **测试**
+   - ✅ Rust 单元测试与集成测试覆盖工作区命令
+   - ✅ 测试环境使用低强度 KDF，不影响 release 安全参数
 
 ### 测试结果
 
 #### 基础功能测试 ✅
-从 `test_workspace.sh` 的部分输出可见：
+从 CLI 集成测试可见：
 - ✅ 容器初始化成功
 - ✅ 文件加密和添加
 - ✅ 列出文件（显示正确）
@@ -173,8 +173,6 @@ crates/
         extract_workspace.rs
         pack_workspace.rs
         unpack_workspace.rs
-      bin/
-        veil-ws.rs        - 测试工具
 ```
 
 ## 编译和测试
@@ -183,16 +181,8 @@ crates/
 # 编译核心库
 cargo build --package veil-core
 
-# 编译测试工具
-cargo build --bin veil-ws
-
-# 运行单元测试
-cargo test --package veil-core workspace_tests
-
-# 运行集成测试（较慢，Argon2id）
-./test_workspace.sh
-./test_pack_unpack.sh
-./test_quick.sh
+# 运行完整测试
+cargo test --workspace
 ```
 
 ## 技术亮点

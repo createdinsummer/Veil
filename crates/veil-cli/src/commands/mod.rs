@@ -1,25 +1,50 @@
-pub mod init;
 pub mod add;
-pub mod rm;
-pub mod mv;
-pub mod free;
+pub mod config;
 pub mod ex;
 pub mod info;
-pub mod passwd;
-pub mod shell;
+pub mod init;
+pub mod link;
+pub mod rm;
 
 // 工作区架构命令
-pub mod init_workspace;
-pub mod add_workspace;
-pub mod list_workspace;
-pub mod rm_workspace;
-pub mod extract_workspace;
-pub mod pack_workspace;
-pub mod unpack_workspace;
-pub mod mv_workspace;
-pub mod passwd_workspace;
 pub mod free_workspace;
+pub mod list_workspace;
+pub mod mv_workspace;
+pub mod pack_workspace;
+pub mod passwd_workspace;
 pub mod shell_workspace;
+pub mod unpack_workspace;
+
+use std::path::PathBuf;
+use veil_core::config::{GlobalConfig, ResolvedContainer};
+
+/// 解析 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。
+pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
+    let mut config = GlobalConfig::load()?;
+    let mut resolved = config.resolve_container(input)?;
+
+    if let Some(link_path) = resolved.missing_link_path.clone() {
+        config.register_link(&resolved.name, &link_path)?;
+        crate::hints::show_link_recovery_hint(&link_path);
+        resolved.link_path = Some(link_path);
+        resolved.missing_link_path = None;
+    }
+
+    if let Some(ambiguity) = resolved.ambiguity.as_ref() {
+        crate::hints::show_file_type_ambiguity_hint(
+            &ambiguity.link_path,
+            &ambiguity.container_path,
+        );
+    }
+
+    Ok(resolved)
+}
+
+pub fn default_link_path(container_name: &str) -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(format!("{}.veil-link", container_name))
+}
 
 /// 密码输入辅助函数（自适应显示编码，跨平台）
 ///
@@ -53,7 +78,7 @@ fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
 /// - `Err(anyhow::Error)`: 失败（TTY 不可用或读取失败）
 ///
 /// # 示例
-/// ```rust
+/// ```text
 /// let password = prompt_password("请输入密码: ", Some("mypass".to_string()))?;
 /// let password = prompt_password("请输入密码: ", None)?; // 环境变量或交互式
 /// ```
@@ -91,7 +116,7 @@ pub fn prompt_password(
 /// - `Err(anyhow::Error)`: 失败（两次输入不一致、TTY 不可用或读取失败）
 ///
 /// # 示例
-/// ```rust
+/// ```text
 /// let password = prompt_new_password(Some("mypass".to_string()))?;
 /// let password = prompt_new_password(None)?; // 环境变量或交互式确认
 /// ```

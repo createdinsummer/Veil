@@ -649,7 +649,7 @@ impl Container {
     /// 支持 `*`（不匹配 `/`）和 `**`（匹配任意层级）。
     ///
     /// # 示例
-    /// ```ignore
+    /// ```text
     /// let paths = container.find_files("**/*.jpg")?;
     /// ```
     pub fn find_files(&self, pattern: &str) -> Result<Vec<String>> {
@@ -660,7 +660,7 @@ impl Container {
     /// 删除匹配通配符模式的所有文件，返回被删除的文件路径列表。
     ///
     /// # 示例
-    /// ```ignore
+    /// ```text
     /// let deleted = container.remove_matched("temp/*")?;
     /// ```
     pub fn remove_matched(&mut self, pattern: &str) -> Result<Vec<String>> {
@@ -681,7 +681,7 @@ impl Container {
     /// 导出匹配通配符模式的所有文件到指定目录。
     ///
     /// # 示例
-    /// ```ignore
+    /// ```text
     /// container.extract_matched("photos/**/*.jpg", "./output")?;
     /// ```
     pub fn extract_matched(&self, pattern: &str, out_dir: impl AsRef<Path>) -> Result<()> {

@@ -1,35 +1,35 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::config::GlobalConfig;
-use veil_core::workspace_ops::WorkspaceManager;
 use std::io::{self, Write};
+use veil_core::workspace_ops::WorkspaceManager;
 
 /// 交互式 shell
-pub fn run_workspace(
-    container_name: &str,
-    password: Option<String>,
-) -> Result<()> {
-    // 加载配置
-    let config = GlobalConfig::load()?;
-
-    // 获取容器工作区路径
-    let workspace_path = config.get_container_workspace_path(container_name)?;
+pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+    let resolved = super::resolve_container(container_name)?;
+    let workspace_path = resolved.workspace_path;
 
     // 验证密码
-    println!("{}", format!("打开容器 '{}'...", container_name).cyan());
-    let password_str = super::prompt_password("请输入容器密码: ", password)?;
+    println!(
+        "{}",
+        crate::i18n::t1("shell.opening_named", "name", container_name).cyan()
+    );
+    let password_str =
+        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let pwd = password_str.expose_secret();
 
     // 验证密码并读取元数据
     let manager = WorkspaceManager::new(workspace_path.clone());
-    let metadata = manager.read_meta(pwd)?;
+    manager.read_meta(pwd)?;
 
-    println!("{}", "✓ 容器已打开".green());
+    println!("{}", crate::i18n::t("shell.opened_named").green());
     println!();
-    println!("{}", format!("Veil Shell - 容器: {}", container_name).bright_cyan());
-    println!("{}", "输入命令 (ls/add/rm/ex/info/help/exit):".bright_black());
+    println!(
+        "{}",
+        crate::i18n::t1("shell.title_named", "name", container_name).bright_cyan()
+    );
+    println!("{}", crate::i18n::t("shell.command_hint").bright_black());
     println!();
 
     loop {
@@ -49,7 +49,7 @@ pub fn run_workspace(
 
         match cmd {
             "exit" | "quit" | "q" => {
-                println!("{}", "再见！".bright_black());
+                println!("{}", crate::i18n::t("shell.goodbye").bright_black());
                 break;
             }
             "help" | "h" | "?" => {
@@ -63,62 +63,93 @@ pub fn run_workspace(
                 match manager.read_meta(pwd) {
                     Ok(current_metadata) => {
                         if let Err(e) = show_info(container_name, &current_metadata) {
-                            println!("{}", format!("❌ 显示信息失败: {}", e).red());
+                            println!(
+                                "{}",
+                                crate::i18n::t1("shell.info_failed", "error", &e.to_string()).red()
+                            );
                         }
                     }
                     Err(e) => {
-                        println!("{}", format!("❌ 读取元数据失败: {}", e).red());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.metadata_failed", "error", &e.to_string()).red()
+                        );
                     }
                 }
             }
             "add" => {
                 if parts.len() < 2 {
-                    println!("{}", "用法: add <文件路径>".yellow());
+                    println!("{}", crate::i18n::t("shell.usage_add").yellow());
                     continue;
                 }
                 let file_path = parts[1];
                 match manager.add_file(std::path::Path::new(file_path), pwd) {
                     Ok(encrypted_name) => {
-                        println!("{}", format!("✓ 已添加: {} -> {}", file_path, encrypted_name).green());
+                        println!(
+                            "{}",
+                            crate::i18n::t2(
+                                "shell.added",
+                                "file",
+                                file_path,
+                                "encrypted",
+                                &encrypted_name
+                            )
+                            .green()
+                        );
                     }
                     Err(e) => {
-                        println!("{}", format!("❌ 添加失败: {}", e).red());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.add_failed", "error", &e.to_string()).red()
+                        );
                     }
                 }
             }
             "rm" | "delete" => {
                 if parts.len() < 2 {
-                    println!("{}", "用法: rm <文件名>".yellow());
+                    println!("{}", crate::i18n::t("shell.usage_rm").yellow());
                     continue;
                 }
                 let file_name = parts[1];
                 match manager.remove_file(file_name, pwd) {
                     Ok(()) => {
-                        println!("{}", format!("✓ 已删除: {}", file_name).green());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.deleted", "path", file_name).green()
+                        );
                     }
                     Err(e) => {
-                        println!("{}", format!("❌ 删除失败: {}", e).red());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.delete_failed", "error", &e.to_string()).red()
+                        );
                     }
                 }
             }
             "ex" | "extract" => {
                 if parts.len() < 3 {
-                    println!("{}", "用法: ex <文件名> <输出路径>".yellow());
+                    println!("{}", crate::i18n::t("shell.usage_ex").yellow());
                     continue;
                 }
                 let file_name = parts[1];
                 let output_path = parts[2];
                 match manager.extract_file(file_name, std::path::Path::new(output_path), pwd) {
                     Ok(()) => {
-                        println!("{}", format!("✓ 已导出: {}", output_path).green());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.exported", "path", output_path).green()
+                        );
                     }
                     Err(e) => {
-                        println!("{}", format!("❌ 导出失败: {}", e).red());
+                        println!(
+                            "{}",
+                            crate::i18n::t1("shell.export_failed", "error", &e.to_string()).red()
+                        );
                     }
                 }
             }
             _ => {
-                println!("{}", format!("未知命令: {}. 输入 'help' 查看帮助", cmd).yellow());
+                println!("{}", crate::i18n::t1("shell.unknown", "cmd", cmd).yellow());
             }
         }
     }
@@ -127,40 +158,112 @@ pub fn run_workspace(
 }
 
 fn print_help() {
-    println!("{}", "可用命令:".bright_cyan());
-    println!("  {}  - 列出所有文件", "ls".bright_white());
-    println!("  {}  - 显示容器信息", "info".bright_white());
-    println!("  {}  - 添加文件到容器", "add <文件路径>".bright_white());
-    println!("  {}  - 从容器删除文件", "rm <文件名>".bright_white());
-    println!("  {}  - 导出文件", "ex <文件名> <输出路径>".bright_white());
-    println!("  {}  - 显示帮助", "help".bright_white());
-    println!("  {}  - 退出 shell", "exit".bright_white());
+    println!("{}", crate::i18n::t("shell.help_title").bright_cyan());
+    println!(
+        "  {}  - {}",
+        "ls".bright_white(),
+        crate::i18n::t("shell.help_ls")
+    );
+    println!(
+        "  {}  - {}",
+        "info".bright_white(),
+        crate::i18n::t("shell.help_info")
+    );
+    println!(
+        "  {}  - {}",
+        "add <file>".bright_white(),
+        crate::i18n::t("shell.help_add")
+    );
+    println!(
+        "  {}  - {}",
+        "rm <file>".bright_white(),
+        crate::i18n::t("shell.help_rm")
+    );
+    println!(
+        "  {}  - {}",
+        "ex <file> <output>".bright_white(),
+        crate::i18n::t("shell.help_ex")
+    );
+    println!(
+        "  {}  - {}",
+        "help".bright_white(),
+        crate::i18n::t("shell.help_help")
+    );
+    println!(
+        "  {}  - {}",
+        "exit".bright_white(),
+        crate::i18n::t("shell.help_exit")
+    );
 }
 
 fn list_files(manager: &WorkspaceManager, password: &str) -> Result<()> {
     let files = manager.list_files(password)?;
 
     if files.is_empty() {
-        println!("{}", "容器为空".bright_black());
+        println!("{}", crate::i18n::t("common.empty").bright_black());
         return Ok(());
     }
 
-    println!("{}", format!("共 {} 个文件:", files.len()).bright_cyan());
+    println!(
+        "{}",
+        format!(
+            "{}:",
+            crate::i18n::t1("free.file_count", "count", &files.len().to_string()).trim()
+        )
+        .bright_cyan()
+    );
     for (i, file) in files.iter().enumerate() {
-        println!("  {}. {} ({} bytes)", i + 1, file.original_name, file.size);
+        println!(
+            "{}",
+            crate::i18n::t3(
+                "common.file_list_item",
+                "index",
+                &(i + 1).to_string(),
+                "name",
+                &file.original_name,
+                "bytes",
+                &file.size.to_string()
+            )
+        );
     }
 
     Ok(())
 }
 
-fn show_info(container_name: &str, metadata: &veil_core::metadata::MetaData) -> Result<()> {
-    println!("{}", "容器信息:".bright_cyan());
-    println!("  容器名称: {}", metadata.container_name);
-    println!("  工作区类型: {}", metadata.workspace_type);
-    println!("  文件数量: {}", metadata.files.len());
+fn show_info(_container_name: &str, metadata: &veil_core::metadata::MetaData) -> Result<()> {
+    println!("{}", crate::i18n::t("info.title").bright_cyan());
+    println!(
+        "{}",
+        crate::i18n::t1("info.container_name", "name", &metadata.container_name)
+    );
+    println!(
+        "{}",
+        crate::i18n::t1(
+            "info.workspace_type",
+            "workspace_type",
+            &metadata.workspace_type
+        )
+    );
+    println!(
+        "{}",
+        crate::i18n::t1(
+            "info.content_count",
+            "count",
+            &metadata.files.len().to_string()
+        )
+    );
 
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
-    println!("  总大小: {} bytes", total_size);
+    println!(
+        "{}",
+        crate::i18n::t2(
+            "free.total_size",
+            "bytes",
+            &total_size.to_string(),
+            "mb",
+            &format!("{:.2}", total_size as f64 / 1_048_576.0)
+        )
+    );
 
     Ok(())
 }

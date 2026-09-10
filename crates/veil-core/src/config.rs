@@ -4,14 +4,15 @@
 //! 管理工作区、容器映射、用户偏好等全局设置
 
 use crate::error::VeilError;
+use crate::link::{portable_workspace_path, VeilLink, LINK_EXTENSION};
 use crate::workspace::WorkspaceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 全局配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConfig {
     /// 配置版本
     #[serde(default = "default_version")]
@@ -38,12 +39,25 @@ pub struct GlobalConfig {
     pub encryption: EncryptionConfig,
 }
 
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            system: SystemConfig::default(),
+            workspace: WorkspaceSection::default(),
+            containers: HashMap::new(),
+            preferences: PreferencesConfig::default(),
+            encryption: EncryptionConfig::default(),
+        }
+    }
+}
+
 fn default_version() -> String {
     "1.0".to_string()
 }
 
 /// 系统配置
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     /// 图标是否已配置
     #[serde(default)]
@@ -58,6 +72,34 @@ pub struct SystemConfig {
     /// 是否首次运行
     #[serde(default = "default_true")]
     pub first_run: bool,
+
+    /// 各一次性提示是否已展示
+    #[serde(default)]
+    pub init_hint_shown: bool,
+
+    #[serde(default)]
+    pub pack_hint_shown: bool,
+
+    #[serde(default)]
+    pub unpack_hint_shown: bool,
+
+    #[serde(default)]
+    pub extension_hint_shown: bool,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            icons_configured: false,
+            icons_configured_at: None,
+            icons_version: None,
+            first_run: true,
+            init_hint_shown: false,
+            pack_hint_shown: false,
+            unpack_hint_shown: false,
+            extension_hint_shown: false,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -96,6 +138,10 @@ pub struct ContainerConfig {
 
     /// 最后访问时间
     pub last_accessed: Option<String>,
+
+    /// 指向该容器的链接文件（支持多个）
+    #[serde(default)]
+    pub links: Vec<PathBuf>,
 }
 
 /// 用户偏好配置
@@ -170,6 +216,40 @@ pub enum HintsLevel {
     Brief,
     /// 关闭提示（高级用户）
     Off,
+}
+
+impl HintsLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Brief => "brief",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "brief" => Some(Self::Brief),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedContainer {
+    pub name: String,
+    pub workspace_path: PathBuf,
+    pub link_path: Option<PathBuf>,
+    pub missing_link_path: Option<PathBuf>,
+    pub ambiguity: Option<ContainerAmbiguity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContainerAmbiguity {
+    pub link_path: PathBuf,
+    pub container_path: PathBuf,
 }
 
 /// 加密配置
@@ -275,9 +355,12 @@ impl GlobalConfig {
             VeilError::ConfigError(format!("读取配置文件失败: {}", e))
         })?;
 
-        let config: Self = toml::from_str(&content).map_err(|e| {
+        let mut config: Self = toml::from_str(&content).map_err(|e| {
             VeilError::ConfigError(format!("解析配置文件失败: {}", e))
         })?;
+        if config.version.is_empty() {
+            config.version = default_version();
+        }
 
         Ok(config)
     }
@@ -343,5 +426,196 @@ impl GlobalConfig {
 
             Ok(workspace.path.join(container_dir))
         }
+    }
+
+    /// 将用户输入解析成容器名、工作区路径和链接文件。
+    ///
+    /// 支持 `.veil-link`、配置中的容器名，以及直接指向工作区目录的路径。
+    pub fn resolve_container(&self, input: &str) -> Result<ResolvedContainer, VeilError> {
+        let input_path = PathBuf::from(input);
+        if input_path.exists() {
+            if input_path.is_file() && is_link_path(&input_path) {
+                return self.resolve_link_file(&input_path, None);
+            }
+
+            if input_path.is_dir() && input_path.join(".veil-meta").exists() {
+                let name = input_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("container")
+                    .to_string();
+                return Ok(ResolvedContainer {
+                    name,
+                    workspace_path: input_path,
+                    link_path: None,
+                    missing_link_path: None,
+                    ambiguity: None,
+                });
+            }
+
+            if input_path.is_file()
+                && input_path.extension().and_then(|ext| ext.to_str()) == Some("veil")
+            {
+                return Err(VeilError::InvalidFormat(format!(
+                    "{} 是打包文件，请先运行 veil unpack {}",
+                    input_path.display(),
+                    input_path.display()
+                )));
+            }
+        }
+
+        if is_link_path(&input_path) {
+            return self.resolve_missing_link(&input_path);
+        }
+
+        let link_path = with_extension(input, LINK_EXTENSION);
+        let container_path = with_extension(input, "veil");
+        let link_exists = link_path.exists();
+        let container_exists = container_path.exists();
+
+        if link_exists {
+            let ambiguity = container_exists.then_some(ContainerAmbiguity {
+                link_path: link_path.clone(),
+                container_path,
+            });
+            return self.resolve_link_file(&link_path, ambiguity);
+        }
+
+        if container_exists {
+            return Err(VeilError::InvalidFormat(format!(
+                "检测到打包文件 {}，请运行 veil unpack {}",
+                container_path.display(),
+                container_path.display()
+            )));
+        }
+
+        if self.containers.contains_key(input) {
+            return Ok(ResolvedContainer {
+                name: input.to_string(),
+                workspace_path: self.get_container_workspace_path(input)?,
+                link_path: None,
+                missing_link_path: None,
+                ambiguity: None,
+            });
+        }
+
+        Err(VeilError::ContainerNotFound(format!(
+            "找不到容器 '{}' 或链接文件 '{}.veil-link'",
+            input, input
+        )))
+    }
+
+    pub fn write_link(&self, container_name: &str, link_path: &Path) -> Result<VeilLink, VeilError> {
+        let container = self.containers.get(container_name).ok_or_else(|| {
+            VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
+        })?;
+
+        let workspace_path = self.get_container_workspace_path(container_name)?;
+        let workspace_type = if container.dedicated {
+            "dedicated"
+        } else {
+            container.workspace.as_deref().unwrap_or("default")
+        };
+
+        let link = VeilLink::new(
+            container_name,
+            portable_workspace_path(&workspace_path),
+            workspace_type,
+            container.dedicated,
+        );
+        link.save(link_path)?;
+        Ok(link)
+    }
+
+    pub fn register_link(
+        &mut self,
+        container_name: &str,
+        link_path: &Path,
+    ) -> Result<VeilLink, VeilError> {
+        let link = self.write_link(container_name, link_path)?;
+        let container = self.containers.get_mut(container_name).ok_or_else(|| {
+            VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
+        })?;
+
+        let stored_path = absolute_path(link_path);
+        if !container.links.iter().any(|path| path == &stored_path) {
+            container.links.push(stored_path);
+        }
+        self.save()?;
+
+        Ok(link)
+    }
+
+    fn resolve_link_file(
+        &self,
+        link_path: &Path,
+        ambiguity: Option<ContainerAmbiguity>,
+    ) -> Result<ResolvedContainer, VeilError> {
+        let link = VeilLink::load(link_path)?;
+        let workspace_path = link.resolve_workspace_path(link_path)?;
+        let name = link.container_name(link_path);
+
+        Ok(ResolvedContainer {
+            name,
+            workspace_path,
+            link_path: Some(link_path.to_path_buf()),
+            missing_link_path: None,
+            ambiguity,
+        })
+    }
+
+    fn resolve_missing_link(&self, link_path: &Path) -> Result<ResolvedContainer, VeilError> {
+        let missing_path = absolute_path(link_path);
+        let registered_name = self.containers.iter().find_map(|(name, container)| {
+            container
+                .links
+                .iter()
+                .any(|registered| registered == &missing_path)
+                .then(|| name.clone())
+        });
+        let inferred_name = link_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("container")
+            .to_string();
+        let name = registered_name
+            .or_else(|| self.containers.contains_key(&inferred_name).then_some(inferred_name))
+            .ok_or_else(|| {
+                VeilError::ContainerNotFound(format!(
+                    "链接文件不存在，且配置中找不到对应容器: {}",
+                    link_path.display()
+                ))
+            })?;
+
+        Ok(ResolvedContainer {
+            name: name.clone(),
+            workspace_path: self.get_container_workspace_path(&name)?,
+            link_path: None,
+            missing_link_path: Some(link_path.to_path_buf()),
+            ambiguity: None,
+        })
+    }
+}
+
+fn is_link_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some(LINK_EXTENSION)
+}
+
+fn with_extension(input: &str, extension: &str) -> PathBuf {
+    let path = PathBuf::from(input);
+    if path.extension().is_some() {
+        path.with_extension(extension)
+    } else {
+        PathBuf::from(format!("{}.{}", input, extension))
+    }
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }

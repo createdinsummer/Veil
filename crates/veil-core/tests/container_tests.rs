@@ -14,6 +14,7 @@ struct TempDir {
 
 impl TempDir {
     fn new(name: &str) -> Self {
+        veil_core::kdf::enable_fast_test_kdf();
         let path = std::env::temp_dir().join(format!("veil_test_{}", name));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
@@ -195,7 +196,9 @@ fn test_extract_file() {
     let extract_path = temp_dir.path().join("extracted.txt");
 
     let mut container = Container::create(&container_path, "password", "test/1.0.0").unwrap();
-    container.add_file("test.txt", b"extracted content").unwrap();
+    container
+        .add_file("test.txt", b"extracted content")
+        .unwrap();
 
     // 提取文件
     container.extract_file("test.txt", &extract_path).unwrap();

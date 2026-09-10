@@ -1,11 +1,13 @@
 //! 工作区功能集成测试
 
-use veil_core::workspace_ops::WorkspaceManager;
 use std::fs;
 use tempfile::TempDir;
+use veil_core::kdf;
+use veil_core::workspace_ops::WorkspaceManager;
 
 #[test]
 fn test_workspace_init_and_operations() {
+    kdf::enable_fast_test_kdf();
     // 创建临时目录
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path().join("test-container");
@@ -33,12 +35,15 @@ fn test_workspace_init_and_operations() {
 
 #[test]
 fn test_add_and_extract_file() {
+    kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path().join("test-container");
     let manager = WorkspaceManager::new(workspace_path.clone());
 
     let password = "test-password-123";
-    manager.init_container("test-container", "default", password).unwrap();
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
 
     // 创建测试文件
     let test_file = temp_dir.path().join("test.txt");
@@ -59,7 +64,9 @@ fn test_add_and_extract_file() {
 
     // 提取文件
     let output_file = temp_dir.path().join("extracted.txt");
-    manager.extract_file("test.txt", &output_file, password).unwrap();
+    manager
+        .extract_file("test.txt", &output_file, password)
+        .unwrap();
 
     // 验证内容
     let content = fs::read_to_string(&output_file).unwrap();
@@ -70,12 +77,15 @@ fn test_add_and_extract_file() {
 
 #[test]
 fn test_wrong_password() {
+    kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path().join("test-container");
     let manager = WorkspaceManager::new(workspace_path);
 
     let password = "correct-password";
-    manager.init_container("test-container", "default", password).unwrap();
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
 
     // 使用错误密码应该失败
     let result = manager.read_meta("wrong-password");
@@ -86,12 +96,15 @@ fn test_wrong_password() {
 
 #[test]
 fn test_remove_file() {
+    kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path().join("test-container");
     let manager = WorkspaceManager::new(workspace_path.clone());
 
     let password = "test-password";
-    manager.init_container("test-container", "default", password).unwrap();
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
 
     // 添加文件
     let test_file = temp_dir.path().join("delete-me.txt");

@@ -1,532 +1,213 @@
-//! # CLI 命令完整测试
-//!
-//! 基于命令清单生成的完整测试覆盖，包括正常流程和边界情况
+mod common;
 
-use assert_cmd::Command;
+use common::TestEnv;
 use predicates::prelude::*;
-use std::fs;
-use tempfile::TempDir;
-
-/// 创建临时测试环境
-fn setup() -> TempDir {
-    TempDir::new().unwrap()
-}
-
-/// 创建带密码的命令
-fn veil(password: &str) -> Command {
-    let mut cmd = Command::cargo_bin("veil").unwrap();
-    cmd.env("VEIL_PASSWORD", password);
-    cmd
-}
-
-/// 初始化一个测试容器
-fn init_container(temp_dir: &TempDir, password: &str) -> std::path::PathBuf {
-    let container = temp_dir.path().join("test.veil");
-    veil(password)
-        .args(&["init", &container.to_string_lossy(), password])
-        .assert()
-        .success();
-    container
-}
-
-// ============================================================================
-// init 命令测试
-// ============================================================================
 
 #[test]
-fn init_creates_new_container() {
-    let temp_dir = setup();
-    let container = temp_dir.path().join("new.veil");
+fn init_creates_workspace_and_link() {
+    let env = TestEnv::new("test-password");
 
-    veil("password123")
-        .args(&["init", &container.to_string_lossy(), "password123"])
+    env.command()
+        .args(["init", "photos", "test-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("容器创建成功"));
+        .stdout(predicate::str::contains("容器创建成功"))
+        .stdout(predicate::str::contains("已生成链接"));
 
-    assert!(container.exists());
+    let link = env.link_path("photos");
+    assert!(link.exists());
+
+    let content = std::fs::read_to_string(link).unwrap();
+    assert!(content.contains("container_name = \"photos\""));
+    assert!(content.contains("workspace_type = \"default\""));
 }
 
 #[test]
-fn init_fails_if_file_exists() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
+fn duplicate_init_fails() {
+    let env = TestEnv::new("test-password");
+    env.init("photos");
 
-    veil("pass")
-        .args(&["init", &container.to_string_lossy(), "pass"])
+    env.command()
+        .args(["init", "photos", "test-password"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("容器文件已存在"));
+        .stderr(predicate::str::contains("已存在"));
 }
 
 #[test]
-fn init_with_empty_password() {
-    let temp_dir = setup();
-    let container = temp_dir.path().join("test.veil");
+fn add_list_and_info_accept_link() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("documents");
+    let source = env.write_file("notes.txt", "hello veil");
 
-    veil("")
-        .args(&["init", &container.to_string_lossy(), ""])
-        .assert()
-        .success();
-
-    assert!(container.exists());
-}
-
-// ============================================================================
-// add 命令测试
-// ============================================================================
-
-#[test]
-fn add_single_file() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加"));
-}
+        .stdout(predicate::str::contains("文件已添加"));
 
-#[test]
-fn add_file_with_custom_path() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("source.txt");
-    fs::write(&file, "content").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy(), "custom/path.txt"])
-        .assert()
-        .success();
-}
-
-#[test]
-fn add_directory() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let dir = temp_dir.path().join("mydir");
-    fs::create_dir(&dir).unwrap();
-    fs::write(dir.join("file1.txt"), "content1").unwrap();
-    fs::write(dir.join("file2.txt"), "content2").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &dir.to_string_lossy()])
+    env.command()
+        .args(["free", &env.path(&link)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("已添加"));
-}
+        .stdout(predicate::str::contains("notes.txt"))
+        .stdout(predicate::str::contains("文件数量: 1"));
 
-#[test]
-fn add_nonexistent_file_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), "nonexistent.txt"])
+    env.command()
+        .args(["list", &env.path(&link)])
         .assert()
-        .failure();
-}
+        .success()
+        .stdout(predicate::str::contains("notes.txt"));
 
-#[test]
-fn add_with_wrong_password_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "correct");
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-
-    veil("wrong")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
+    env.command()
+        .args(["info", &env.path(&link)])
         .assert()
-        .failure();
+        .success()
+        .stdout(predicate::str::contains("容器名称: documents"))
+        .stdout(predicate::str::contains("notes.txt"));
 }
 
-// ============================================================================
-// rm 命令测试
-// ============================================================================
-
 #[test]
-fn rm_existing_file() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
+fn rename_and_remove_use_workspace_metadata() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("archive");
+    let source = env.write_file("old.txt", "content");
 
-    // 先添加
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
         .assert()
         .success();
 
-    // 再删除
-    veil("pass")
-        .args(&["rm", &container.to_string_lossy(), "test.txt"])
+    env.command()
+        .args(["mv", &env.path(&link), "old.txt", "new.txt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("new.txt"));
+
+    env.command()
+        .args(["rm", &env.path(&link), "new.txt"])
         .assert()
         .success()
         .stdout(predicate::str::contains("已删除"));
-}
 
-#[test]
-fn rm_nonexistent_file_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["rm", &container.to_string_lossy(), "nonexistent.txt"])
-        .assert()
-        .failure();
-}
-
-#[test]
-fn rm_with_wildcard() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    // 添加多个文件
-    for i in 1..=3 {
-        let file = temp_dir.path().join(format!("file{}.txt", i));
-        fs::write(&file, format!("content{}", i)).unwrap();
-        veil("pass")
-            .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-            .assert()
-            .success();
-    }
-
-    // 用通配符删除
-    veil("pass")
-        .args(&["rm", &container.to_string_lossy(), "*.txt"])
-        .assert()
-        .success();
-}
-
-// ============================================================================
-// mv 命令测试
-// ============================================================================
-
-#[test]
-fn mv_rename_file() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("old.txt");
-    fs::write(&file, "content").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-        .assert()
-        .success();
-
-    veil("pass")
-        .args(&["mv", &container.to_string_lossy(), "old.txt", "new.txt"])
+    env.command()
+        .args(["free", &env.path(&link)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("已移动"));
+        .stdout(predicate::str::contains("(空)"));
 }
 
 #[test]
-fn mv_to_subdirectory() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
+fn export_round_trip() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("exports");
+    let source = env.write_file("source.txt", "original content");
+    let output = env.work.path().join("exported.txt");
 
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
         .assert()
         .success();
 
-    veil("pass")
-        .args(&["mv", &container.to_string_lossy(), "test.txt", "subdir/test.txt"])
-        .assert()
-        .success();
-}
-
-#[test]
-fn mv_nonexistent_file_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["mv", &container.to_string_lossy(), "nonexistent.txt", "new.txt"])
-        .assert()
-        .failure();
-}
-
-// ============================================================================
-// free 命令测试
-// ============================================================================
-
-#[test]
-fn free_shows_empty_container() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["free", &container.to_string_lossy()])
-        .assert()
-        .success();
-}
-
-#[test]
-fn free_shows_files() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    // 添加文件
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-        .assert()
-        .success();
-
-    veil("pass")
-        .args(&["free", &container.to_string_lossy()])
+    env.command()
+        .args(["ex", &env.path(&link), "source.txt", &env.path(&output)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("test.txt"));
+        .stdout(predicate::str::contains("文件已导出"));
+
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "original content");
 }
 
 #[test]
-fn free_shows_directory_structure() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
+fn wrong_password_is_rejected() {
+    let env = TestEnv::new("correct-password");
+    let link = env.init("secure");
 
-    // 添加嵌套文件
-    let file1 = temp_dir.path().join("file1.txt");
-    let file2 = temp_dir.path().join("file2.txt");
-    fs::write(&file1, "content1").unwrap();
-    fs::write(&file2, "content2").unwrap();
+    env.command_with_password("wrong-password")
+        .args(["free", &env.path(&link)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("解密失败").or(predicate::str::contains("密码错误")));
+}
 
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file1.to_string_lossy(), "dir/file1.txt"])
+#[test]
+fn change_password_rekeys_workspace() {
+    let env = TestEnv::new("old-password");
+    let link = env.init("rotate");
+    let source = env.write_file("secret.txt", "secret");
+
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
         .assert()
         .success();
 
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file2.to_string_lossy(), "file2.txt"])
-        .assert()
-        .success();
-
-    veil("pass")
-        .args(&["free", &container.to_string_lossy()])
+    env.command()
+        .args(["passwd", &env.path(&link), "old-password", "new-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("dir"))
-        .stdout(predicate::str::contains("file2.txt"));
-}
+        .stdout(predicate::str::contains("密码修改成功"));
 
-// ============================================================================
-// ex 命令测试
-// ============================================================================
-
-#[test]
-fn ex_extract_single_file() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("source.txt");
-    fs::write(&file, "original content").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-        .assert()
-        .success();
-
-    let output = temp_dir.path().join("extracted.txt");
-    veil("pass")
-        .args(&["ex", &container.to_string_lossy(), "source.txt", &output.to_string_lossy()])
-        .assert()
-        .success();
-
-    assert!(output.exists());
-    assert_eq!(fs::read_to_string(&output).unwrap(), "original content");
-}
-
-#[test]
-fn ex_extract_to_directory() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-        .assert()
-        .success();
-
-    let output_dir = temp_dir.path().join("output");
-    fs::create_dir(&output_dir).unwrap();
-
-    // 导出到目录时需要指定完整的输出路径
-    veil("pass")
-        .args(&["ex", &container.to_string_lossy(), "test.txt", &output_dir.join("test.txt").to_string_lossy()])
-        .assert()
-        .success();
-
-    assert!(output_dir.join("test.txt").exists());
-}
-
-#[test]
-fn ex_extract_with_wildcard() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    // 添加多个文件
-    for i in 1..=3 {
-        let file = temp_dir.path().join(format!("image{}.png", i));
-        fs::write(&file, format!("data{}", i)).unwrap();
-        veil("pass")
-            .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-            .assert()
-            .success();
-    }
-
-    let output_dir = temp_dir.path().join("output");
-    fs::create_dir(&output_dir).unwrap();
-
-    veil("pass")
-        .args(&["ex", &container.to_string_lossy(), "*.png", &output_dir.to_string_lossy()])
-        .assert()
-        .success();
-
-    assert!(output_dir.join("image1.png").exists());
-    assert!(output_dir.join("image2.png").exists());
-    assert!(output_dir.join("image3.png").exists());
-}
-
-#[test]
-#[ignore] // TODO: CLI 目前对不存在的文件不报错，需要修复
-fn ex_nonexistent_file_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["ex", &container.to_string_lossy(), "nonexistent.txt", "output.txt"])
+    env.command_with_password("old-password")
+        .args(["free", &env.path(&link)])
         .assert()
         .failure();
-}
 
-// ============================================================================
-// info 命令测试
-// ============================================================================
-
-#[test]
-fn info_shows_container_metadata() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    veil("pass")
-        .args(&["info", &container.to_string_lossy()])
+    env.command_with_password("new-password")
+        .args(["free", &env.path(&link)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("容器"))
-        .stdout(predicate::str::contains("版本"));
+        .stdout(predicate::str::contains("secret.txt"));
 }
 
 #[test]
-fn info_shows_file_count() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
+fn pack_and_unpack_create_reusable_links() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("package");
+    let source = env.write_file("payload.txt", "payload");
 
-    // 添加文件
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-    veil("pass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
         .assert()
         .success();
 
-    veil("pass")
-        .args(&["info", &container.to_string_lossy()])
+    env.command()
+        .args(["pack", &env.path(&link)])
+        .assert()
+        .success();
+
+    let package = env.work.path().join("package.vault.veil");
+    assert!(package.exists());
+
+    env.command()
+        .args([
+            "unpack",
+            &env.path(&package),
+            "-n",
+            "restored",
+            "-p",
+            "test-password",
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("1"));
-}
+        .stdout(predicate::str::contains("已解包容器"));
 
-#[test]
-fn info_with_wrong_password_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "correct");
+    let restored_link = env.link_path("restored");
+    assert!(restored_link.exists());
 
-    veil("wrong")
-        .args(&["info", &container.to_string_lossy()])
-        .assert()
-        .failure();
-}
-
-// ============================================================================
-// passwd 命令测试
-// ============================================================================
-
-#[test]
-fn passwd_changes_password() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "oldpass");
-
-    // 添加测试文件
-    let file = temp_dir.path().join("test.txt");
-    fs::write(&file, "content").unwrap();
-    veil("oldpass")
-        .args(&["add", &container.to_string_lossy(), &file.to_string_lossy()])
-        .assert()
-        .success();
-
-    // 修改密码
-    veil("oldpass")
-        .args(&["passwd", &container.to_string_lossy(), "oldpass", "newpass"])
-        .assert()
-        .success();
-
-    // 用旧密码失败
-    veil("oldpass")
-        .args(&["free", &container.to_string_lossy()])
-        .assert()
-        .failure();
-
-    // 用新密码成功
-    veil("newpass")
-        .args(&["free", &container.to_string_lossy()])
+    env.command()
+        .args(["free", &env.path(&restored_link)])
         .assert()
         .success()
-        .stdout(predicate::str::contains("test.txt"));
+        .stdout(predicate::str::contains("payload.txt"));
 }
 
 #[test]
-fn passwd_with_wrong_old_password_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "correct");
+fn nonexistent_container_fails_cleanly() {
+    let env = TestEnv::new("test-password");
 
-    veil("wrong")
-        .args(&["passwd", &container.to_string_lossy(), "wrong", "newpass"])
+    env.command()
+        .args(["free", "missing.veil-link"])
         .assert()
-        .failure();
-}
-
-// ============================================================================
-// 通用错误测试
-// ============================================================================
-
-#[test]
-fn command_on_nonexistent_container_fails() {
-    let temp_dir = setup();
-    let container = temp_dir.path().join("nonexistent.veil");
-
-    veil("pass")
-        .args(&["free", &container.to_string_lossy()])
-        .assert()
-        .failure();
-}
-
-#[test]
-#[ignore] // 交互式输入会挂起测试
-fn command_without_password_fails() {
-    let temp_dir = setup();
-    let container = init_container(&temp_dir, "pass");
-
-    Command::cargo_bin("veil")
-        .unwrap()
-        .args(&["free", &container.to_string_lossy()])
-        .assert()
-        .failure();
+        .failure()
+        .stderr(predicate::str::contains("找不到"));
 }

@@ -4,6 +4,12 @@
 
 use crate::error::{Result, VeilError};
 
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(debug_assertions)]
+static FAST_TEST_KDF: AtomicBool = AtomicBool::new(false);
+
 /// KDF 类型标识
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KdfType {
@@ -43,7 +49,7 @@ impl Argon2Params {
     /// - 时间：约 1.5 秒
     /// - 防御强度：良好
     pub const STANDARD: Self = Self {
-        memory_kb: 256 * 1024,  // 256 MB
+        memory_kb: 256 * 1024, // 256 MB
         iterations: 3,
         parallelism: 4,
     };
@@ -53,7 +59,7 @@ impl Argon2Params {
     /// - 时间：约 3 秒
     /// - 防御强度：很好
     pub const HIGH: Self = Self {
-        memory_kb: 512 * 1024,  // 512 MB
+        memory_kb: 512 * 1024, // 512 MB
         iterations: 4,
         parallelism: 4,
     };
@@ -108,7 +114,7 @@ mod tests {
 pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<()> {
     use argon2::{Algorithm, Argon2, Params, Version};
 
-    let params = Argon2Params::STANDARD;
+    let params = runtime_params();
     let argon2_params = Params::new(
         params.memory_kb,
         params.iterations,
@@ -124,4 +130,27 @@ pub fn derive_key(password: &[u8], salt: &[u8], output: &mut [u8]) -> Result<()>
         .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
 
     Ok(())
+}
+
+pub(crate) fn runtime_params() -> Argon2Params {
+    #[cfg(debug_assertions)]
+    if cfg!(test)
+        || FAST_TEST_KDF.load(Ordering::Relaxed)
+        || std::env::var("VEIL_TEST_KDF").as_deref() == Ok("fast")
+    {
+        return Argon2Params {
+            memory_kb: 8 * 1024,
+            iterations: 1,
+            parallelism: 1,
+        };
+    }
+
+    Argon2Params::STANDARD
+}
+
+/// 仅供 debug 集成测试使用。release 构建不提供该入口。
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn enable_fast_test_kdf() {
+    FAST_TEST_KDF.store(true, Ordering::Relaxed);
 }

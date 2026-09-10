@@ -4,6 +4,170 @@
     "zh": "正在打开容器...",
     "en": "Opening container..."
   },
+  "common.empty": {
+    "zh": "(空)",
+    "en": "(empty)"
+  },
+  "common.encrypted_name": {
+    "zh": "  加密名: {name}",
+    "en": "  Encrypted name: {name}"
+  },
+  "common.output": {
+    "zh": "  输出: {path}",
+    "en": "  Output: {path}"
+  },
+  "common.file_list_title": {
+    "zh": "文件列表:",
+    "en": "Files:"
+  },
+  "common.file_list_item": {
+    "zh": "  {index}. {name} ({bytes} 字节)",
+    "en": "  {index}. {name} ({bytes} bytes)"
+  },
+  "add.not_file": {
+    "zh": "不是文件: {path}",
+    "en": "Not a file: {path}"
+  },
+  "extract.in_progress": {
+    "zh": "正在解密文件...",
+    "en": "Decrypting file..."
+  },
+  "extract.extracted": {
+    "zh": "✓ 已提取文件: {name}",
+    "en": "✓ File extracted: {name}"
+  },
+  "mv.opening_named": {
+    "zh": "正在打开容器 '{name}'...",
+    "en": "Opening container '{name}'..."
+  },
+  "mv.renamed": {
+    "zh": "✓ 已重命名: {from} -> {to}",
+    "en": "✓ Renamed: {from} -> {to}"
+  },
+  "shell.opening_named": {
+    "zh": "打开容器 '{name}'...",
+    "en": "Opening container '{name}'..."
+  },
+  "shell.opened_named": {
+    "zh": "✓ 容器已打开",
+    "en": "✓ Container opened"
+  },
+  "shell.title_named": {
+    "zh": "Veil Shell - 容器: {name}",
+    "en": "Veil Shell - Container: {name}"
+  },
+  "shell.command_hint": {
+    "zh": "输入命令 (ls/add/rm/ex/info/help/exit):",
+    "en": "Commands: (ls/add/rm/ex/info/help/exit):"
+  },
+  "shell.goodbye": {
+    "zh": "再见！",
+    "en": "Goodbye!"
+  },
+  "shell.info_failed": {
+    "zh": "❌ 显示信息失败: {error}",
+    "en": "❌ Failed to show info: {error}"
+  },
+  "shell.metadata_failed": {
+    "zh": "❌ 读取元数据失败: {error}",
+    "en": "❌ Failed to read metadata: {error}"
+  },
+  "shell.usage_add": {
+    "zh": "用法: add <文件路径>",
+    "en": "Usage: add <file-path>"
+  },
+  "shell.usage_rm": {
+    "zh": "用法: rm <文件名>",
+    "en": "Usage: rm <file-name>"
+  },
+  "shell.usage_ex": {
+    "zh": "用法: ex <文件名> <输出路径>",
+    "en": "Usage: ex <file-name> <output-path>"
+  },
+  "shell.added": {
+    "zh": "✓ 已添加: {file} -> {encrypted}",
+    "en": "✓ Added: {file} -> {encrypted}"
+  },
+  "shell.add_failed": {
+    "zh": "❌ 添加失败: {error}",
+    "en": "❌ Add failed: {error}"
+  },
+  "shell.deleted": {
+    "zh": "✓ 已删除: {path}",
+    "en": "✓ Deleted: {path}"
+  },
+  "shell.delete_failed": {
+    "zh": "❌ 删除失败: {error}",
+    "en": "❌ Delete failed: {error}"
+  },
+  "shell.exported": {
+    "zh": "✓ 已导出: {path}",
+    "en": "✓ Exported: {path}"
+  },
+  "shell.export_failed": {
+    "zh": "❌ 导出失败: {error}",
+    "en": "❌ Export failed: {error}"
+  },
+  "shell.unknown": {
+    "zh": "未知命令: {cmd}. 输入 'help' 查看帮助",
+    "en": "Unknown command: {cmd}. Type 'help' for help"
+  },
+  "shell.help_title": {
+    "zh": "可用命令:",
+    "en": "Available commands:"
+  },
+  "shell.help_ls": {
+    "zh": "列出所有文件",
+    "en": "List all files"
+  },
+  "shell.help_info": {
+    "zh": "显示容器信息",
+    "en": "Show container information"
+  },
+  "shell.help_add": {
+    "zh": "添加文件到容器",
+    "en": "Add a file to the container"
+  },
+  "shell.help_rm": {
+    "zh": "从容器删除文件",
+    "en": "Delete a file from the container"
+  },
+  "shell.help_ex": {
+    "zh": "导出文件",
+    "en": "Export a file"
+  },
+  "shell.help_help": {
+    "zh": "显示帮助",
+    "en": "Show help"
+  },
+  "shell.help_exit": {
+    "zh": "退出 shell",
+    "en": "Exit the shell"
+  },
+  "info.container_name": {
+    "zh": "  容器名称: {name}",
+    "en": "  Container name: {name}"
+  },
+  "info.workspace_path": {
+    "zh": "  工作区路径: {path}",
+    "en": "  Workspace path: {path}"
+  },
+  "info.workspace_type": {
+    "zh": "  工作区类型: {workspace_type}",
+    "en": "  Workspace type: {workspace_type}"
+  },
+  "info.created_at": {
+    "zh": "  创建时间: {time}",
+    "en": "  Created at: {time}"
+  },
+  "list.workspace_title": {
+    "zh": "容器 '{name}' 包含 {count} 个文件:",
+    "en": "Container '{name}' contains {count} files:"
+  },
+  "list.total_size": {
+    "zh": "总大小: {size}",
+    "en": "Total size: {size}"
+  },
   "done_label": {
     "zh": "完成",
     "en": "Done"
@@ -15,6 +179,46 @@
   "unknown": {
     "zh": "未知",
     "en": "Unknown"
+  },
+  "version.dev_warning": {
+    "zh": "⚠️  开发版本 - 仅供测试使用",
+    "en": "⚠️  Development build - for testing only"
+  },
+  "version.debug_warning": {
+    "zh": "⚠️  警告: Debug 构建模式",
+    "en": "⚠️  Warning: Debug build"
+  },
+  "version.debug_key_strength": {
+    "zh": "   密钥强度: Argon2id (开发测试参数)",
+    "en": "   Key strength: Argon2id (development parameters)"
+  },
+  "version.debug_crack_speed": {
+    "zh": "   破解速度: 较快",
+    "en": "   Crack resistance: reduced"
+  },
+  "version.debug_recommend": {
+    "zh": "💡 强烈建议使用 Release 模式:",
+    "en": "💡 Release mode is strongly recommended:"
+  },
+  "version.debug_command": {
+    "zh": "   cargo build --release --package veil-cli",
+    "en": "   cargo build --release --package veil-cli"
+  },
+  "version.debug_release_strength": {
+    "zh": "   密钥强度: Argon2id 标准安全级别",
+    "en": "   Key strength: standard Argon2id security"
+  },
+  "version.release_status": {
+    "zh": "✅ Release 模式 - 高安全强度 (Argon2id)",
+    "en": "✅ Release build - strong security (Argon2id)"
+  },
+  "help.flag": {
+    "zh": "显示帮助",
+    "en": "Print help"
+  },
+  "version.flag": {
+    "zh": "显示版本",
+    "en": "Print version"
   },
 
   "prompt.container_password": {
@@ -315,113 +519,121 @@
     "en": "Create a new container"
   },
   "cmd.init.usage": {
-    "zh": "veil init <容器文件> [密码]",
-    "en": "veil init <container-file> [password]"
+    "zh": "veil init <容器名称> [密码] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--link <链接文件>]",
+    "en": "veil init <container-name> [password] [--workspace <workspace> | --workspace-path <path> --dedicated] [--link <link-file>]"
   },
   "cmd.init.usage_opt": {
-    "zh": "veil init <容器文件> [-p <密码>]",
-    "en": "veil init <container-file> [-p <password>]"
+    "zh": "veil init <容器名称> [-p <密码>] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--link <链接文件>]",
+    "en": "veil init <container-name> [-p <password>] [--workspace <workspace> | --workspace-path <path> --dedicated] [--link <link-file>]"
   },
   "cmd.add.about": {
     "zh": "添加文件或目录到容器",
     "en": "Add files or directories to container"
   },
   "cmd.add.usage": {
-    "zh": "veil add <容器文件> [源路径] [目标路径] [密码]",
-    "en": "veil add <container-file> [source] [destination] [password]"
+    "zh": "veil add <容器名称或链接> [源路径] [目标路径] [密码]",
+    "en": "veil add <container-or-link> [source] [destination] [password]"
   },
   "cmd.add.usage_opt": {
-    "zh": "veil add <容器文件> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil add <container-file> -i <source> -o <destination> [-p <password>]"
+    "zh": "veil add <容器名称或链接> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil add <container-or-link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.rm.about": {
     "zh": "从容器删除文件或目录",
     "en": "Delete files or directories from container"
   },
   "cmd.rm.usage": {
-    "zh": "veil rm <容器文件> <路径> [密码]",
-    "en": "veil rm <container-file> <path> [password]"
+    "zh": "veil rm <容器名称或链接> <路径> [密码]",
+    "en": "veil rm <container-or-link> <path> [password]"
   },
   "cmd.rm.usage_opt": {
-    "zh": "veil rm <容器文件> <路径> [-p <密码>]",
-    "en": "veil rm <container-file> <path> [-p <password>]"
+    "zh": "veil rm <容器名称或链接> <路径> [-p <密码>]",
+    "en": "veil rm <container-or-link> <path> [-p <password>]"
   },
   "cmd.mv.about": {
     "zh": "移动/重命名容器内的文件",
     "en": "Move/rename files in container"
   },
   "cmd.mv.usage": {
-    "zh": "veil mv <容器文件> <源路径> <目标路径> [密码]",
-    "en": "veil mv <container-file> <source> <destination> [password]"
+    "zh": "veil mv <容器名称或链接> <源路径> <目标路径> [密码]",
+    "en": "veil mv <container-or-link> <source> <destination> [password]"
   },
   "cmd.mv.usage_opt": {
-    "zh": "veil mv <容器文件> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil mv <container-file> -i <source> -o <destination> [-p <password>]"
+    "zh": "veil mv <容器名称或链接> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil mv <container-or-link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.free.about": {
     "zh": "树状显示容器内容",
     "en": "Display container content as tree"
   },
   "cmd.free.usage": {
-    "zh": "veil free <容器文件> [密码]",
-    "en": "veil free <container-file> [password]"
+    "zh": "veil free <容器名称或链接> [密码]",
+    "en": "veil free <container-or-link> [password]"
   },
   "cmd.free.usage_opt": {
-    "zh": "veil free <容器文件> [-p <密码>]",
-    "en": "veil free <container-file> [-p <password>]"
+    "zh": "veil free <容器名称或链接> [-p <密码>]",
+    "en": "veil free <container-or-link> [-p <password>]"
   },
   "cmd.ex.about": {
     "zh": "导出文件或目录",
     "en": "Export files or directories"
   },
   "cmd.ex.usage": {
-    "zh": "veil ex <容器文件> [输入路径] [输出路径] [密码]",
-    "en": "veil ex <container-file> [input-path] [output-path] [password]"
+    "zh": "veil ex <容器名称或链接> [输入路径] [输出路径] [密码]",
+    "en": "veil ex <container-or-link> [input-path] [output-path] [password]"
   },
   "cmd.ex.usage_opt": {
-    "zh": "veil ex <容器文件> -i <输入路径> -o <输出路径> [-p <密码>]",
-    "en": "veil ex <container-file> -i <input-path> -o <output-path> [-p <password>]"
+    "zh": "veil ex <容器名称或链接> -i <输入路径> -o <输出路径> [-p <密码>]",
+    "en": "veil ex <container-or-link> -i <input-path> -o <output-path> [-p <password>]"
   },
   "cmd.info.about": {
     "zh": "显示容器信息",
     "en": "Display container information"
   },
   "cmd.info.usage": {
-    "zh": "veil info <容器文件> [密码]",
-    "en": "veil info <container-file> [password]"
+    "zh": "veil info <容器名称或链接> [密码]",
+    "en": "veil info <container-or-link> [password]"
   },
   "cmd.info.usage_opt": {
-    "zh": "veil info <容器文件> [-p <密码>]",
-    "en": "veil info <container-file> [-p <password>]"
+    "zh": "veil info <容器名称或链接> [-p <密码>]",
+    "en": "veil info <container-or-link> [-p <password>]"
+  },
+  "cmd.list.about": {
+    "zh": "列出容器中的文件",
+    "en": "List files in a container"
+  },
+  "cmd.list.usage": {
+    "zh": "veil list <容器名称或链接> [-p <密码>]",
+    "en": "veil list <container-or-link> [-p <password>]"
   },
   "cmd.passwd.about": {
     "zh": "修改容器密码",
     "en": "Change container password"
   },
   "cmd.passwd.usage": {
-    "zh": "veil passwd <容器文件> [旧密码] [新密码]",
-    "en": "veil passwd <container-file> [old-password] [new-password]"
+    "zh": "veil passwd <容器名称或链接> [旧密码] [新密码]",
+    "en": "veil passwd <container-or-link> [old-password] [new-password]"
   },
   "cmd.passwd.usage_opt": {
-    "zh": "veil passwd <容器文件> [-p <旧密码>] [-n <新密码>]",
-    "en": "veil passwd <container-file> [-p <old-password>] [-n <new-password>]"
+    "zh": "veil passwd <容器名称或链接> [-p <旧密码>] [-n <新密码>]",
+    "en": "veil passwd <container-or-link> [-p <old-password>] [-n <new-password>]"
   },
   "cmd.shell.about": {
     "zh": "交互式 shell 模式（批处理）",
     "en": "Interactive shell mode (batch processing)"
   },
   "cmd.shell.usage": {
-    "zh": "veil shell <容器文件> [密码]",
-    "en": "veil shell <container-file> [password]"
+    "zh": "veil shell <容器名称或链接> [密码]",
+    "en": "veil shell <container-or-link> [password]"
   },
   "cmd.shell.usage_opt": {
-    "zh": "veil shell <容器文件> [-p <密码>]",
-    "en": "veil shell <container-file> [-p <password>]"
+    "zh": "veil shell <容器名称或链接> [-p <密码>]",
+    "en": "veil shell <container-or-link> [-p <password>]"
   },
 
   "arg.container": {
-    "zh": "容器文件",
-    "en": "container-file"
+    "zh": "容器名称或链接",
+    "en": "container-or-link"
   },
   "arg.password": {
     "zh": "密码",
@@ -459,10 +671,46 @@
     "zh": "文件或目录路径",
     "en": "file-path"
   },
+  "arg.hints": {
+    "zh": "级别",
+    "en": "level"
+  },
+  "arg.action": {
+    "zh": "操作",
+    "en": "action"
+  },
+  "arg.target": {
+    "zh": "容器名或工作区路径",
+    "en": "container-or-workspace"
+  },
+  "arg.link_file": {
+    "zh": "链接文件",
+    "en": "link-file"
+  },
+  "arg.topic": {
+    "zh": "主题",
+    "en": "topic"
+  },
+  "arg.workspace": {
+    "zh": "工作区",
+    "en": "workspace"
+  },
+  "arg.container_name": {
+    "zh": "容器名称",
+    "en": "container-name"
+  },
+  "arg.output_file": {
+    "zh": "输出文件",
+    "en": "output-file"
+  },
+  "arg.package_file": {
+    "zh": "容器文件",
+    "en": "package-file"
+  },
 
   "help.init.container": {
     "zh": "容器名称（如 photos）",
-    "en": "Container file path (e.g. photos.veil)"
+    "en": "Container name (e.g. photos)"
   },
   "help.init.password": {
     "zh": "容器密码（位置参数或 -p 选项）",
@@ -472,9 +720,25 @@
     "zh": "容器密码（选项方式）",
     "en": "Container password (via option)"
   },
+  "help.init.link": {
+    "zh": "自定义 .veil-link 输出路径",
+    "en": "Custom .veil-link output path"
+  },
+  "help.init.workspace": {
+    "zh": "使用命名工作区",
+    "en": "Use a named workspace"
+  },
+  "help.init.workspace_path": {
+    "zh": "使用指定工作区路径",
+    "en": "Use a specific workspace path"
+  },
+  "help.init.dedicated": {
+    "zh": "工作区由该容器独占",
+    "en": "Give this container a dedicated workspace"
+  },
   "help.container": {
-    "zh": "容器名称",
-    "en": "Container file path"
+    "zh": "容器名称或 .veil-link 路径",
+    "en": "Container name or .veil-link path"
   },
   "help.password_pos": {
     "zh": "容器密码（位置参数，可选）",
@@ -563,39 +827,347 @@
   },
 
   "example.init": {
-    "zh": "\n示例:\n  veil init photos.veil\n  veil init photos.veil mypassword\n  veil init photos.veil -p mypassword",
-    "en": "\nExamples:\n  veil init photos.veil\n  veil init photos.veil mypassword\n  veil init photos.veil -p mypassword"
+    "zh": "\n示例:\n  veil init photos\n  veil init photos mypassword\n  veil init photos -p mypassword --link ./photos.veil-link",
+    "en": "\nExamples:\n  veil init photos\n  veil init photos mypassword\n  veil init photos -p mypassword --link ./photos.veil-link"
   },
   "example.add": {
-    "zh": "\n示例:\n  veil add photos.veil photo.jpg\n  veil add photos.veil photo.jpg 2024/photo.jpg\n  veil add photos.veil ~/Pictures backup/\n  veil add photos.veil -i photo.jpg -o 2024/photo.jpg -p mypass",
-    "en": "\nExamples:\n  veil add photos.veil photo.jpg\n  veil add photos.veil photo.jpg 2024/photo.jpg\n  veil add photos.veil ~/Pictures backup/\n  veil add photos.veil -i photo.jpg -o 2024/photo.jpg -p mypass"
+    "zh": "\n示例:\n  veil add photos.veil-link photo.jpg\n  veil add photos.veil-link photo.jpg 2024/photo.jpg\n  veil add photos.veil-link ~/Pictures backup/\n  veil add photos.veil-link -i photo.jpg -o 2024/photo.jpg -p mypass",
+    "en": "\nExamples:\n  veil add photos.veil-link photo.jpg\n  veil add photos.veil-link photo.jpg 2024/photo.jpg\n  veil add photos.veil-link ~/Pictures backup/\n  veil add photos.veil-link -i photo.jpg -o 2024/photo.jpg -p mypass"
   },
   "example.rm": {
-    "zh": "\n示例:\n  veil rm photos.veil archive/old.jpg\n  veil rm photos.veil \"temp/*.tmp\"\n  veil rm photos.veil \"**/*.log\"",
-    "en": "\nExamples:\n  veil rm photos.veil archive/old.jpg\n  veil rm photos.veil \"temp/*.tmp\"\n  veil rm photos.veil \"**/*.log\""
+    "zh": "\n示例:\n  veil rm photos.veil-link archive/old.jpg\n  veil rm photos.veil-link \"temp/*.tmp\"\n  veil rm photos.veil-link \"**/*.log\"",
+    "en": "\nExamples:\n  veil rm photos.veil-link archive/old.jpg\n  veil rm photos.veil-link \"temp/*.tmp\"\n  veil rm photos.veil-link \"**/*.log\""
   },
   "example.mv": {
-    "zh": "\n示例:\n  veil mv photos.veil old.jpg archive/old.jpg\n  veil mv photos.veil -i old.jpg -o archive/old.jpg",
-    "en": "\nExamples:\n  veil mv photos.veil old.jpg archive/old.jpg\n  veil mv photos.veil -i old.jpg -o archive/old.jpg"
+    "zh": "\n示例:\n  veil mv photos.veil-link old.jpg archive/old.jpg\n  veil mv photos.veil-link -i old.jpg -o archive/old.jpg",
+    "en": "\nExamples:\n  veil mv photos.veil-link old.jpg archive/old.jpg\n  veil mv photos.veil-link -i old.jpg -o archive/old.jpg"
   },
   "example.free": {
-    "zh": "\n示例:\n  veil free photos.veil\n  veil free photos.veil -p mypass",
-    "en": "\nExamples:\n  veil free photos.veil\n  veil free photos.veil -p mypass"
+    "zh": "\n示例:\n  veil free photos.veil-link\n  veil free photos.veil-link -p mypass",
+    "en": "\nExamples:\n  veil free photos.veil-link\n  veil free photos.veil-link -p mypass"
   },
   "example.ex": {
-    "zh": "\n示例:\n  veil ex photos.veil photo.jpg ./output.jpg\n  veil ex photos.veil \"**/*\" ./all-files/\n  veil ex photos.veil \"*.jpg\" ./jpg-files/\n  veil ex photos.veil -i photo.jpg -o ./out.jpg -p mypass",
-    "en": "\nExamples:\n  veil ex photos.veil photo.jpg ./output.jpg\n  veil ex photos.veil \"**/*\" ./all-files/\n  veil ex photos.veil \"*.jpg\" ./jpg-files/\n  veil ex photos.veil -i photo.jpg -o ./out.jpg -p mypass"
+    "zh": "\n示例:\n  veil ex photos.veil-link photo.jpg ./output.jpg\n  veil ex photos.veil-link \"**/*\" ./all-files/\n  veil ex photos.veil-link \"*.jpg\" ./jpg-files/\n  veil ex photos.veil-link -i photo.jpg -o ./out.jpg -p mypass",
+    "en": "\nExamples:\n  veil ex photos.veil-link photo.jpg ./output.jpg\n  veil ex photos.veil-link \"**/*\" ./all-files/\n  veil ex photos.veil-link \"*.jpg\" ./jpg-files/\n  veil ex photos.veil-link -i photo.jpg -o ./out.jpg -p mypass"
   },
   "example.info": {
-    "zh": "\n示例:\n  veil info photos.veil\n  veil info photos.veil -p mypass",
-    "en": "\nExamples:\n  veil info photos.veil\n  veil info photos.veil -p mypass"
+    "zh": "\n示例:\n  veil info photos.veil-link\n  veil info photos.veil-link -p mypass",
+    "en": "\nExamples:\n  veil info photos.veil-link\n  veil info photos.veil-link -p mypass"
   },
   "example.passwd": {
-    "zh": "\n示例:\n  veil passwd photos.veil\n  veil passwd photos.veil oldpass newpass\n  veil passwd photos.veil -p oldpass -n newpass",
-    "en": "\nExamples:\n  veil passwd photos.veil\n  veil passwd photos.veil oldpass newpass\n  veil passwd photos.veil -p oldpass -n newpass"
+    "zh": "\n示例:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass",
+    "en": "\nExamples:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass"
   },
   "example.shell": {
-    "zh": "\n示例:\n  veil shell photos.veil\n  veil shell photos.veil -p mypass",
-    "en": "\nExamples:\n  veil shell photos.veil\n  veil shell photos.veil -p mypass"
+    "zh": "\n示例:\n  veil shell photos.veil-link\n  veil shell photos.veil-link -p mypass",
+    "en": "\nExamples:\n  veil shell photos.veil-link\n  veil shell photos.veil-link -p mypass"
+  },
+  "init.link_created": {
+    "zh": "✓ 已生成链接: {path}",
+    "en": "✓ Link created: {path}"
+  },
+  "init.workspace_path": {
+    "zh": "  工作区: {path}",
+    "en": "  Workspace: {path}"
+  },
+  "init.invalid_link_name": {
+    "zh": "无效的链接文件名",
+    "en": "Invalid link filename"
+  },
+  "init.invalid_container_name": {
+    "zh": "无效的容器名称",
+    "en": "Invalid container name"
+  },
+  "init.creating_workspace": {
+    "zh": "正在创建加密工作区...",
+    "en": "Creating encrypted workspace..."
+  },
+  "init.type_dedicated": {
+    "zh": "  类型: 专属工作区",
+    "en": "  Type: dedicated workspace"
+  },
+  "init.type_shared": {
+    "zh": "  类型: 共享工作区 ({workspace})",
+    "en": "  Type: shared workspace ({workspace})"
+  },
+  "pack.output_exists": {
+    "zh": "输出文件已存在: {path}",
+    "en": "Output file already exists: {path}"
+  },
+  "pack.in_progress": {
+    "zh": "正在打包容器...",
+    "en": "Packing container..."
+  },
+  "pack.created": {
+    "zh": "✓ 已打包到: {path}",
+    "en": "✓ Packed to: {path}"
+  },
+  "pack.stats": {
+    "zh": "  文件数: {count}  大小: {size}",
+    "en": "  Files: {count}  Size: {size}"
+  },
+  "unpack.container_not_found": {
+    "zh": "容器文件不存在: {path}",
+    "en": "Container file not found: {path}"
+  },
+  "unpack.name_extract_failed": {
+    "zh": "无法从文件名提取容器名称",
+    "en": "Could not derive a container name from the filename"
+  },
+  "unpack.already_exists": {
+    "zh": "容器 '{name}' 已存在，请使用不同的名称或先删除现有容器",
+    "en": "Container '{name}' already exists. Use another name or remove the existing container first"
+  },
+  "unpack.workspace_not_found": {
+    "zh": "工作区 '{name}' 不存在",
+    "en": "Workspace '{name}' does not exist"
+  },
+  "unpack.directory_exists": {
+    "zh": "目录已存在: {path}",
+    "en": "Directory already exists: {path}"
+  },
+  "unpack.in_progress": {
+    "zh": "正在解包容器...",
+    "en": "Unpacking container..."
+  },
+  "unpack.kdf_failed": {
+    "zh": "密钥派生失败: {error}",
+    "en": "Key derivation failed: {error}"
+  },
+  "unpack.decrypt_failed": {
+    "zh": "解密失败（密码错误或数据损坏）: {error}",
+    "en": "Decryption failed (wrong password or corrupted data): {error}"
+  },
+  "unpack.created": {
+    "zh": "✓ 已解包容器 '{name}'",
+    "en": "✓ Container '{name}' unpacked"
+  },
+  "unpack.stats": {
+    "zh": "  文件数: {count}  工作区: {path}",
+    "en": "  Files: {count}  Workspace: {path}"
+  },
+  "config.title": {
+    "zh": "当前配置:",
+    "en": "Current configuration:"
+  },
+  "config.hints_level": {
+    "zh": "提示级别: {level}",
+    "en": "Hint level: {level}"
+  },
+  "config.hints_full": {
+    "zh": "full (完整提示)",
+    "en": "full"
+  },
+  "config.hints_brief": {
+    "zh": "brief (简要提示)",
+    "en": "brief"
+  },
+  "config.hints_off": {
+    "zh": "off (关闭提示)",
+    "en": "off"
+  },
+  "config.default_workspace": {
+    "zh": "默认工作区: {path}",
+    "en": "Default workspace: {path}"
+  },
+  "config.container_count": {
+    "zh": "容器数量: {count}",
+    "en": "Containers: {count}"
+  },
+  "config.env_override": {
+    "zh": "环境变量 VEIL_HINTS={level} 正在覆盖配置文件",
+    "en": "Environment variable VEIL_HINTS={level} overrides the config file"
+  },
+  "config.set_success": {
+    "zh": "✓ 已设置提示级别: {level} ({description})",
+    "en": "✓ Hint level set to {level} ({description})"
+  },
+  "config.description_full": {
+    "zh": "完整提示，适合新手",
+    "en": "full hints for new users"
+  },
+  "config.description_brief": {
+    "zh": "简要提示，适合熟悉后的用户",
+    "en": "important hints only"
+  },
+  "config.description_off": {
+    "zh": "关闭提示，适合高级用户",
+    "en": "hints disabled"
+  },
+  "config.invalid_level": {
+    "zh": "无效的提示级别，请使用: full, brief, off",
+    "en": "Invalid hint level. Use: full, brief, off"
+  },
+  "hints.dismiss": {
+    "zh": "💡 提示：你可以在配置中调整引导级别",
+    "en": "Tip: you can adjust guidance in the configuration"
+  },
+  "hints.init.title": {
+    "zh": "📌 {name}.veil-link 是什么？",
+    "en": "📌 What is {name}.veil-link?"
+  },
+  "hints.init.link_line": {
+    "zh": "• 这是指向加密工作区的快捷方式",
+    "en": "• It is a shortcut to an encrypted workspace"
+  },
+  "hints.init.size_line": {
+    "zh": "• 文件很小（<1KB），可以随意复制或删除",
+    "en": "• It is tiny (<1 KB) and can be copied or deleted freely"
+  },
+  "hints.init.recovery_line": {
+    "zh": "• 删除它不会丢失数据，可以随时用 veil link 重建",
+    "en": "• Deleting it does not delete data; rebuild it with veil link"
+  },
+  "hints.init.path_line": {
+    "zh": "• 当前链接: {path}",
+    "en": "• Current link: {path}"
+  },
+  "hints.extension.title": {
+    "zh": "💡 建议开启文件扩展名显示",
+    "en": "💡 Show file extensions to distinguish link and package files"
+  },
+  "hints.extension.body": {
+    "zh": "macOS: 访达 → 设置 → 高级 → 显示所有文件扩展名\nWindows: 文件资源管理器 → 查看 → 文件扩展名",
+    "en": "macOS: Finder → Settings → Advanced → Show all filename extensions\nWindows: File Explorer → View → File name extensions"
+  },
+  "hints.pack.title": {
+    "zh": "📦 .veil-link 和 .veil 的区别",
+    "en": "📦 Difference between .veil-link and .veil"
+  },
+  "hints.pack.link_line": {
+    "zh": "📌 {path} (1 KB)",
+    "en": "📌 {path} (1 KB)"
+  },
+  "hints.pack.link_desc": {
+    "zh": "  ↳ 快捷方式，指向本地工作区\n  ↳ 只能在这台电脑上使用",
+    "en": "  ↳ Shortcut to the local workspace\n  ↳ For use on this computer"
+  },
+  "hints.pack.output_line": {
+    "zh": "📦 {path} ({size_mb} MB)",
+    "en": "📦 {path} ({size_mb} MB)"
+  },
+  "hints.pack.output_desc": {
+    "zh": "  ↳ 完整数据包，包含所有加密文件\n  ↳ 可以分享给别人或传到其他设备",
+    "en": "  ↳ Complete package with all encrypted files\n  ↳ Can be shared or moved to another device"
+  },
+  "hints.unpack.title": {
+    "zh": "📦 {package} → 📌 {link}",
+    "en": "📦 {package} → 📌 {link}"
+  },
+  "hints.unpack.body": {
+    "zh": "• 数据包已解包到本地工作区\n• 之后请使用 {link} 操作文件\n• 工作区包含 {count} 个文件",
+    "en": "• The package is unpacked into the local workspace\n• Use {link} for future operations\n• The workspace contains {count} files"
+  },
+  "hints.link_recovery.title": {
+    "zh": "💡 .veil-link 只是快捷方式",
+    "en": "💡 .veil-link is only a shortcut"
+  },
+  "hints.link_recovery.body": {
+    "zh": "• 删除链接不会影响工作区数据\n• 已为你重建 {path}",
+    "en": "• Deleting the link does not affect workspace data\n• Recreated {path} for you"
+  },
+  "hints.file_ambiguity.title": {
+    "zh": "检测到两个同名文件",
+    "en": "Two files share the same base name"
+  },
+  "hints.file_ambiguity.body": {
+    "zh": "1. {link} - 本地快捷方式\n2. {package} - 数据包\n\n默认使用 {link}",
+    "en": "1. {link} - local shortcut\n2. {package} - package\n\nUsing {link} by default"
+  },
+  "link.created": {
+    "zh": "✓ 已创建链接: {path}",
+    "en": "✓ Link created: {path}"
+  },
+  "link.output_exists": {
+    "zh": "链接文件已存在: {path}",
+    "en": "Link file already exists: {path}"
+  },
+  "cmd.link.about": {
+    "zh": "根据工作区或容器名重建 .veil-link",
+    "en": "Rebuild a .veil-link from a workspace or container name"
+  },
+  "cmd.link.usage": {
+    "zh": "veil link <容器名或工作区路径> [-o <链接文件>]",
+    "en": "veil link <container-or-workspace> [-o <link-file>]"
+  },
+  "help.link.target": {
+    "zh": "容器名称或工作区目录",
+    "en": "Container name or workspace directory"
+  },
+  "help.link.output": {
+    "zh": "链接文件输出路径",
+    "en": "Output path for the link file"
+  },
+  "cmd.pack.about": {
+    "zh": "将工作区打包为 .veil 文件",
+    "en": "Pack a workspace into a .veil file"
+  },
+  "cmd.pack.usage": {
+    "zh": "veil pack <容器名称或链接> [-o <输出文件>] [-p <密码>]",
+    "en": "veil pack <container-or-link> [-o <output-file>] [-p <password>]"
+  },
+  "help.pack.output": {
+    "zh": "输出文件路径（默认 <名称>.vault.veil）",
+    "en": "Output path (defaults to <name>.vault.veil)"
+  },
+  "cmd.unpack.about": {
+    "zh": "将 .veil 文件解包到工作区并生成 .veil-link",
+    "en": "Unpack a .veil file into a workspace and create a .veil-link"
+  },
+  "cmd.unpack.usage": {
+    "zh": "veil unpack <文件.veil> [-n <容器名>] [-w <工作区>] [--link <链接文件>] [-p <密码>]",
+    "en": "veil unpack <file.veil> [-n <name>] [-w <workspace>] [--link <link-file>] [-p <password>]"
+  },
+  "help.unpack.name": {
+    "zh": "容器名称（默认从文件名提取）",
+    "en": "Container name (derived from filename by default)"
+  },
+  "help.unpack.file": {
+    "zh": "要解包的 .veil 文件",
+    "en": "The .veil package file to unpack"
+  },
+  "help.unpack.workspace": {
+    "zh": "目标工作区名称",
+    "en": "Destination workspace name"
+  },
+  "help.unpack.link": {
+    "zh": "解包后生成的 .veil-link 路径",
+    "en": "Path of the .veil-link to create after unpacking"
+  },
+  "cmd.config.about": {
+    "zh": "查看或修改全局配置",
+    "en": "View or update global configuration"
+  },
+  "cmd.config.usage": {
+    "zh": "veil config [show] [--hints <full|brief|off>]",
+    "en": "veil config [show] [--hints <full|brief|off>]"
+  },
+  "help.config.hints": {
+    "zh": "设置提示级别 (full/brief/off)",
+    "en": "Set hint level (full/brief/off)"
+  },
+  "help.config.action": {
+    "zh": "显示当前配置 (show)",
+    "en": "Show current configuration (show)"
+  },
+  "cmd.help.about": {
+    "zh": "显示命令或文件类型帮助",
+    "en": "Show command or file type help"
+  },
+  "cmd.help.usage": {
+    "zh": "veil help [files]",
+    "en": "veil help [files]"
+  },
+  "help.help.topic": {
+    "zh": "帮助主题，目前支持 files",
+    "en": "Help topic; currently supports files"
+  },
+  "help.files.content": {
+    "zh": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n大小      < 1KB              与数据量相同\n作用      指向本地工作区      完整数据包\n用途      日常操作            分享/备份/传输\n删除后    数据不丢失          数据丢失（除非工作区还在）\n可分享    否                  是\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n类比：\n  .veil-link  ←→  快捷方式 / 书签\n  .veil       ←→  ZIP 压缩包",
+    "en": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSize      < 1 KB             Same as data size\nRole      Points to workspace  Complete package\nUse       Daily operations    Share/backup/transfer\nDeleted   Data remains        Data is lost unless workspace remains\nShareable No                  Yes\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nAnalogy:\n  .veil-link  ←→  Shortcut / bookmark\n  .veil       ←→  ZIP archive"
+  },
+  "help.files.unknown_topic": {
+    "zh": "未知帮助主题: {topic}",
+    "en": "Unknown help topic: {topic}"
   }
 }

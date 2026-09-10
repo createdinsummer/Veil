@@ -1,21 +1,25 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::config::{GlobalConfig, ContainerConfig};
+use std::path::{Path, PathBuf};
+use veil_core::config::{ContainerConfig, GlobalConfig};
 use veil_core::container_format::ContainerUnpacker;
-use veil_core::metadata::{MetaHeader, MetaData};
+use veil_core::metadata::{MetaData, MetaHeader};
 use veil_core::workspace::WorkspaceConfig;
-use std::path::Path;
 
 /// 解包 .veil 容器文件到工作区
 pub fn run_workspace(
     container_path: &str,
     container_name: Option<&str>,
     workspace_name: Option<&str>,
+    link_output: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
     // 检查容器文件是否存在
     if !Path::new(container_path).exists() {
-        anyhow::bail!("容器文件不存在: {}", container_path);
+        anyhow::bail!(
+            "{}",
+            crate::i18n::t1("unpack.container_not_found", "path", container_path)
+        );
     }
 
     // 确定容器名称
@@ -23,12 +27,26 @@ pub fn run_workspace(
         n.to_string()
     } else {
         // 从文件名提取
-        Path::new(container_path)
+        let stem = Path::new(container_path)
             .file_stem()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("无法从文件名提取容器名称"))?
-            .to_string()
+            .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("unpack.name_extract_failed")))?;
+        stem.strip_suffix(".vault").unwrap_or(stem).to_string()
     };
+    let link_path = link_output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::default_link_path(&name));
+
+    if link_path.exists() {
+        anyhow::bail!(
+            "{}",
+            crate::i18n::t1(
+                "link.output_exists",
+                "path",
+                &link_path.display().to_string()
+            )
+        );
+    }
 
     // 加载配置
     let mut config = GlobalConfig::load()?;
@@ -40,7 +58,10 @@ pub fn run_workspace(
 
     // 检查容器是否已存在
     if config.containers.contains_key(&name) {
-        anyhow::bail!("容器 '{}' 已存在，请使用不同的名称或先删除现有容器", name);
+        anyhow::bail!(
+            "{}",
+            crate::i18n::t1("unpack.already_exists", "name", &name)
+        );
     }
 
     // 确定工作区路径
@@ -52,7 +73,12 @@ pub fn run_workspace(
                 .workspace
                 .custom
                 .get(ws_name)
-                .ok_or_else(|| anyhow::anyhow!("工作区 '{}' 不存在", ws_name))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{}",
+                        crate::i18n::t1("unpack.workspace_not_found", "name", ws_name)
+                    )
+                })?
                 .path
                 .clone()
         }
@@ -65,11 +91,19 @@ pub fn run_workspace(
 
     // 检查目录是否已存在
     if container_dir.exists() {
-        anyhow::bail!("目录已存在: {}", container_dir.display());
+        anyhow::bail!(
+            "{}",
+            crate::i18n::t1(
+                "unpack.directory_exists",
+                "path",
+                &container_dir.display().to_string()
+            )
+        );
     }
 
-    println!("{}", "正在解包容器...".cyan());
-    let password_str = super::prompt_password("请输入容器密码: ", password)?;
+    println!("{}", crate::i18n::t("unpack.in_progress").cyan());
+    let password_str =
+        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -85,25 +119,32 @@ pub fn run_workspace(
     use veil_core::kdf;
     use zeroize::Zeroizing;
     let mut master_key = Zeroizing::new([0u8; 32]);
-    kdf::derive_key(password.as_bytes(), &header.salt, &mut *master_key)
-        .map_err(|e| anyhow::anyhow!("密钥派生失败: {:?}", e))?;
+    kdf::derive_key(password.as_bytes(), &header.salt, &mut *master_key).map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            crate::i18n::t1("unpack.kdf_failed", "error", &format!("{:?}", e))
+        )
+    })?;
 
     // 解密元数据
     let header_len = MetaHeader::header_len(&encrypted_metadata)?;
     let encrypted_data = &encrypted_metadata[header_len..];
 
+    use chacha20poly1305::aead::generic_array::GenericArray;
     use chacha20poly1305::{
         aead::{Aead, KeyInit},
         ChaCha20Poly1305,
     };
-    use chacha20poly1305::aead::generic_array::GenericArray;
 
     let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
     let nonce_ga = GenericArray::from_slice(&header.nonce);
 
-    let decrypted = cipher
-        .decrypt(nonce_ga, encrypted_data)
-        .map_err(|e| anyhow::anyhow!("解密失败（密码错误或数据损坏）: {}", e))?;
+    let decrypted = cipher.decrypt(nonce_ga, encrypted_data).map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            crate::i18n::t1("unpack.decrypt_failed", "error", &e.to_string())
+        )
+    })?;
 
     let metadata = MetaData::from_json(&decrypted)?;
 
@@ -130,13 +171,31 @@ pub fn run_workspace(
         dedicated: false,
         created_at: chrono::Utc::now().to_rfc3339(),
         last_accessed: None,
+        links: Vec::new(),
     };
 
     config.containers.insert(name.clone(), container_config);
     config.save()?;
+    config.register_link(&name, &link_path)?;
 
-    println!("{}", format!("✓ 已解包容器 '{}'", name).green());
-    println!("{}", format!("  文件数: {}  工作区: {}", metadata.files.len(), container_dir.display()).bright_black());
+    println!(
+        "{}",
+        crate::i18n::t1("unpack.created", "name", &name).green()
+    );
+    println!(
+        "{}",
+        crate::i18n::t2(
+            "unpack.stats",
+            "count",
+            &metadata.files.len().to_string(),
+            "path",
+            &container_dir.display().to_string()
+        )
+        .bright_black()
+    );
+
+    // 显示解包解释提示
+    crate::hints::show_unpack_explain_hint(&name, &link_path, metadata.files.len());
 
     Ok(())
 }

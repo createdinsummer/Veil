@@ -1,9 +1,8 @@
 use anyhow::Result;
 use colored::Colorize;
-use veil_core::config::GlobalConfig;
+use std::path::Path;
 use veil_core::container_format::ContainerPacker;
 use veil_core::workspace_ops::WorkspaceManager;
-use std::path::Path;
 
 /// 打包工作区到 .veil 容器文件
 pub fn run_workspace(
@@ -11,26 +10,24 @@ pub fn run_workspace(
     output_path: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
-    // 加载配置
-    let config = GlobalConfig::load()?;
-
-    // 获取容器工作区路径
-    let workspace_path = config.get_container_workspace_path(container_name)?;
+    let resolved = super::resolve_container(container_name)?;
+    let workspace_path = resolved.workspace_path;
 
     // 确定输出路径
     let output = if let Some(path) = output_path {
         path.to_string()
     } else {
-        format!("{}.veil", container_name)
+        format!("{}.vault.veil", resolved.name)
     };
 
     // 检查输出文件是否已存在
     if Path::new(&output).exists() {
-        anyhow::bail!("输出文件已存在: {}", output);
+        anyhow::bail!("{}", crate::i18n::t1("pack.output_exists", "path", &output));
     }
 
-    println!("{}", "正在打包容器...".cyan());
-    let password_str = super::prompt_password("请输入容器密码: ", password)?;
+    println!("{}", crate::i18n::t("pack.in_progress").cyan());
+    let password_str =
+        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -50,8 +47,29 @@ pub fn run_workspace(
     // 计算总大小
     let output_size = std::fs::metadata(&output)?.len();
 
-    println!("{}", format!("✓ 已打包到: {}", output).green());
-    println!("{}", format!("  文件数: {}  大小: {}", metadata.files.len(), format_size(output_size)).bright_black());
+    println!(
+        "{}",
+        crate::i18n::t1("pack.created", "path", &output).green()
+    );
+    println!(
+        "{}",
+        crate::i18n::t2(
+            "pack.stats",
+            "count",
+            &metadata.files.len().to_string(),
+            "size",
+            &format_size(output_size)
+        )
+        .bright_black()
+    );
+
+    // 显示打包解释提示
+    crate::hints::show_pack_explain_hint(
+        &resolved.name,
+        resolved.link_path.as_deref(),
+        &output,
+        output_size,
+    );
 
     Ok(())
 }

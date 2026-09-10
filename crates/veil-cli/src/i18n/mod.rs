@@ -39,7 +39,7 @@ fn raw(key: &str) -> &str {
 
 /// 获取翻译文本（无占位符替换）
 ///
-/// ```rust
+/// ```text
 /// let text = i18n::t("opening_container"); // "正在打开容器..." 或 "Opening container..."
 /// ```
 pub fn t(key: &str) -> &str {
@@ -48,7 +48,7 @@ pub fn t(key: &str) -> &str {
 
 /// 获取翻译文本，替换一个占位符 `{name}` → `value`
 ///
-/// ```rust
+/// ```text
 /// let text = i18n::t1("add.source_not_found", "path", "/some/file.txt");
 /// ```
 pub fn t1(key: &str, name: &str, value: &str) -> String {
@@ -60,6 +60,14 @@ pub fn t2(key: &str, n1: &str, v1: &str, n2: &str, v2: &str) -> String {
     raw(key)
         .replace(&format!("{{{n1}}}"), v1)
         .replace(&format!("{{{n2}}}"), v2)
+}
+
+/// 获取翻译文本，替换三个占位符。
+pub fn t3(key: &str, n1: &str, v1: &str, n2: &str, v2: &str, n3: &str, v3: &str) -> String {
+    raw(key)
+        .replace(&format!("{{{n1}}}"), v1)
+        .replace(&format!("{{{n2}}}"), v2)
+        .replace(&format!("{{{n3}}}"), v3)
 }
 
 /// clap about 文本（含版本号）

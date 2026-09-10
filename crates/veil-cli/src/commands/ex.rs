@@ -1,7 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::config::GlobalConfig;
 use veil_core::workspace_ops::WorkspaceManager;
 
 /// 导出文件到本地文件系统（工作区架构）。
@@ -28,17 +27,16 @@ pub fn run(
     output: &str,
     password: Option<String>,
 ) -> Result<()> {
-    // 加载配置
-    let config = GlobalConfig::load()?;
-
-    // 获取容器工作区路径
-    let workspace_path = config.get_container_workspace_path(container_name)?;
+    let resolved = super::resolve_container(container_name)?;
+    let workspace_path = resolved.workspace_path;
 
     // 文件名是必需的
-    let file_name = file_name.ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("ex.specify_path")))?;
+    let file_name =
+        file_name.ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("ex.specify_path")))?;
 
     println!("{}", crate::i18n::t("opening_container").cyan());
-    let password_str = super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str =
+        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -49,7 +47,10 @@ pub fn run(
 
     manager.extract_file(file_name, output_path, password)?;
 
-    println!("{}", crate::i18n::t1("ex.file_exported", "path", output).green());
+    println!(
+        "{}",
+        crate::i18n::t1("ex.file_exported", "path", output).green()
+    );
 
     Ok(())
 }

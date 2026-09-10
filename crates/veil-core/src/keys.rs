@@ -21,7 +21,7 @@ use std::io::{Read, Write};
 use zeroize::Zeroize;
 
 use crate::error::{Result, VeilError};
-use crate::kdf::Argon2Params;
+use crate::kdf::runtime_params;
 
 /// 用「用户密码 `passphrase`」把 `key_pair` 的私钥加密成密文私钥 `cip_pri_key`
 /// （即写进 Header 的那串字节）。
@@ -38,7 +38,10 @@ use crate::kdf::Argon2Params;
 /// - `Err(VeilError)`: 加密过程中的错误。
 ///
 /// 注意：Argon2id（昂贵 KDF）只在这里发生，整个容器一生只跑这一次这类操作。
-pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretString) -> Result<Vec<u8>> {
+pub fn encrypt_pri_key(
+    key_pair: &age::x25519::Identity,
+    passphrase: SecretString,
+) -> Result<Vec<u8>> {
     // 1. 提取私钥字符串
     let pri_key_str: SecretString = key_pair.to_string();
 
@@ -48,15 +51,24 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
         .map_err(|e| VeilError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     // 3. Argon2id 派生密钥
-    let params = Argon2Params::STANDARD;
-    let argon2_params = Params::new(params.memory_kb, params.iterations, params.parallelism, Some(32))
-        .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
+    let params = runtime_params();
+    let argon2_params = Params::new(
+        params.memory_kb,
+        params.iterations,
+        params.parallelism,
+        Some(32),
+    )
+    .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
 
     let mut derived_key = [0u8; 32];
     argon2
-        .hash_password_into(passphrase.expose_secret().as_bytes(), &salt, &mut derived_key)
+        .hash_password_into(
+            passphrase.expose_secret().as_bytes(),
+            &salt,
+            &mut derived_key,
+        )
         .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
 
     // 4. 使用派生密钥加密私钥（ChaCha20-Poly1305）
@@ -90,7 +102,10 @@ pub fn encrypt_pri_key(key_pair: &age::x25519::Identity, passphrase: SecretStrin
 /// # 返回
 /// - `Ok(Identity)`:   密码正确时还原出的非对称密钥 `key_pair`。
 /// - `Err(VeilError)`: 密码错误或数据被篡改。
-pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<age::x25519::Identity> {
+pub fn decrypt_pri_key(
+    cip_pri_key: &[u8],
+    passphrase: SecretString,
+) -> Result<age::x25519::Identity> {
     // 1. 解析格式：salt(16) || nonce(12) || ciphertext_with_tag
     if cip_pri_key.len() < 28 {
         return Err(VeilError::Format("密文数据过短".into()));
@@ -101,34 +116,41 @@ pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<a
     let ciphertext = &cip_pri_key[28..];
 
     // 2. Argon2id 派生密钥
-    let params = Argon2Params::STANDARD;
-    let argon2_params = Params::new(params.memory_kb, params.iterations, params.parallelism, Some(32))
-        .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
+    let params = runtime_params();
+    let argon2_params = Params::new(
+        params.memory_kb,
+        params.iterations,
+        params.parallelism,
+        Some(32),
+    )
+    .map_err(|e| VeilError::Format(format!("Argon2 参数无效: {}", e)))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
 
     let mut derived_key = [0u8; 32];
     argon2
-        .hash_password_into(passphrase.expose_secret().as_bytes(), salt, &mut derived_key)
+        .hash_password_into(
+            passphrase.expose_secret().as_bytes(),
+            salt,
+            &mut derived_key,
+        )
         .map_err(|e| VeilError::Format(format!("Argon2 派生失败: {}", e)))?;
 
     // 3. 解密私钥
     let cipher = ChaCha20Poly1305::new(&derived_key.into());
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| {
-            // ChaCha20Poly1305 解密失败通常是密码错误
-            VeilError::Decrypt(age::DecryptError::from(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("密码错误或数据已损坏: {}", e),
-            )))
-        })?;
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        // ChaCha20Poly1305 解密失败通常是密码错误
+        VeilError::Decrypt(age::DecryptError::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("密码错误或数据已损坏: {}", e),
+        )))
+    })?;
 
     // 4. 解析私钥字符串
-    let mut pri_key_str =
-        String::from_utf8(plaintext).map_err(|_| VeilError::Format("私钥不是有效的 UTF-8".into()))?;
+    let mut pri_key_str = String::from_utf8(plaintext)
+        .map_err(|_| VeilError::Format("私钥不是有效的 UTF-8".into()))?;
 
     let key_pair = pri_key_str
         .parse::<age::x25519::Identity>()
@@ -152,7 +174,8 @@ pub fn decrypt_pri_key(cip_pri_key: &[u8], passphrase: SecretString) -> Result<a
 pub fn encrypt_bytes(pub_key: &age::x25519::Recipient, plaintext: &[u8]) -> Result<Vec<u8>> {
     // with_recipients 要「一串实现了 age::Recipient 的东西」；我们只有一个公钥
     // as &dyn age::Recipient：把具体类型转成 trait object 引用
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(pub_key as &dyn age::Recipient))?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(pub_key as &dyn age::Recipient))?;
 
     let mut out = Vec::new();
     let mut writer = encryptor.wrap_output(&mut out)?;
@@ -198,7 +221,8 @@ mod tests {
         );
 
         // 正确密码 → 还原出的私钥，其公钥应与原来完全一致（证明往返无损）
-        let restored = decrypt_pri_key(&cip_pri_key, SecretString::from("correct horse".to_owned())).unwrap();
+        let restored =
+            decrypt_pri_key(&cip_pri_key, SecretString::from("correct horse".to_owned())).unwrap();
         println!("③ 正确密码解密成功，公钥 = {}", restored.to_public());
         assert_eq!(format!("{}", restored.to_public()), pub_key);
 
@@ -218,7 +242,11 @@ mod tests {
 
         let plaintext = b"hello veil \xff\x00\x01"; // 含非文本字节，证明按二进制处理
         let ciphertext = encrypt_bytes(&pub_key, plaintext).unwrap();
-        println!("明文 {} 字节 → 密文 {} 字节", plaintext.len(), ciphertext.len());
+        println!(
+            "明文 {} 字节 → 密文 {} 字节",
+            plaintext.len(),
+            ciphertext.len()
+        );
 
         // 正确密钥能原样解回
         let back = decrypt_bytes(&key_pair, &ciphertext).unwrap();

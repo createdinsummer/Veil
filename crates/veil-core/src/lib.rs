@@ -7,6 +7,7 @@ pub mod format;
 pub mod index;
 pub mod kdf;
 pub mod keys;
+pub mod link;
 pub mod metadata;
 pub mod mime;
 pub mod slice_reader;

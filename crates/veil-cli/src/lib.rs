@@ -5,3 +5,4 @@
 pub mod commands;
 pub mod i18n;
 pub mod output_encoding;
+pub mod hints;

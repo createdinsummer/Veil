@@ -3,7 +3,7 @@
 //! 容器文件用于打包工作区，便于分享、备份和传输
 //!
 //! 文件结构：
-//! ```
+//! ```text
 //! [Header]
 //!   magic: "VEILPKG\0" (8 bytes)
 //!   version: u16 (2 bytes)
