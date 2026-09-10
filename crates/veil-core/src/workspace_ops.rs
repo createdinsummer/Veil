@@ -254,6 +254,58 @@ impl WorkspaceManager {
         let meta_data = self.read_meta(password)?;
         Ok(meta_data.files.clone())
     }
+
+    /// 修改容器密码
+    pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), VeilError> {
+        // 读取当前元数据（验证旧密码）
+        let meta_path = self.workspace_path.join(".veil-meta");
+        let meta_bytes = fs::read(&meta_path)?;
+
+        let old_header = MetaHeader::from_bytes(&meta_bytes)?;
+        let old_master_key = derive_master_key(old_password, &old_header.salt)?;
+
+        // 解密元数据验证密码
+        let header_len = MetaHeader::header_len(&meta_bytes)?;
+        let encrypted_data = &meta_bytes[header_len..];
+        let decrypted = decrypt_aes256gcm(&old_master_key, encrypted_data, &old_header.nonce)?;
+        let meta_data = MetaData::from_json(&decrypted)?;
+
+        // 生成新的 salt 和 nonce
+        let new_salt = generate_random_bytes::<32>();
+        let new_nonce = generate_random_bytes::<12>();
+
+        // 使用新密码派生密钥
+        let new_master_key = derive_master_key(new_password, &new_salt)?;
+
+        // 重新加密元数据
+        let json_bytes = meta_data.to_json()?;
+        let new_encrypted_data = encrypt_aes256gcm(&new_master_key, &json_bytes, &new_nonce)?;
+
+        // 创建新头部
+        let new_header = MetaHeader::new(new_salt, new_nonce, AlgorithmId::Aes256Gcm);
+
+        // 写入新元数据
+        let mut new_meta_bytes = new_header.to_bytes()?;
+        new_meta_bytes.extend_from_slice(&new_encrypted_data);
+        atomic_write(&meta_path, &new_meta_bytes)?;
+
+        // 重新加密所有文件（每个文件有自己的 nonce，但使用容器 salt）
+        for file_entry in &meta_data.files {
+            let encrypted_path = self.workspace_path.join(&file_entry.encrypted_name);
+
+            // 用旧密码解密
+            let encrypted_file_data = fs::read(&encrypted_path)?;
+            let plaintext = decrypt_aes256gcm(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
+
+            // 用新密码重新加密（保持相同的 nonce）
+            let new_encrypted = encrypt_aes256gcm(&new_master_key, &plaintext, &file_entry.nonce)?;
+
+            // 原子写入
+            atomic_write(&encrypted_path, &new_encrypted)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// 派生主密钥

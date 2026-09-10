@@ -76,6 +76,8 @@ enum Commands {
     Free {
         #[arg(value_name = "容器文件")]
         container: Option<String>,
+        #[arg(short, long)]
+        force: bool,
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
         #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
@@ -462,30 +464,28 @@ fn main() {
             container,
             from_pos,
             to_pos,
-            password_pos,
+            password_pos: _,
             input,
             output,
-            password,
+            password: _,
         } => {
-            let container = require_container(container, "mv");
-            let from = from_pos.or(input);
-            let to = to_pos.or(output);
-            let pwd = password_pos.or(password);
+            let old_name = require_container(container, "mv");
+            let new_name = to_pos.or(output).or(from_pos.or(input));
 
-            if let (Some(from), Some(to)) = (from, to) {
-                commands::mv::run(&container, &from, &to, pwd)
+            if let Some(new_name) = new_name {
+                commands::mv_workspace::run_workspace(&old_name, &new_name)
             } else {
                 exit_with_help("error.require_src_dst", "mv");
             }
         }
         Commands::Free {
             container,
-            password_pos,
-            password,
+            force,
+            password_pos: _,
+            password: _,
         } => {
             let container = require_container(container, "free");
-            let pwd = password_pos.or(password);
-            commands::free::run(&container, pwd)
+            commands::free_workspace::run_workspace(&container, force)
         }
         Commands::Ex {
             container,
@@ -526,7 +526,7 @@ fn main() {
             let container = require_container(container, "passwd");
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
-            commands::passwd::run(&container, old_pwd, new_pwd)
+            commands::passwd_workspace::run_workspace(&container, old_pwd, new_pwd)
         }
         Commands::Shell {
             container,

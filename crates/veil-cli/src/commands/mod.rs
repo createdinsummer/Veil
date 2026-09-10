@@ -16,6 +16,9 @@ pub mod rm_workspace;
 pub mod extract_workspace;
 pub mod pack_workspace;
 pub mod unpack_workspace;
+pub mod mv_workspace;
+pub mod passwd_workspace;
+pub mod free_workspace;
 
 /// 密码输入辅助函数（自适应显示编码，跨平台）
 ///
