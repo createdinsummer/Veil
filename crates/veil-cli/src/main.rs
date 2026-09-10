@@ -16,7 +16,7 @@ struct Cli {
 enum Commands {
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Init {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "密码")]
         password: Option<String>,
@@ -26,7 +26,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Add {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "源路径")]
         input_pos: Option<String>,
@@ -44,7 +44,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Rm {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "路径")]
         path: Option<String>,
@@ -56,7 +56,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Mv {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "源路径")]
         from_pos: Option<String>,
@@ -74,7 +74,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Free {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -84,7 +84,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Ex {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "输入路径")]
         input_pos: Option<String>,
@@ -102,7 +102,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Info {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -112,7 +112,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Passwd {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "旧密码")]
         old_password_pos: Option<String>,
@@ -126,7 +126,7 @@ enum Commands {
 
     /// (默认中文，运行时根据 VEIL_LANG 覆写)
     Shell {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         container: Option<String>,
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -148,7 +148,7 @@ enum Commands {
 
     /// 解包 .veil 文件到工作区
     Unpack {
-        #[arg(value_name = "容器文件")]
+        #[arg(value_name = "容器名称")]
         file: Option<String>,
         #[arg(short = 'n', long, value_name = "容器名称")]
         name: Option<String>,

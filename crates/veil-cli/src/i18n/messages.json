@@ -39,7 +39,7 @@
     "en": "Passwords do not match"
   },
   "error.require_container": {
-    "zh": "❌ 错误: 请指定容器文件路径",
+    "zh": "❌ 错误: 请指定容器名称",
     "en": "❌ Error: Please specify container file path"
   },
   "error.require_input_path": {
@@ -461,7 +461,7 @@
   },
 
   "help.init.container": {
-    "zh": "容器文件路径（如 photos.veil）",
+    "zh": "容器名称（如 photos）",
     "en": "Container file path (e.g. photos.veil)"
   },
   "help.init.password": {
@@ -473,7 +473,7 @@
     "en": "Container password (via option)"
   },
   "help.container": {
-    "zh": "容器文件路径",
+    "zh": "容器名称",
     "en": "Container file path"
   },
   "help.password_pos": {
