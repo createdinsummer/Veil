@@ -462,16 +462,18 @@ fn main() {
             container,
             from_pos,
             to_pos,
-            password_pos: _,
+            password_pos,
             input,
             output,
-            password: _,
+            password,
         } => {
-            let old_name = require_container(container, "mv");
-            let new_name = to_pos.or(output).or(from_pos.or(input));
+            let container = require_container(container, "mv");
+            let from = from_pos.or(input);
+            let to = to_pos.or(output);
+            let pwd = password_pos.or(password);
 
-            if let Some(new_name) = new_name {
-                commands::mv_workspace::run_workspace(&old_name, &new_name)
+            if let (Some(from), Some(to)) = (from, to) {
+                commands::mv_workspace::run_workspace(&container, &from, &to, pwd)
             } else {
                 exit_with_help("error.require_src_dst", "mv");
             }

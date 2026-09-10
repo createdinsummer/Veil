@@ -48,6 +48,12 @@ pub enum VeilError {
 
     #[error("密钥派生错误: {0}")]
     KeyDerivationError(String),
+
+    #[error("文件未找到: {0}")]
+    FileNotFound(String),
+
+    #[error("文件已存在: {0}")]
+    FileAlreadyExists(String),
 }
 
 /// 库内部统一用这个 Result 别名，少写一遍错误类型。

@@ -306,6 +306,53 @@ impl WorkspaceManager {
 
         Ok(())
     }
+
+    /// 重命名容器内的文件
+    pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<(), VeilError> {
+        // 读取元数据头部和数据
+        let meta_path = self.workspace_path.join(".veil-meta");
+        let meta_bytes = fs::read(&meta_path)?;
+
+        let header = MetaHeader::from_bytes(&meta_bytes)?;
+        let master_key = derive_master_key(password, &header.salt)?;
+
+        // 解密元数据
+        let header_len = MetaHeader::header_len(&meta_bytes)?;
+        let encrypted_data = &meta_bytes[header_len..];
+        let decrypted = decrypt_aes256gcm(&master_key, encrypted_data, &header.nonce)?;
+        let mut meta_data = MetaData::from_json(&decrypted)?;
+
+        // 查找源文件
+        let file_entry = meta_data.find_file(from)
+            .ok_or_else(|| VeilError::FileNotFound(from.to_string()))?
+            .clone();
+
+        // 检查目标文件是否已存在
+        if meta_data.find_file(to).is_some() {
+            return Err(VeilError::FileAlreadyExists(to.to_string()));
+        }
+
+        // 移除旧条目
+        meta_data.remove_file(&file_entry.encrypted_name);
+
+        // 创建新条目（保持相同的加密文件名、nonce 等）
+        let new_entry = FileEntry {
+            encrypted_name: file_entry.encrypted_name,
+            original_name: to.to_string(),
+            size: file_entry.size,
+            nonce: file_entry.nonce,
+            encrypted_at: file_entry.encrypted_at,
+            hash: file_entry.hash,
+        };
+
+        // 添加新条目
+        meta_data.add_file(new_entry);
+
+        // 写回元数据
+        self.write_meta(&header, &meta_data, &master_key)?;
+
+        Ok(())
+    }
 }
 
 /// 派生主密钥
