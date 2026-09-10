@@ -535,7 +535,7 @@ fn main() {
         } => {
             let container = require_container(container, "shell");
             let pwd = password_pos.or(password);
-            commands::shell::run(&container, pwd)
+            commands::shell_workspace::run_workspace(&container, pwd)
         }
         Commands::Pack {
             container,
