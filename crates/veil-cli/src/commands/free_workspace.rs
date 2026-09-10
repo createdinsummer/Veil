@@ -1,54 +1,78 @@
 use anyhow::Result;
 use colored::Colorize;
 use veil_core::config::GlobalConfig;
+use veil_core::workspace_ops::WorkspaceManager;
 
-/// 删除容器
+/// 树状显示容器内容
 pub fn run_workspace(
     container_name: &str,
-    force: bool,
+    _force: bool,
 ) -> Result<()> {
     // 加载配置
-    let mut config = GlobalConfig::load()?;
-
-    // 检查容器是否存在
-    if !config.containers.contains_key(container_name) {
-        anyhow::bail!("容器 '{}' 不存在", container_name);
-    }
+    let config = GlobalConfig::load()?;
 
     // 获取容器工作区路径
     let workspace_path = config.get_container_workspace_path(container_name)?;
 
-    // 如果不是强制删除，需要确认
-    if !force {
-        println!("{}", format!("⚠️  将删除容器 '{}' 及其所有文件", container_name).yellow());
-        println!("{}", format!("   路径: {}", workspace_path.display()).bright_black());
-        print!("{}", "确认删除? (y/N): ".yellow());
+    // 提示输入密码
+    let password_str = super::prompt_password("请输入容器密码: ", None)?;
 
-        use std::io::{self, Write};
-        io::stdout().flush()?;
+    use age::secrecy::ExposeSecret;
+    let password = password_str.expose_secret();
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+    // 读取元数据
+    let manager = WorkspaceManager::new(workspace_path);
+    let metadata = manager.read_meta(password)?;
 
-        let input = input.trim().to_lowercase();
-        if input != "y" && input != "yes" {
-            println!("{}", "已取消".bright_black());
-            return Ok(());
+    println!("\n{}", "容器内容:".cyan().bold());
+
+    if metadata.files.is_empty() {
+        println!("{}", "  (空)".bright_black());
+    } else {
+        // 简单列表显示，带缩进表示层级
+        let mut sorted_files = metadata.files.clone();
+        sorted_files.sort_by(|a, b| a.original_name.cmp(&b.original_name));
+
+        for (i, file) in sorted_files.iter().enumerate() {
+            let is_last = i == sorted_files.len() - 1;
+            let connector = if is_last { "└── " } else { "├── " };
+
+            // 简单处理：如果有路径分隔符，显示为目录结构
+            let name = &file.original_name;
+            if name.contains('/') {
+                let parts: Vec<&str> = name.split('/').collect();
+                let indent = "    ".repeat(parts.len().saturating_sub(1));
+                println!("{}{}{} ({})", indent, connector, parts.last().unwrap(), format_size(file.size));
+            } else {
+                println!("{}{} ({})", connector, name, format_size(file.size));
+            }
         }
     }
 
-    println!("{}", format!("正在删除容器 '{}'...", container_name).cyan());
+    // 统计信息
+    let file_count = metadata.files.len();
+    let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
 
-    // 删除目录
-    if workspace_path.exists() {
-        std::fs::remove_dir_all(&workspace_path)?;
-    }
-
-    // 从配置中移除
-    config.containers.remove(container_name);
-    config.save()?;
-
-    println!("{}", format!("✓ 容器已删除: {}", container_name).green());
+    println!("\n{}", "统计信息:".cyan());
+    println!("  文件数量: {}", file_count);
+    println!("  总大小: {} 字节 ({:.2} MB)", total_size, total_size as f64 / 1_048_576.0);
 
     Ok(())
+}
+
+/// 格式化文件大小
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }

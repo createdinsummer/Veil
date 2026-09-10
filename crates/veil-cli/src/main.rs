@@ -76,8 +76,6 @@ enum Commands {
     Free {
         #[arg(value_name = "容器文件")]
         container: Option<String>,
-        #[arg(short, long)]
-        force: bool,
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
         #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
@@ -480,12 +478,12 @@ fn main() {
         }
         Commands::Free {
             container,
-            force,
-            password_pos: _,
-            password: _,
+            password_pos,
+            password,
         } => {
             let container = require_container(container, "free");
-            commands::free_workspace::run_workspace(&container, force)
+            let pwd = password_pos.or(password);
+            commands::free_workspace::run_workspace(&container, false)
         }
         Commands::Ex {
             container,
