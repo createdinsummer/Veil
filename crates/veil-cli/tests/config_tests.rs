@@ -42,7 +42,7 @@ fn config_hints_updates_future_command_output() {
         .args(["init", "demo", "test-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("容器 'demo' 是如何工作的？").not());
+        .stdout(predicate::str::contains("只是数据入口，不保存数据").not());
 }
 
 #[test]
@@ -55,8 +55,19 @@ fn init_creates_a_reusable_veil_link() {
         .args(["init", "demo", "test-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Link created"))
-        .stdout(predicate::str::contains("What is demo.veil-link?"));
+        .stdout(predicate::str::contains(
+            "Container created successfully: demo",
+        ))
+        .stdout(predicate::str::contains(
+            "demo.veil-link is just a data entry point and does not store data",
+        ))
+        .stdout(predicate::str::contains("Data is stored in the workspace:"))
+        .stdout(predicate::str::contains(
+            "/.veil/workspaces/default/demo",
+        ))
+        .stdout(predicate::str::contains("veil pack demo"))
+        .stdout(predicate::str::contains("veil unpack <file.veil>"))
+        .stdout(predicate::str::contains("veil config --hints off"));
 
     let link_path = env.link_path("demo");
     assert!(link_path.exists());
@@ -76,6 +87,28 @@ fn init_creates_a_reusable_veil_link() {
         .assert()
         .success()
         .stdout(predicate::str::contains("note.txt"));
+}
+
+#[test]
+fn init_guidance_is_shown_for_each_new_container() {
+    let env = TestEnv::new("test-password");
+
+    for name in ["first", "second"] {
+        env.command()
+            .env("VEIL_LANG", "en")
+            .env("VEIL_HINTS", "full")
+            .args(["init", name])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "is just a data entry point and does not store data",
+            ))
+            .stdout(predicate::str::contains(
+                "veil config --hints off",
+            ))
+            .stdout(predicate::str::contains("veil pack"))
+            .stdout(predicate::str::contains("veil unpack <file.veil>"));
+    }
 }
 
 #[test]

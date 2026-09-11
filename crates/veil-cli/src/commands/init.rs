@@ -208,37 +208,9 @@ pub fn run(
         "{}",
         crate::i18n::t1("init.created", "path", &container_name).green()
     );
-    println!(
-        "{}",
-        crate::i18n::t1(
-            "init.link_created",
-            "path",
-            &link_path.display().to_string()
-        )
-        .green()
-    );
-    println!(
-        "{}",
-        crate::i18n::t1(
-            "init.workspace_path",
-            "path",
-            &container_path.display().to_string()
-        )
-        .bright_black()
-    );
-
-    if dedicated {
-        println!("{}", crate::i18n::t("init.type_dedicated").bright_black());
-    } else {
-        let ws_name = workspace_name.unwrap_or("default");
-        println!(
-            "{}",
-            crate::i18n::t1("init.type_shared", "workspace", ws_name).bright_black()
-        );
-    }
 
     // 显示首次使用提示
-    crate::hints::show_first_init_hint(&container_name, &link_path);
+    crate::hints::show_first_init_hint(&container_name, &link_path, &container_path);
 
     Ok(())
 }

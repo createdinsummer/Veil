@@ -276,7 +276,7 @@
     "en": "Creating new container..."
   },
   "init.created": {
-    "zh": "✓ 容器创建成功: {path}",
+    "zh": "✓ 创建容器成功: {path}",
     "en": "✓ Container created successfully: {path}"
   },
 
@@ -1019,28 +1019,40 @@
     "en": "Invalid hint level. Use: full, brief, off"
   },
   "hints.dismiss": {
-    "zh": "💡 提示：你可以在配置中调整引导级别",
-    "en": "Tip: you can adjust guidance in the configuration"
+    "zh": "💡 提示：引导级别需要手动配置，可运行: veil config --hints <full|brief|off>",
+    "en": "Tip: Configure guidance manually with: veil config --hints <full|brief|off>"
   },
   "hints.init.title": {
-    "zh": "📌 {name}.veil-link 是什么？",
-    "en": "📌 What is {name}.veil-link?"
+    "zh": "💡 {name} 只是数据入口，不保存数据",
+    "en": "💡 {name} is just a data entry point and does not store data"
   },
-  "hints.init.link_line": {
-    "zh": "• 这是指向加密工作区的快捷方式",
-    "en": "• It is a shortcut to an encrypted workspace"
+  "hints.init.storage_line": {
+    "zh": "数据保存在工作区：",
+    "en": "Data is stored in the workspace:"
   },
-  "hints.init.size_line": {
-    "zh": "• 文件很小（<1KB），可以随意复制或删除",
-    "en": "• It is tiny (<1 KB) and can be copied or deleted freely"
+  "hints.init.pack_title": {
+    "zh": "提取打包容器",
+    "en": "Extract and pack container"
   },
-  "hints.init.recovery_line": {
-    "zh": "• 删除它不会丢失数据，可以随时用 veil link 重建",
-    "en": "• Deleting it does not delete data; rebuild it with veil link"
+  "hints.init.pack_command": {
+    "zh": "veil pack {container}",
+    "en": "veil pack {container}"
   },
-  "hints.init.path_line": {
-    "zh": "• 当前链接: {path}",
-    "en": "• Current link: {path}"
+  "hints.init.unpack_title": {
+    "zh": "导入外部容器",
+    "en": "Import external container"
+  },
+  "hints.init.unpack_command": {
+    "zh": "veil unpack <file.veil>",
+    "en": "veil unpack <file.veil>"
+  },
+  "hints.init.close_title": {
+    "zh": "关闭引导",
+    "en": "Disable guidance"
+  },
+  "hints.init.close_command": {
+    "zh": "veil config --hints off",
+    "en": "veil config --hints off"
   },
   "hints.extension.title": {
     "zh": "💡 建议开启文件扩展名显示",

@@ -11,8 +11,7 @@ fn init_creates_workspace_and_link() {
         .args(["init", "photos", "test-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("容器创建成功"))
-        .stdout(predicate::str::contains("已生成链接"));
+        .stdout(predicate::str::contains("创建容器成功"));
 
     let link = env.link_path("photos");
     assert!(link.exists());

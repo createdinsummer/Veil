@@ -10,7 +10,6 @@ enum HintType {
     FirstUnpack,
     LinkRecovery,
     FileTypeAmbiguity,
-    ExtensionHidden,
 }
 
 /// 当前生效的提示级别：`VEIL_HINTS` 环境变量优先，其次读取全局配置。
@@ -60,7 +59,6 @@ fn should_show_once(hint_type: HintType) -> bool {
         HintType::FirstInit => config.system.init_hint_shown,
         HintType::FirstPack => config.system.pack_hint_shown,
         HintType::FirstUnpack => config.system.unpack_hint_shown,
-        HintType::ExtensionHidden => config.system.extension_hint_shown,
         HintType::LinkRecovery | HintType::FileTypeAmbiguity => return true,
     };
 
@@ -72,7 +70,6 @@ fn should_show_once(hint_type: HintType) -> bool {
         HintType::FirstInit => config.system.init_hint_shown = true,
         HintType::FirstPack => config.system.pack_hint_shown = true,
         HintType::FirstUnpack => config.system.unpack_hint_shown = true,
-        HintType::ExtensionHidden => config.system.extension_hint_shown = true,
         HintType::LinkRecovery | HintType::FileTypeAmbiguity => {}
     }
 
@@ -80,26 +77,35 @@ fn should_show_once(hint_type: HintType) -> bool {
     true
 }
 
-pub fn show_first_init_hint(container_name: &str, link_path: &Path) {
-    if !should_show_once(HintType::FirstInit) {
+pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_path: &Path) {
+    if !allowed(HintType::FirstInit, current_level()) {
         return;
     }
 
-    print_hint_box(
-        &i18n::t1("hints.init.title", "name", container_name),
-        &[
-            i18n::t("hints.init.link_line").to_string(),
-            i18n::t("hints.init.size_line").to_string(),
-            i18n::t("hints.init.recovery_line").to_string(),
-            i18n::t1(
-                "hints.init.path_line",
-                "path",
-                &link_path.display().to_string(),
-            ),
-        ],
-    );
+    let link_name = link_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{}.veil-link", container_name));
 
-    show_extension_hint();
+    println!();
+    println!("{}", i18n::t1("hints.init.title", "name", &link_name));
+    println!();
+    println!("  {}", i18n::t("hints.init.storage_line"));
+    println!("    {}", workspace_path.display());
+    println!();
+    println!("  {}", i18n::t("hints.init.pack_title"));
+    println!(
+        "    {}",
+        i18n::t1("hints.init.pack_command", "container", container_name)
+    );
+    println!();
+    println!("  {}", i18n::t("hints.init.unpack_title"));
+    println!("    {}", i18n::t("hints.init.unpack_command"));
+    println!();
+    println!("  {}", i18n::t("hints.init.close_title"));
+    println!("    {}", i18n::t("hints.init.close_command"));
+    println!();
 }
 
 pub fn show_pack_explain_hint(
@@ -195,17 +201,6 @@ pub fn show_file_type_ambiguity_hint(link_path: &Path, container_path: &Path) {
             "package",
             &container_path.display().to_string(),
         )],
-    );
-}
-
-pub fn show_extension_hint() {
-    if !should_show_once(HintType::ExtensionHidden) {
-        return;
-    }
-
-    print_hint_box(
-        i18n::t("hints.extension.title"),
-        &[i18n::t("hints.extension.body").to_string()],
     );
 }
 

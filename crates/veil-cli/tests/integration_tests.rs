@@ -103,7 +103,7 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("专属工作区"));
+        .stdout(predicate::str::contains("创建容器成功"));
 
     assert!(link.exists());
     assert!(workspace.join(".veil-meta").exists());
