@@ -1,3 +1,5 @@
+//! `veil link` 子命令：为容器创建新的便携链接。
+
 use crate::i18n;
 use anyhow::Result;
 use colored::Colorize;
@@ -7,6 +9,17 @@ use veil_core::link::VeilLink;
 use veil_core::volume;
 use veil_core::workspace_ops::WorkspaceManager;
 
+/// 根据现有链接、配置记录或 `.veil-meta` 生成新的 `.veil-link`。
+///
+/// 已解析链接存在时直接复制其文件；已注册但没有现有链接时重新注册；仅能定位到
+/// 工作区时会读取明文头部身份并构造新链接。
+///
+/// # 参数
+/// - `target`：容器名、工作区路径或现有链接路径。
+/// - `output`：输出链接路径；省略时使用当前目录下的默认文件名。
+///
+/// # 错误
+/// 输出已存在、链接复制、配置读取、元数据读取、链接生成或缓存写入失败时返回错误。
 pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     let mut config = GlobalConfig::load()?;
     let resolved = super::resolve_container(target)?;
@@ -26,11 +39,14 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     }
 
     if let Some(existing_link) = resolved.link_path.as_deref() {
+        // 已有链接直接逐字节复制，避免重新序列化改变内容。
         std::fs::copy(existing_link, &output_path)?;
         config.cache_link(&output_path)?;
     } else if config.find_container_key(&resolved.name).is_some() {
+        // 容器已注册但没有现有链接时，由配置模型生成新链接。
         config.register_link(&resolved.name, &output_path)?;
     } else {
+        // 仅能定位工作区时，从明文头部读取身份并现场构造链接。
         let manager = WorkspaceManager::new(resolved.workspace_path.clone());
         let header = manager.read_meta_header()?;
         let container_name = header.container_name.clone();

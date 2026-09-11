@@ -1,14 +1,22 @@
+//! `veil shell` 子命令：提供针对单个容器的交互式命令循环。
+
 use anyhow::Result;
 use colored::Colorize;
 use std::io::{self, Write};
 use veil_core::workspace_ops::WorkspaceManager;
 
-/// 交互式 shell
+/// 验证密码后进入交互式文件管理会话。
+///
+/// 支持 `ls`、`info`、`add`、`rm`、`ex`、`help` 和 `exit`；每次操作都复用已解析的
+/// 工作区管理器，并在读取信息时重新解密最新元数据。
+///
+/// # 错误
+/// 容器解析、密码读取、标准输入输出操作或会话建立失败时返回错误。
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+    // shell 生命周期内复用同一 WorkspaceManager，避免每次命令重新解析链接。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    // 验证密码
     println!(
         "{}",
         crate::i18n::t1("shell.opening_named", "name", container_name).cyan()
@@ -19,7 +27,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     use age::secrecy::ExposeSecret;
     let pwd = password_str.expose_secret();
 
-    // 验证密码并读取元数据
+    // 入口处先验证密码；失败时直接退出，不进入交互循环。
     let manager = WorkspaceManager::new(workspace_path.clone());
     manager.read_meta(pwd)?;
 
@@ -32,6 +40,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     println!("{}", crate::i18n::t("shell.command_hint").bright_black());
     println!();
 
+    // 每轮读取一行命令，空行直接忽略。
     loop {
         print!("{}", "veil> ".bright_green());
         io::stdout().flush()?;
@@ -47,6 +56,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
         let parts: Vec<&str> = input.split_whitespace().collect();
         let cmd = parts[0];
 
+        // 命令分发保持轻量，具体文件操作仍委托给 WorkspaceManager。
         match cmd {
             "exit" | "quit" | "q" => {
                 println!("{}", crate::i18n::t("shell.goodbye").bright_black());
@@ -59,7 +69,6 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
                 list_files(&manager, pwd)?;
             }
             "info" => {
-                // 重新读取最新的元数据
                 match manager.read_meta(pwd) {
                     Ok(current_metadata) => {
                         if let Err(e) = show_info(container_name, &current_metadata) {
@@ -157,7 +166,9 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     Ok(())
 }
 
+/// 输出交互式 shell 支持的命令。
 fn print_help() {
+    // 帮助内容与 match 分支保持一一对应，便于用户只记短命令。
     println!("{}", crate::i18n::t("shell.help_title").bright_cyan());
     println!(
         "  {}  - {}",
@@ -196,14 +207,20 @@ fn print_help() {
     );
 }
 
+/// 读取并展示当前容器文件列表。
+///
+/// # 错误
+/// 元数据读取或密码校验失败时返回错误。
 fn list_files(manager: &WorkspaceManager, password: &str) -> Result<()> {
     let files = manager.list_files(password)?;
 
+    // 空容器只显示空状态，不打印表头。
     if files.is_empty() {
         println!("{}", crate::i18n::t("common.empty").bright_black());
         return Ok(());
     }
 
+    // 标题复用文件数量消息，再逐项输出原始名称和明文大小。
     println!(
         "{}",
         format!(
@@ -230,7 +247,11 @@ fn list_files(manager: &WorkspaceManager, password: &str) -> Result<()> {
     Ok(())
 }
 
+/// 使用已解密元数据展示容器身份和内容统计。
+///
+/// 当前实现不读取 `_container_name`，容器名称直接取自 `metadata`。
 fn show_info(_container_name: &str, metadata: &veil_core::metadata::MetaData) -> Result<()> {
+    // info 子命令直接复用已解密元数据，不进行第二次读取。
     println!("{}", crate::i18n::t("info.title").bright_cyan());
     println!(
         "{}",
@@ -253,6 +274,7 @@ fn show_info(_container_name: &str, metadata: &veil_core::metadata::MetaData) ->
         )
     );
 
+    // 总大小为各文件条目明文大小的求和。
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
     println!(
         "{}",

@@ -1,8 +1,11 @@
+//! CLI 配置、链接恢复和本地化行为测试。
+
 mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
 
+/// 验证不带参数的配置命令与显式 `show` 输出一致。
 #[test]
 fn config_show_matches_documented_command() {
     let env = TestEnv::new("test-password");
@@ -22,6 +25,7 @@ fn config_show_matches_documented_command() {
         .stdout(predicate::str::contains("提示级别: off"));
 }
 
+/// 验证修改提示级别会写入配置并影响后续命令输出。
 #[test]
 fn config_hints_updates_future_command_output() {
     let env = TestEnv::new("test-password");
@@ -45,6 +49,7 @@ fn config_hints_updates_future_command_output() {
         .stdout(predicate::str::contains("只是数据入口，不保存数据").not());
 }
 
+/// 验证初始化生成的链接可再次用于访问同一容器。
 #[test]
 fn init_creates_a_reusable_veil_link() {
     let env = TestEnv::new("test-password");
@@ -87,6 +92,7 @@ fn init_creates_a_reusable_veil_link() {
         .stdout(predicate::str::contains("note.txt"));
 }
 
+/// 验证每个新容器都会显示独立的首次使用引导。
 #[test]
 fn init_guidance_is_shown_for_each_new_container() {
     let env = TestEnv::new("test-password");
@@ -107,6 +113,7 @@ fn init_guidance_is_shown_for_each_new_container() {
     }
 }
 
+/// 验证链接缺失时会依据配置中的原始字节副本恢复。
 #[test]
 fn missing_link_is_rebuilt_from_config() {
     let env = TestEnv::new("test-password");
@@ -118,6 +125,7 @@ fn missing_link_is_rebuilt_from_config() {
         .success();
 
     let link_path = env.work.path().join("custom.veil-link");
+    // 保存原始链接字节，并确认配置确实缓存了同一份十六进制内容。
     let original = std::fs::read(&link_path).unwrap();
     let original_hex = original
         .iter()
@@ -128,6 +136,7 @@ fn missing_link_is_rebuilt_from_config() {
     assert!(config.contains("volume_id = "));
     assert!(config.contains("mount_path = "));
 
+    // 移走链接而非删除，便于必要时人工检查备份。
     std::fs::rename(&link_path, env.work.path().join("custom.veil-link.bak")).unwrap();
 
     env.command()
@@ -137,10 +146,12 @@ fn missing_link_is_rebuilt_from_config() {
         .success()
         .stdout(predicate::str::contains("已为你重建"));
 
+    // 恢复后必须与原始字节完全一致，而不是重新序列化出的近似内容。
     assert!(link_path.exists());
     assert_eq!(std::fs::read(&link_path).unwrap(), original);
 }
 
+/// 验证操作一个容器不会顺带恢复其他缺失链接。
 #[test]
 fn operating_one_container_does_not_restore_sibling_link() {
     let env = TestEnv::new("test-password");
@@ -159,6 +170,7 @@ fn operating_one_container_does_not_restore_sibling_link() {
     assert!(second_backup.exists());
 }
 
+/// 验证文件帮助和提示级别环境变量均支持英文输出。
 #[test]
 fn help_files_and_hints_override_are_localized() {
     let env = TestEnv::new("test-password");

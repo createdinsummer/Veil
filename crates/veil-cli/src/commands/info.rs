@@ -1,3 +1,5 @@
+//! `veil info` 子命令：展示容器身份与内容统计。
+
 use anyhow::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
@@ -19,6 +21,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 /// veil info photos
 /// ```
 pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
+    // info 只需要工作区路径，展示名称以加密元数据中的值为准。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
@@ -28,7 +31,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 读取元数据
+    // 读取元数据同时完成密码验证；失败时不会打印任何容器内容。
     let manager = WorkspaceManager::new(workspace_path.clone());
     let metadata = manager.read_meta(password)?;
 
@@ -58,7 +61,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
         crate::i18n::t1("info.created_at", "time", &metadata.created_at)
     );
 
-    // 统计文件
+    // 文件数量来自已解密清单，总大小在内存中累加，不扫描磁盘密文。
     let file_count = metadata.files.len();
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
 
@@ -78,7 +81,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
         )
     );
 
-    // 列出文件
+    // 空容器只显示内容统计，避免输出空列表标题。
     if !metadata.files.is_empty() {
         println!("\n{}", crate::i18n::t("common.file_list_title"));
         for (idx, file) in metadata.files.iter().enumerate() {

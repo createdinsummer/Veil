@@ -1,9 +1,15 @@
+//! `veil list` 子命令：列出工作区容器的文件清单。
+
 use anyhow::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 
-/// 列出容器中的所有文件
+/// 解密元数据并输出文件名称、大小、加密时间和总大小。
+///
+/// # 错误
+/// 容器解析、密码读取或元数据解密失败时返回错误。
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+    // list 只读取容器元数据，不需要打开每个文件 blob。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
@@ -12,10 +18,11 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 列出文件
+    // 读取清单成功即表示密码正确，随后即可安全展示文件信息。
     let manager = WorkspaceManager::new(workspace_path);
     let files = manager.list_files(password)?;
 
+    // 空容器提前返回，避免打印只有标题和总大小 0 的表格。
     if files.is_empty() {
         println!("{}", crate::i18n::t("common.empty").yellow());
         return Ok(());
@@ -35,7 +42,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     );
     println!();
 
-    // 计算总大小
+    // 文件条目保存明文大小，可直接求和给用户展示。
     let total_size: u64 = files.iter().map(|f| f.size).sum();
 
     for (idx, file) in files.iter().enumerate() {
@@ -61,7 +68,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     Ok(())
 }
 
-/// 格式化文件大小
+/// 将字节数格式化为 B、KB、MB 或 GB，并保留两位小数。
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -78,7 +85,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// 格式化时间
+/// 将 RFC 3339 时间转换为本地 `YYYY-MM-DD HH:MM:SS`；解析失败时原样返回。
 fn format_time(rfc3339: &str) -> String {
     use chrono::{DateTime, Local};
 

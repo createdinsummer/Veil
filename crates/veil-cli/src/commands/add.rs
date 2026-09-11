@@ -1,3 +1,5 @@
+//! `veil add` 子命令：向工作区容器添加本地文件。
+
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
@@ -10,7 +12,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 /// # 参数
 /// - `container_name`: 容器名称
 /// - `source`: 源文件路径
-/// - `dest`: 目标路径（暂未使用，保留兼容性）
+/// - `dest`: 目标路径；当前版本保留参数接口但不会使用该值。
 /// - `password`: 容器密码（`None` 则交互式输入）
 ///
 /// # 返回
@@ -28,10 +30,11 @@ pub fn run(
     _dest: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
+    // 先解析链接或容器名，后续所有操作都针对解析出的工作区路径。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    // 检查文件是否存在
+    // 提前校验源路径，避免用户输入密码后才发现文件不存在。
     let file = Path::new(source);
     if !file.exists() {
         anyhow::bail!(
@@ -48,10 +51,11 @@ pub fn run(
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
+    // 只在调用 core 时短暂暴露密码，不把明文密码继续传入后续流程。
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 添加文件
+    // add_file 负责生成加密名、写入密文并更新加密元数据。
     let manager = WorkspaceManager::new(workspace_path);
     let encrypted_name = manager.add_file(file, password)?;
 

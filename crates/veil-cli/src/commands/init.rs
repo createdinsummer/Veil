@@ -1,3 +1,5 @@
+//! `veil init` 子命令：创建新的工作区容器和链接。
+
 use anyhow::Result;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -7,16 +9,21 @@ use veil_core::workspace_ops::WorkspaceManager;
 
 /// 创建新的加密容器（工作区架构）。
 ///
-/// 创建一个工作区目录，初始化 .veil-meta 元数据文件。
-/// 工作区中的文件独立加密，支持并发读写。
+/// 创建一个工作区目录，初始化 `.veil-meta` 元数据文件，并登记全局配置。
+/// 工作区中的每个文件拥有独立密文，容器身份由启动时生成的稳定 ID 表示。
 ///
 /// # 参数
-/// - `container_name`: 容器名称（如 "photos"）
-/// - `password`: 用户密码（`Option<String>`，`None` 则交互式输入）
+/// - `target`: 容器名称、链接文件名或工作区目标路径。
+/// - `password`: 用户密码；`None` 时按命令层规则从环境变量或终端读取。
+/// - `link_output`: 自定义 `.veil-link` 输出路径。
+/// - `workspace_name`: 可选的命名工作区。
+/// - `workspace_path`: 可选的显式工作区根路径。
+/// - `dedicated`: 是否让新工作区由当前容器独占。
+/// - `portable`: 是否强制把工作区放在链接文件所在卷。
 ///
 /// # 返回
 /// - `Ok(())`: 容器创建成功
-/// - `Err(anyhow::Error)`: 创建失败
+/// - `Err(anyhow::Error)`: 名称、路径、密码、配置或容器写入失败。
 ///
 /// # 示例
 /// ```bash
@@ -36,6 +43,7 @@ pub fn run(
     portable: bool,
 ) -> Result<()> {
     let target_path = Path::new(target);
+    // 链接目标使用文件名，目录目标使用最后一级名称，普通名称原样保留。
     let container_name = if target_path.extension().and_then(|ext| ext.to_str())
         == Some("veil-link")
     {
@@ -86,19 +94,18 @@ pub fn run(
         .parent()
         .unwrap_or_else(|| Path::new("."));
     let external_location = is_external_volume(link_dir);
+    // 外部卷或显式 portable 参数会自动把默认工作区放到链接所在卷。
     let portable_mode =
         workspace_name.is_none() && workspace_path.is_none() && (portable || external_location);
 
-    // 加载全局配置
     let mut config = GlobalConfig::load()?;
 
-    // 确保默认工作区配置存在
     if config.workspace.default.is_none() {
         config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
     }
 
-    // 确定工作区路径
     let workspace_root = if portable_mode {
+        // 便携模式固定使用链接目录下的隐藏工作区，保证链接与数据一起移动。
         link_dir.join(".veil/workspaces/default")
     } else if let Some(path) = workspace_path {
         path
@@ -123,6 +130,7 @@ pub fn run(
         config.workspace.default.as_ref().unwrap().path.clone()
     };
 
+    // 共享工作区以 veil_id 作为目录名，专属工作区则直接使用 workspace_root。
     let container_dir = (!dedicated).then(|| veil_id.clone());
     let container_path = if dedicated {
         workspace_root.clone()
@@ -130,7 +138,6 @@ pub fn run(
         workspace_root.join(&veil_id)
     };
 
-    // 检查目录是否已存在
     if container_path.exists() {
         anyhow::bail!(
             "{}",
@@ -152,11 +159,9 @@ pub fn run(
     }
     let password_str = super::prompt_new_password(password)?;
 
-    // 使用 SecretString 的 expose_secret() 获取字符串
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 创建工作区管理器并初始化
     let workspace_type = if dedicated {
         "dedicated"
     } else if workspace_name == Some("default") || workspace_name.is_none() {
@@ -169,7 +174,6 @@ pub fn run(
     let metadata =
         manager.init_container_with_id(&veil_id, &container_name, workspace_type, password)?;
 
-    // 更新全局配置
     use veil_core::config::ContainerConfig;
     let container_config = if dedicated {
         ContainerConfig {
@@ -201,6 +205,7 @@ pub fn run(
         .containers
         .insert(metadata.veil_id.clone(), container_config);
     config.save()?;
+    // 注册链接时会再次写入配置，确保容器与链接两侧都能独立恢复。
     config.register_link_at(
         &metadata.veil_id,
         &container_name,
@@ -213,13 +218,16 @@ pub fn run(
         crate::i18n::t1("init.created", "path", &container_name).green()
     );
 
-    // 显示首次使用提示
     crate::hints::show_first_init_hint(&container_name, &link_path, &container_path);
 
     Ok(())
 }
 
+/// 判断路径是否位于当前平台识别出的外部卷。
+///
+/// 路径不存在时使用最近的已存在祖先进行探测；无法取得设备信息时返回 `false`。
 fn is_external_volume(path: &Path) -> bool {
+    // 目标目录可能尚未创建，因此先找到最近的真实路径再读取卷信息。
     let probe = nearest_existing_path(path);
     if probe.as_os_str().is_empty() {
         return false;
@@ -227,6 +235,7 @@ fn is_external_volume(path: &Path) -> bool {
 
     #[cfg(target_os = "macos")]
     {
+        // macOS 约定 /Volumes 下是挂载卷。
         if probe.starts_with("/Volumes") {
             return true;
         }
@@ -236,6 +245,7 @@ fn is_external_volume(path: &Path) -> bool {
     {
         use std::path::Component;
 
+        /// 提取路径盘符并转换为字符串。
         fn root_key(path: &Path) -> Option<String> {
             match path.components().next()? {
                 Component::Prefix(prefix) => {
@@ -245,6 +255,7 @@ fn is_external_volume(path: &Path) -> bool {
             }
         }
 
+        // 比较目标盘符与用户主目录盘符，不同盘即视为外部位置。
         if let (Some(location), Some(home)) = (
             root_key(&probe),
             std::env::var_os("USERPROFILE")
@@ -260,6 +271,7 @@ fn is_external_volume(path: &Path) -> bool {
     {
         use std::os::unix::fs::MetadataExt;
 
+        // Unix 设备号变化表示跨文件系统，通常对应外部挂载卷。
         let location_device = std::fs::metadata(&probe).ok().map(|meta| meta.dev());
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let home_device = home
@@ -275,12 +287,15 @@ fn is_external_volume(path: &Path) -> bool {
     false
 }
 
+/// 返回路径自身或最近的已存在祖先；没有任何可用路径时返回空路径。
 fn nearest_existing_path(path: &Path) -> PathBuf {
     let mut current = path.to_path_buf();
     loop {
+        // 返回第一个存在路径，并尽量 canonicalize 去掉符号链接和相对段。
         if current.exists() {
             return std::fs::canonicalize(&current).unwrap_or(current);
         }
+        // pop 到根后仍不存在，说明调用方给出的是无效路径。
         if !current.pop() {
             return PathBuf::new();
         }

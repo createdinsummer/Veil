@@ -1,19 +1,21 @@
-//! # container —— .veil 容器的总装：create / add / list / read
+//! 单文件 `.veil` 容器的创建与读写。
 //!
 //! 本模块把 [`crate::keys`]（加解密）、[`crate::index`]（嵌套目录树）、
 //! [`crate::format`]（头尾字节）三者组装起来，读写一个真正的单文件容器。
 //!
-//! ## `.veil` 单文件布局（对应 spec §3）
+//! ## `.veil` 单文件布局
 //!
 //! ```text
 //! +-----------------------------------------------------------+  ← 文件偏移 0
 //! | Header                                                    |
 //! |   magic               = "VEILPKG\0"  (8 bytes)            |
 //! |   version             = u16                               |
-//! |   flags               = u16                               |
+//! |   flags               = u16（低四位为 KDF 类型）          |
+//! |   cli_version_len     = u32                               |
+//! |   cli_version         = bytes                             |
 //! |   cip_pri_key_len     = u32                               |
 //! |   cip_pri_key         = bytes                             |
-//! |        └─ age(用户密码, 容器 x25519 私钥串)；Argon2id 派生 |
+//! |        └─ Argon2id + ChaCha20-Poly1305 保护的私钥串        |
 //! +-----------------------------------------------------------+
 //! | Blob 区（追加增长，昂贵的密文数据永不重写）                 |
 //! |   blob_0 = age(pub_key, 文件0内容)  ← 各自完整 age STREAM   |
@@ -29,7 +31,7 @@
 //! +-----------------------------------------------------------+  ← 文件末尾
 //! ```
 //!
-//! ## 密钥模型：公钥加密、私钥解密（age x25519 信封，对应 spec §4）
+//! ## 密钥模型：公钥加密、私钥解密（age x25519 信封）
 //!
 //! - **公钥 `pub_key`**：只加密（写 blob / 写 Index）；
 //! - **私钥 `key_pair`**：只解密（读 blob / 读 Index），本身被密码加密成 `cip_pri_key`；
@@ -47,19 +49,18 @@ use crate::index::{self, FileMeta, Node, Tree, deserialize_index, serialize_inde
 use crate::keys::{decrypt_bytes, decrypt_pri_key, encrypt_bytes, encrypt_pri_key};
 use crate::slice_reader::SliceReader;
 
-/// 一个在内存中已解密、可读写的容器句柄。
+/// 已解密、可在内存中读取和更新的单文件容器句柄。
 pub struct Container {
-    /// 容器文件路径
+    /// 容器文件路径。
     path: PathBuf,
-    /// 非对称密钥对（解密内容用；P5 会加 zeroize 清零）
+    /// 用于解密 blob 和目录索引的 x25519 身份。
     key_pair: age::x25519::Identity,
-    /// 内存中的**嵌套**目录树
+    /// 内存中的嵌套目录树。
     root: Tree,
-    /// 容器创建时使用的 CLI 版本
+    /// 容器创建时写入 Header 的 CLI 版本。
     cli_version: String,
-    // 崩溃安全策略：所有写入都**追加到文件末尾**（永不覆盖已提交数据），
-    // Footer 最后写 + fsync 作为提交点；下一个 blob / Index 都从当前 EOF 追加，
-    // 所以不需要单独记 blob_end。
+    // 提交策略：blob 与 Index/Footer 均追加写入，Footer 落盘作为提交点；
+    // 因此不需要在内存中单独维护 blob 区末尾位置。
 }
 
 impl Container {
@@ -70,15 +71,15 @@ impl Container {
     /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`）
     /// - `cli_version`: CLI 版本字符串（如 "1.1.0"）
     /// # 返回
-    /// - `Ok(Container)`：已写入磁盘的空容器句柄
-    /// - `Err(VeilError)`：加密或写文件失败
+    /// - `Ok(Container)`：已写入磁盘的空容器句柄。
+    /// - `Err(VeilError)`：私钥保护、Header 写入、空索引提交或文件同步失败。
     pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>, cli_version: &str) -> Result<Container> {
         let passphrase = passphrase.into();
+        // 每创建一个容器就生成独立 x25519 身份，后续所有 blob 共用公钥加密。
         let key_pair = age::x25519::Identity::generate();
-        // 使用 Argon2id 加密私钥
         let cip_pri_key = encrypt_pri_key(&key_pair, passphrase)?;
 
-        // 写 Header（文件开头）
+        // 先建立仅含 Header 的文件，再由 commit 追加空目录树。
         {
             let file = File::create(path.as_ref())?;
             let mut writer = BufWriter::new(file);
@@ -92,31 +93,31 @@ impl Container {
             root: Tree::new(),
             cli_version: cli_version.to_string(),
         };
-        container.commit()?; // 追加空 Index + Footer
+        container.commit()?;
         Ok(container)
     }
 
-    /// 打开已存在的容器：用密码解密私钥，读出目录树。
+    /// 打开已存在的容器：用密码解密私钥，再恢复目录树。
     ///
     /// # 参数
     /// - `path`:       容器文件路径
     /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`；错误则解密失败）
     /// # 返回
     /// - `Ok(Container)`：解密后可读写的容器句柄（含目录树）
-    /// - `Err(VeilError)`：密码错误、文件损坏或格式不符
+    /// - `Err(VeilError)`：密码错误、文件损坏、格式不符或找不到有效索引。
     pub fn open(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
         let passphrase = passphrase.into();
         let path = path.as_ref().to_path_buf();
 
+        // Header 包含解封 x25519 身份所需的盐、nonce 和密文私钥。
         let header = {
             let mut file = File::open(&path)?;
             format::read_header(&mut file)?
         };
 
-        // 使用 Argon2id 解密私钥
+        // 密码错误会在认证阶段失败，不会返回可继续使用的私钥。
         let key_pair = decrypt_pri_key(&header.cip_pri_key, passphrase)?;
 
-        // 加载 Index：正常读文件尾 Footer；崩溃过则恢复到上一个有效 Footer
         let root = recover_index(&path, &key_pair)?;
 
         Ok(Container {
@@ -138,10 +139,11 @@ impl Container {
     /// - `Ok(())`：文件已加密追加、Index/Footer 已更新
     /// - `Err(VeilError)`：加密或写文件失败
     pub fn add_file(&mut self, virtual_path: &str, plaintext: &[u8]) -> Result<()> {
+        // 哈希覆盖明文内容，读取或导出时用于发现解密后的数据损坏。
         let content_hash: [u8; 32] = blake3::hash(plaintext).into();
         let blob_cipher = encrypt_bytes(&self.key_pair.to_public(), plaintext)?;
 
-        // 把 blob **追加到文件末尾**并 fsync（确保 blob 落盘后，才让 Index 指向它）
+        // 先让 blob 落盘，再提交指向它的索引。
         let blob_offset = {
             let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
             let off = file.seek(SeekFrom::End(0))?;
@@ -150,6 +152,7 @@ impl Container {
             off
         };
 
+        // 元数据记录完整 blob 范围，读取时无需重新扫描容器。
         let meta = FileMeta {
             size: plaintext.len() as u64,
             blob_offset,
@@ -159,17 +162,16 @@ impl Container {
             mtime: None,
         };
 
-        index::insert_file(&mut self.root, virtual_path, meta); // 插入/覆盖到树
-        self.commit()?; // 追加新 Index + Footer
+        index::insert_file(&mut self.root, virtual_path, meta);
+        self.commit()?;
         Ok(())
     }
 
     /// 流式添加文件（适用于大文件，不会一次性读入内存）。
     ///
-    /// 使用固定大小的缓冲区（64KB）边读边加密边写入，内存占用恒定。得益于 age 使用
-    /// **流密码**（ChaCha20-Poly1305），加密和解密的块大小可以完全不同——加密时用
-    /// 64KB 缓冲，解密时可以用 8KB 或 1MB，结果都正确。流密码将明文逐字节与密钥流
-    /// XOR，生成连续的密文字节流，没有"块边界"概念，因此无需对齐或填充。
+    /// 使用固定大小的缓冲区边读边加密边写入，内存占用不随文件大小增长。age 的
+    /// 流式接口负责维护内部 STREAM 分块，因此加密和解密调用方可使用不同的缓冲区
+    /// 大小，无需手工对齐明文边界。
     ///
     /// # 参数
     /// - `virtual_path`: 容器内的虚拟路径
@@ -194,18 +196,18 @@ impl Container {
         virtual_path: &str,
         mut reader: impl Read,
     ) -> Result<()> {
-        const CHUNK_SIZE: usize = 64 * 1024; // 64KB 缓冲区
+        const CHUNK_SIZE: usize = 64 * 1024;
 
+        // 新 blob 从当前 EOF 追加，旧数据不会被覆盖。
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let blob_offset = file.seek(SeekFrom::End(0))?;
 
-        // age 流式加密器（写入容器文件）
         let recipient = self.key_pair.to_public();
         let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
             .expect("failed to create encryptor");
         let mut writer = encryptor.wrap_output(&mut file)?;
 
-        // 边读边 hash 边加密边写
+        // 读、哈希、加密共享同一块缓冲区，内存占用只与 CHUNK_SIZE 有关。
         let mut hasher = blake3::Hasher::new();
         let mut total_size = 0u64;
         let mut buffer = vec![0u8; CHUNK_SIZE];
@@ -221,9 +223,10 @@ impl Container {
             total_size += n as u64;
         }
 
+        // finish 写出 age 流末尾认证信息，之后才能确定最终 blob 长度。
         writer.finish()?;
         let blob_len = file.stream_position()? - blob_offset;
-        file.sync_all()?; // 确保 blob 落盘后，才让 Index 指向它
+        file.sync_all()?;
 
         let content_hash: [u8; 32] = hasher.finalize().into();
 
@@ -243,14 +246,16 @@ impl Container {
 
     /// 按虚拟路径删除一个文件（顺带清理变空的父目录）。
     ///
-    /// 被删文件的 blob 字节仍留在文件里成为**死空间**（仍是密文），P6 再 compaction 回收。
+    /// 被删文件的 blob 仍保留在容器文件中，当前版本只从目录树移除引用，不回收
+    /// 对应密文占用的空间。
     ///
     /// # 参数
-    /// - `virtual_path`: 要删除的文件路径
+    /// - `virtual_path`: 要删除的文件路径。
     /// # 返回
-    /// - `Ok(())`：已从目录树移除并重写 Index/Footer
-    /// - `Err(VeilError)`：找不到该文件，或写文件失败
+    /// - `Ok(())`：已从目录树移除并提交新索引。
+    /// - `Err(VeilError)`：找不到该文件，或提交索引失败。
     pub fn remove_file(&mut self, virtual_path: &str) -> Result<()> {
+        // 只有目录树中确实存在该文件时才提交新索引。
         if index::remove_file(&mut self.root, virtual_path).is_none() {
             return Err(VeilError::Format(format!("找不到文件: {virtual_path}")));
         }
@@ -258,29 +263,25 @@ impl Container {
         Ok(())
     }
 
-    /// 修改容器密码。只用新密码重新加密**私钥**（重写整个 Header），
-    /// 几百 GB 的 blob 一个字节都不动——「两级密钥」设计的红利。
+    /// 修改容器密码。
     ///
-    /// 注意：由于 Header 现在包含可变长度的 CLI 版本字符串，我们需要重写整个文件。
+    /// 新密码只重新保护 Header 中的容器私钥，已写入的 blob 和目录索引无需重新加密。
+    /// 新旧 Header 长度必须一致；长度变化时拒绝原地覆盖，避免破坏后续数据偏移。
     ///
     /// # 参数
     /// - `new_passphrase`: 新密码（`impl Into<SecretString>`，可直接传 `String`）
     /// # 返回
     /// - `Ok(())`：Header 的密文私钥已用新密码重写
-    /// - `Err(VeilError)`：加密或写文件失败
+    /// - `Err(VeilError)`：私钥保护、Header 读取、长度校验或写入失败。
     pub fn change_password(&self, new_passphrase: impl Into<SecretString>) -> Result<()> {
-        // 使用 Argon2id 加密新密码
         let new_cip_pri_key = encrypt_pri_key(&self.key_pair, new_passphrase.into())?;
 
-        // 读取旧 Header 获取 CLI 版本
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let old_header = format::read_header(&mut file)?;
 
-        // 生成新 Header（使用 Argon2id）
         let mut new_header_bytes = Vec::new();
         format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key, crate::kdf::KdfType::Argon2id)?;
 
-        // 检查新旧 Header 长度是否相同
         let old_header_len = {
             let mut temp_file = File::open(&self.path)?;
             let header = format::read_header(&mut temp_file)?;
@@ -293,7 +294,7 @@ impl Container {
             return Err(VeilError::Format("密文私钥长度变化，无法原地改密码".into()));
         }
 
-        // 原地覆盖 Header
+        // CLI 版本与密文私钥长度均未变化，可安全原位覆盖。
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&new_header_bytes)?;
         file.flush()?;
@@ -311,12 +312,14 @@ impl Container {
     /// - `Ok(())`：已重命名并重写索引
     /// - `Err(VeilError)`：找不到源文件，或目标路径已存在
     pub fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
+        // 先守住目标路径，避免覆盖后将源条目从树中移除而无法回滚。
         if index::get_file(&self.root, to).is_some() {
             return Err(VeilError::Format(format!("目标路径已存在: {to}")));
         }
         let mut meta = index::remove_file(&mut self.root, from)
             .ok_or_else(|| VeilError::Format(format!("找不到文件: {from}")))?;
-        meta.mime = crate::mime::guess_mime(to); // 扩展名可能变，重新识别
+        // 路径扩展名可能变化，因此移动后重新计算 MIME。
+        meta.mime = crate::mime::guess_mime(to);
         index::insert_file(&mut self.root, to, meta);
         self.commit()?;
         Ok(())
@@ -350,6 +353,7 @@ impl Container {
         F: FnMut(usize, usize, &Path, u64),
     {
         let src_dir = src_dir.as_ref();
+        // 先完整收集文件列表，才能在进度回调中提供稳定的总文件数。
         let mut files = Vec::new();
         collect_files(src_dir, src_dir, dest_prefix, &mut files)?;
 
@@ -364,6 +368,7 @@ impl Container {
         // 相比逐个 add_file，把 O(N²) 的 Index 重写降为 O(N)、2N 次 fsync 降为 2 次。
         {
             let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            // offset 在所有文件之间持续递增，避免每个 blob 都重新 seek。
             let mut offset = file.seek(SeekFrom::End(0))?;
             for (index, (abs_path, virtual_path)) in files.into_iter().enumerate() {
                 let file_size = abs_path.metadata()?.len();
@@ -440,10 +445,12 @@ impl Container {
     pub fn read_file(&self, virtual_path: &str) -> Result<Vec<u8>> {
         let meta = self.file_meta(virtual_path)?;
 
+        // 读取器只覆盖这一个 blob，不会加载容器中的其他文件。
         let mut reader = self.open_blob_reader(meta)?;
         let mut plaintext = Vec::new();
         reader.read_to_end(&mut plaintext)?;
 
+        // age 负责密文认证，blake3 再验证解密后的完整明文。
         let hash: [u8; 32] = blake3::hash(&plaintext).into();
         if hash != meta.content_hash {
             return Err(VeilError::Format("内容哈希不匹配（数据损坏？）".into()));
@@ -453,16 +460,14 @@ impl Container {
 
     /// 打开文件的流式读取器（适用于大文件，不会一次性读入内存）。
     ///
-    /// 返回实现了 `Read + Seek` 的解密流，可以按需读取任意大小的数据块。得益于 age
-    /// 使用**流密码**（ChaCha20-Poly1305），解密时的读取块大小可以与加密时完全不同。
-    /// 流密码生成连续的密文字节流，解密时只需按顺序读取并与密钥流 XOR，无论一次读
-    /// 1 字节还是 1MB 都能正确还原明文。
+    /// 返回实现了 `Read + Seek` 的解密流，可以按需读取任意大小的数据块。age 的
+    /// STREAM 层负责密文分块和认证，读取方无需与加密时的缓冲区大小保持一致。
     ///
     /// # 参数
-    /// - `virtual_path`: 要读取的文件路径
+    /// - `virtual_path`: 要读取的文件路径。
     /// # 返回
-    /// - `Ok(impl Read + Seek)`：流式解密读取器
-    /// - `Err(VeilError)`：找不到文件或打开失败
+    /// - `Ok(impl Read + Seek)`：仅覆盖目标 blob 的流式解密读取器。
+    /// - `Err(VeilError)`：找不到文件、密文无效或密钥不匹配。
     ///
     /// # 示例
     /// ```no_run
@@ -497,20 +502,22 @@ impl Container {
     pub fn read_range(&self, virtual_path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         let meta = self.file_meta(virtual_path)?;
         let mut reader = self.open_blob_reader(meta)?;
+        // Seek 和 take 都作用于解密后的明文流，调用方使用普通文件偏移语义。
         reader.seek(SeekFrom::Start(offset))?;
         let mut buf = Vec::new();
         reader.take(len as u64).read_to_end(&mut buf)?;
         Ok(buf)
     }
 
-    /// 把某文件解密到一个受控临时位置（优先 RAM 盘），返回 RAII 守卫。
-    /// 用于视频/音频 V1：守卫 Drop 时临时明文自动删除。
+    /// 把某文件解密到一个受控临时位置，并返回 RAII 守卫。
+    ///
+    /// 守卫离开作用域时会自动删除临时明文文件。
     ///
     /// # 参数
-    /// - `virtual_path`: 文件路径
+    /// - `virtual_path`: 文件路径。
     /// # 返回
-    /// - `Ok(TempPlaintext)`：临时明文守卫
-    /// - `Err(VeilError)`：找不到文件或解密/写入失败
+    /// - `Ok(TempPlaintext)`：临时明文守卫。
+    /// - `Err(VeilError)`：找不到文件、解密失败或临时文件写入失败。
     pub fn extract_to_temp(&self, virtual_path: &str) -> Result<crate::temp::TempPlaintext> {
         let meta = self.file_meta(virtual_path)?;
         let reader = self.open_blob_reader(meta)?;
@@ -548,13 +555,14 @@ impl Container {
         let meta = self.file_meta(virtual_path)?;
         let total_size = meta.size;
 
+        // 输出父目录缺失时自动补齐，满足一次性导出到嵌套路径的使用方式。
         if let Some(parent) = dest.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
         }
 
-        // 流式解密并写入文件
+        // BufWriter 降低小块写盘次数，读取端仍按固定缓冲区流式解密。
         let mut reader = self.open_blob_reader(meta)?;
         let mut writer = BufWriter::new(File::create(dest)?);
 
@@ -563,6 +571,7 @@ impl Container {
         let mut buffer = [0u8; 64 * 1024];
         let mut exported = 0u64;
 
+        // 每轮同时写盘、更新哈希并报告累计进度。
         loop {
             let n = reader.read(&mut buffer)?;
             if n == 0 {
@@ -576,7 +585,7 @@ impl Container {
 
         writer.flush()?;
 
-        // 校验完整性
+        // 只有完整读取并通过哈希校验后，目标文件才被视为有效导出结果。
         let hash: [u8; 32] = hasher.finalize().into();
         if hash != meta.content_hash {
             std::fs::remove_file(dest)?; // 校验失败，删除损坏文件
@@ -596,6 +605,7 @@ impl Container {
     /// - `Err(VeilError)`：某文件校验失败或写盘失败
     pub fn extract_dir(&self, virtual_prefix: &str, out_dir: impl AsRef<Path>) -> Result<()> {
         let out_dir = out_dir.as_ref();
+        // 统一补一个尾斜杠，避免 "photos" 误匹配 "photos-old" 前缀。
         let prefix = format!("{}/", virtual_prefix.trim_end_matches('/'));
 
         for (path, _meta) in index::list_files(&self.root) {
@@ -618,6 +628,7 @@ impl Container {
     /// - `Err(VeilError)`：某文件校验失败或写盘失败
     pub fn extract_all(&self, out_dir: impl AsRef<Path>) -> Result<()> {
         let out_dir = out_dir.as_ref();
+        // 完整路径直接拼接导出目录，从而保留容器内的嵌套结构。
         for (path, _meta) in index::list_files(&self.root) {
             let dest = out_dir.join(&path);
             if let Some(parent) = dest.parent() {
@@ -664,6 +675,7 @@ impl Container {
     /// let deleted = container.remove_matched("temp/*")?;
     /// ```
     pub fn remove_matched(&mut self, pattern: &str) -> Result<Vec<String>> {
+        // 先固定匹配结果再删除，避免边遍历边修改树。
         let matched = index::match_files(&self.root, pattern)?;
         let paths: Vec<String> = matched.iter().map(|(p, _)| p.clone()).collect();
 
@@ -671,6 +683,7 @@ impl Container {
             index::remove_file(&mut self.root, path);
         }
 
+        // 没有命中时保持现有索引和 Footer 不变。
         if !paths.is_empty() {
             self.commit()?;
         }
@@ -685,6 +698,7 @@ impl Container {
     /// container.extract_matched("photos/**/*.jpg", "./output")?;
     /// ```
     pub fn extract_matched(&self, pattern: &str, out_dir: impl AsRef<Path>) -> Result<()> {
+        // 匹配结果仍使用容器内完整路径，导出时据此重建目录层级。
         let matched = index::match_files(&self.root, pattern)?;
         let out_dir = out_dir.as_ref();
 
@@ -715,26 +729,27 @@ impl Container {
         meta: &FileMeta,
     ) -> Result<age::stream::StreamReader<SliceReader<File>>> {
         let file = File::open(&self.path)?;
+        // SliceReader 把底层文件限制到元数据声明的 blob 区间。
         let slice = SliceReader::new(file, meta.blob_offset, meta.blob_len)?;
         let decryptor = age::Decryptor::new(slice)?;
         let reader = decryptor.decrypt(std::iter::once(&self.key_pair as &dyn age::Identity))?;
         Ok(reader)
     }
 
-    /// 提交当前目录树：把新的 Index + Footer **追加到文件末尾**并 fsync。
+    /// 提交当前目录树：把新的 Index 和 Footer 追加到文件末尾并同步到磁盘。
     ///
-    /// 追加式（不覆盖已提交数据）+ Footer 最后写 + fsync = 崩溃安全：崩溃只会在末尾
-    /// 留下未提交的垃圾（下次 open 时被恢复截断），**已提交的数据永不被破坏**。
-    /// 代价：旧的 Index/Footer 成为死空间，P6 的 compaction 回收。
+    /// Footer 最后写入并同步，作为本次提交点。若进程在写入期间崩溃，打开流程会忽略
+    /// 末尾未完成的数据并回退到上一个有效 Footer；旧 Index/Footer 则成为未回收空间。
     fn commit(&self) -> Result<()> {
+        // Index 先序列化再整体加密，Footer 中保存的是密文偏移和长度。
         let index_plain = serialize_index(&self.root)?;
         let index_cipher = encrypt_bytes(&self.key_pair.to_public(), &index_plain)?;
 
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        let index_offset = file.seek(SeekFrom::End(0))?; // 追加在末尾
+        let index_offset = file.seek(SeekFrom::End(0))?;
         file.write_all(&index_cipher)?;
         format::write_footer(&mut file, index_offset, index_cipher.len() as u64)?;
-        file.sync_all()?; // fsync：这是「提交点」
+        file.sync_all()?;
         Ok(())
     }
 
@@ -743,6 +758,7 @@ impl Container {
     /// # 返回
     /// **损坏文件的路径列表**（空 = 全部完好）。
     pub fn verify_all(&self) -> Vec<String> {
+        // read_file 同时执行 age 认证和 blake3 校验，任一失败都记为损坏。
         index::list_files(&self.root)
             .into_iter()
             .filter(|(path, _)| self.read_file(path).is_err())
@@ -873,10 +889,12 @@ fn collect_files(
 fn render_tree(dir: &Tree, prefix: &str, out: &mut String) {
     let count = dir.len();
     for (i, (name, node)) in dir.iter().enumerate() {
+        // 最后一个子节点使用空格续行，其余节点保留竖线连接后续层级。
         let is_last = i == count - 1;
         let branch = if is_last { "└── " } else { "├── " };
         let slash = if matches!(node, Node::Dir(_)) { "/" } else { "" };
         out.push_str(&format!("{prefix}{branch}{name}{slash}\n"));
+        // 目录递归渲染时，父级连字符决定子级缩进前缀。
         if let Node::Dir(children) = node {
             let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
             render_tree(children, &child_prefix, out);
@@ -884,17 +902,20 @@ fn render_tree(dir: &Tree, prefix: &str, out: &mut String) {
     }
 }
 
+/// 单文件容器读写、恢复与完整性校验的单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// 生成带进程号、原子计数器和标签的临时测试路径。
     fn temp_path(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("veil_test_{}_{n}_{tag}", std::process::id()))
     }
 
+    /// 返回测试统一使用的密码。
     fn pass() -> SecretString {
         SecretString::from("correct horse".to_owned())
     }
@@ -909,6 +930,7 @@ mod tests {
         index::list_files(c.root()).len()
     }
 
+    /// 验证空容器创建后能够重新打开。
     #[test]
     fn create_open_empty() {
         let path = temp_path("empty.veil");
@@ -918,6 +940,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证添加文件后能按原字节读回。
     #[test]
     fn add_read_roundtrip() {
         let path = temp_path("rt.veil");
@@ -934,6 +957,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证错误密码无法打开容器。
     #[test]
     fn wrong_passphrase_fails() {
         let path = temp_path("wp.veil");
@@ -942,6 +966,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证删除文件后目录树和读取接口都不再返回该文件。
     #[test]
     fn remove_then_missing() {
         let path = temp_path("rm.veil");
@@ -959,6 +984,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证读取不存在的文件会返回错误。
     #[test]
     fn read_missing_file_errors() {
         let path = temp_path("miss.veil");
@@ -967,6 +993,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证添加文件时根据扩展名写入 MIME。
     #[test]
     fn add_file_fills_mime() {
         let path = temp_path("mime.veil");
@@ -981,6 +1008,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证同一虚拟路径再次添加时会覆盖旧条目。
     #[test]
     fn add_file_overwrites_same_path() {
         let path = temp_path("overwrite.veil");
@@ -998,6 +1026,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证修改密码后只能使用新密码打开容器。
     #[test]
     fn change_password_works() {
         let path = temp_path("chpw.veil");
@@ -1012,6 +1041,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证重命名只改变虚拟路径并保留文件内容。
     #[test]
     fn rename_file_works() {
         let path = temp_path("rename.veil");
@@ -1030,6 +1060,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证按目录前缀导出时仅生成该子树的文件。
     #[test]
     fn extract_dir_subtree() {
         let path = temp_path("exdir.veil");
@@ -1048,6 +1079,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证递归添加目录时保留相对目录结构。
     #[test]
     fn add_dir_recursive() {
         let src = temp_path("srcdir");
@@ -1067,6 +1099,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证临时明文在守卫销毁后自动删除。
     #[test]
     fn extract_to_temp_and_auto_cleanup() {
         let path = temp_path("tmp.veil");
@@ -1085,6 +1118,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证随机范围读取与完整读取结果一致。
     #[test]
     fn read_range_random_access() {
         let path = temp_path("range.veil");
@@ -1099,6 +1133,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证打开容器时会截断崩溃遗留的未提交尾部。
     #[test]
     fn crash_recovery_truncates_garbage() {
         let path = temp_path("crash.veil");
@@ -1122,6 +1157,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证完整性检查能发现被破坏的 blob。
     #[test]
     fn verify_all_detects_corruption() {
         let path = temp_path("verify.veil");
@@ -1150,6 +1186,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证密文被篡改后 age 认证会拒绝解密。
     #[test]
     fn tamper_is_detected() {
         let path = temp_path("tamper.veil");

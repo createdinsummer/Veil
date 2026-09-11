@@ -5,6 +5,7 @@ use tempfile::TempDir;
 use veil_core::kdf;
 use veil_core::workspace_ops::WorkspaceManager;
 
+/// 验证工作区初始化、元数据读取和空文件列表。
 #[test]
 fn test_workspace_init_and_operations() {
     kdf::enable_fast_test_kdf();
@@ -33,6 +34,7 @@ fn test_workspace_init_and_operations() {
     println!("✓ 容器初始化成功");
 }
 
+/// 验证添加文件后可列出并解密导出原内容。
 #[test]
 fn test_add_and_extract_file() {
     kdf::enable_fast_test_kdf();
@@ -75,6 +77,7 @@ fn test_add_and_extract_file() {
     println!("✓ 文件添加和提取成功");
 }
 
+/// 验证错误密码无法读取工作区元数据。
 #[test]
 fn test_wrong_password() {
     kdf::enable_fast_test_kdf();
@@ -94,6 +97,7 @@ fn test_wrong_password() {
     println!("✓ 错误密码被正确拒绝");
 }
 
+/// 验证删除文件会移除密文和元数据条目。
 #[test]
 fn test_remove_file() {
     kdf::enable_fast_test_kdf();

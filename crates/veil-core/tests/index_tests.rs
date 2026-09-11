@@ -5,6 +5,7 @@
 use veil_core::index::{FileMeta, Tree, deserialize_index, serialize_index};
 use veil_core::index::{insert_file, remove_file, get_file, list_files, match_files};
 
+/// 构造指定大小的测试文件元数据。
 fn create_test_meta(size: u64) -> FileMeta {
     FileMeta {
         size,
@@ -16,6 +17,7 @@ fn create_test_meta(size: u64) -> FileMeta {
     }
 }
 
+/// 验证空目录树能够完成序列化往返。
 #[test]
 fn test_serialize_and_deserialize_empty_tree() {
     use std::collections::BTreeMap;
@@ -27,6 +29,7 @@ fn test_serialize_and_deserialize_empty_tree() {
     assert_eq!(tree.len(), deserialized.len());
 }
 
+/// 验证包含多级文件的目录树能够完成序列化往返。
 #[test]
 fn test_serialize_and_deserialize_with_files() {
     use std::collections::BTreeMap;
@@ -43,6 +46,7 @@ fn test_serialize_and_deserialize_with_files() {
     assert!(get_file(&deserialized, "dir/subdir/file3.txt").is_some());
 }
 
+/// 验证插入文件后可按完整路径查询。
 #[test]
 fn test_insert_and_get_file() {
     use std::collections::BTreeMap;
@@ -56,6 +60,7 @@ fn test_insert_and_get_file() {
     assert_eq!(retrieved.mime, Some("text/plain".to_string()));
 }
 
+/// 验证嵌套路径会创建对应的中间目录节点。
 #[test]
 fn test_insert_nested_files() {
     use std::collections::BTreeMap;
@@ -67,6 +72,7 @@ fn test_insert_nested_files() {
     assert!(get_file(&tree, "a/b/file.txt").is_none());
 }
 
+/// 验证删除文件会返回原元数据并移除节点。
 #[test]
 fn test_remove_file() {
     use std::collections::BTreeMap;
@@ -82,6 +88,7 @@ fn test_remove_file() {
     assert!(get_file(&tree, "test.txt").is_none());
 }
 
+/// 验证删除不存在的文件返回 `None`。
 #[test]
 fn test_remove_nonexistent_file() {
     use std::collections::BTreeMap;
@@ -91,6 +98,7 @@ fn test_remove_nonexistent_file() {
     assert!(removed.is_none());
 }
 
+/// 验证遍历结果包含所有文件的完整路径。
 #[test]
 fn test_list_files() {
     use std::collections::BTreeMap;
@@ -109,6 +117,7 @@ fn test_list_files() {
     assert_eq!(files[2].0, "file2.txt");
 }
 
+/// 验证单层通配符不匹配下级目录。
 #[test]
 fn test_match_files_with_wildcard() {
     use std::collections::BTreeMap;
@@ -127,6 +136,7 @@ fn test_match_files_with_wildcard() {
     assert_eq!(matches[1].0, "image2.png");
 }
 
+/// 验证目录限定模式只匹配指定目录下的文件。
 #[test]
 fn test_match_files_with_directory_pattern() {
     use std::collections::BTreeMap;
@@ -144,6 +154,7 @@ fn test_match_files_with_directory_pattern() {
     assert_eq!(matches[1].0, "photos/pic2.jpg");
 }
 
+/// 验证递归通配符跨目录匹配全部目标文件。
 #[test]
 fn test_match_files_recursive_wildcard() {
     use std::collections::BTreeMap;
@@ -157,6 +168,7 @@ fn test_match_files_recursive_wildcard() {
     assert_eq!(matches.len(), 3);
 }
 
+/// 验证同一路径再次插入会覆盖旧元数据。
 #[test]
 fn test_overwrite_existing_file() {
     use std::collections::BTreeMap;
@@ -169,6 +181,7 @@ fn test_overwrite_existing_file() {
     assert_eq!(meta.size, 200);
 }
 
+/// 验证空目录树查询任意路径均返回 `None`。
 #[test]
 fn test_get_file_from_empty_tree() {
     use std::collections::BTreeMap;
@@ -177,6 +190,7 @@ fn test_get_file_from_empty_tree() {
     assert!(get_file(&tree, "any.txt").is_none());
 }
 
+/// 验证空目录树遍历结果为空。
 #[test]
 fn test_list_files_empty_tree() {
     use std::collections::BTreeMap;

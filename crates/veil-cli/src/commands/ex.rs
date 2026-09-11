@@ -1,3 +1,5 @@
+//! `veil ex` 子命令：从工作区容器解密导出文件。
+
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
@@ -27,10 +29,11 @@ pub fn run(
     output: &str,
     password: Option<String>,
 ) -> Result<()> {
+    // 链接可同时指向工作区和容器身份，这里取实际工作区根目录。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    // 文件名是必需的
+    // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name =
         file_name.ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("ex.specify_path")))?;
 
@@ -41,7 +44,7 @@ pub fn run(
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 提取文件
+    // 输出路径由调用方决定，core 负责查找、解密和写入。
     let manager = WorkspaceManager::new(workspace_path);
     let output_path = Path::new(output);
 

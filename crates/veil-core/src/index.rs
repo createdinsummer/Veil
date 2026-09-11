@@ -1,6 +1,6 @@
-//! # index —— 目录树的数据模型与序列化（**嵌套树**）
+//! 容器目录树的数据模型与序列化。
 //!
-//! 容器的目录用嵌套树表示（对应 spec §3 的 Index）：
+//! 容器的目录使用嵌套树表示：
 //! - [`Node`]：一个节点，是文件（[`FileMeta`]）或目录（子节点 map）；
 //! - [`Tree`]：目录树的根 = 顶层「名字 → 节点」的 `BTreeMap`（按名字有序）；
 //! - **路径由节点在树中的位置隐含**，不再冗余存整条路径。
@@ -31,28 +31,37 @@ pub struct FileMeta {
     pub mtime: Option<i64>,
 }
 
-/// 目录树节点：文件（带元数据）或目录（子节点：名字 → 节点）。
+/// 目录树节点。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Node {
+    /// 文件及其 blob 定位、完整性和展示元数据。
     File(FileMeta),
+    /// 目录及其按名称排序的直接子节点。
     Dir(BTreeMap<String, Node>),
 }
 
 /// 目录树的根：顶层「名字 → 节点」。`BTreeMap` 保证按名字有序。
 pub type Tree = BTreeMap<String, Node>;
 
-/// 序列化整棵目录树（尚未加密）。
+/// 使用 postcard 序列化整棵目录树。
+///
+/// # 错误
+/// 树中的字段无法完成 postcard 编码时返回 [`crate::error::VeilError::Serialize`]。
 pub fn serialize_index(root: &Tree) -> Result<Vec<u8>> {
     Ok(postcard::to_stdvec(root)?)
 }
 
-/// 反序列化目录树。
+/// 从 postcard 字节反序列化目录树。
+///
+/// # 错误
+/// 字节不足、格式无效或字段类型不匹配时返回 [`crate::error::VeilError::Serialize`]。
 pub fn deserialize_index(bytes: &[u8]) -> Result<Tree> {
     Ok(postcard::from_bytes::<Tree>(bytes)?)
 }
 
 /// 把虚拟路径拆成非空段（"a//b/" → ["a","b"]）。
 fn split_path(path: &str) -> Vec<&str> {
+    // 连续分隔符和首尾斜杠不会产生空节点，统一按非空路径段处理。
     path.split('/').filter(|s| !s.is_empty()).collect()
 }
 
@@ -66,6 +75,7 @@ pub fn insert_file(root: &mut Tree, path: &str, meta: FileMeta) {
     };
 
     let mut cur = root;
+    // 中间路径段必须对应目录；若当前节点是文件则替换为目录。
     for part in dirs {
         let entry = cur
             .entry((*part).to_owned())
@@ -78,7 +88,8 @@ pub fn insert_file(root: &mut Tree, path: &str, meta: FileMeta) {
             Node::File(_) => unreachable!(),
         };
     }
-    cur.insert((*last).to_owned(), Node::File(meta)); // BTreeMap::insert 天然覆盖
+    // 最后一个路径段写为文件，BTreeMap::insert 负责覆盖旧节点。
+    cur.insert((*last).to_owned(), Node::File(meta));
 }
 
 /// 删除一个文件，返回它的元数据（顺带清理变空的父目录）。找不到 → `None`。
@@ -86,10 +97,11 @@ pub fn remove_file(root: &mut Tree, path: &str) -> Option<FileMeta> {
     remove_recursive(root, &split_path(path))
 }
 
+/// 递归删除叶子文件；删除后如父目录为空，则由调用层一并清理。
 fn remove_recursive(dir: &mut Tree, parts: &[&str]) -> Option<FileMeta> {
     let (first, rest) = parts.split_first()?;
     if rest.is_empty() {
-        // 叶子：必须是文件才删
+        // 只有叶子节点是文件时才删除；若同名节点为目录则放回原处。
         match dir.remove(*first) {
             Some(Node::File(meta)) => Some(meta),
             Some(other) => {
@@ -99,11 +111,12 @@ fn remove_recursive(dir: &mut Tree, parts: &[&str]) -> Option<FileMeta> {
             None => None,
         }
     } else {
+        // 非叶子路径继续向下递归，失败时保留整个子树不动。
         let removed = match dir.get_mut(*first) {
             Some(Node::Dir(children)) => remove_recursive(children, rest),
             _ => None,
         };
-        // 子目录空了就删掉
+        // 删除后若父目录已经没有任何节点，则顺手清理空目录。
         if let Some(Node::Dir(children)) = dir.get(*first)
             && children.is_empty()
         {
@@ -120,6 +133,7 @@ pub fn get_file<'a>(root: &'a Tree, path: &str) -> Option<&'a FileMeta> {
         return None;
     }
     let mut cur = root;
+    // 每层都要求“中间是目录、最后是文件”，任何类型不匹配都视为不存在。
     for (i, part) in parts.iter().enumerate() {
         let last = i == parts.len() - 1;
         match cur.get(*part)? {
@@ -152,17 +166,17 @@ pub fn list_files(root: &Tree) -> Vec<(String, FileMeta)> {
 pub fn match_files(root: &Tree, pattern: &str) -> Result<Vec<(String, FileMeta)>> {
     use glob::{Pattern, MatchOptions};
 
-    // 编译通配符模式
+    // 先验证模式，避免无效 glob 进入逐文件匹配阶段。
     let glob_pattern = Pattern::new(pattern)
         .map_err(|e| crate::error::VeilError::Format(format!("无效的通配符模式: {}", e)))?;
 
-    // 配置匹配选项：* 不匹配 /
+    // 要求 * 不跨过 /，只有 ** 能递归匹配目录。
     let options = MatchOptions {
         require_literal_separator: true, // * 不匹配 /，只有 ** 才能跨目录
         ..Default::default()
     };
 
-    // 获取所有文件并过滤
+    // 目录树没有反向索引，因此先展开完整路径，再统一做模式过滤。
     let all_files = list_files(root);
     let matched: Vec<_> = all_files
         .into_iter()
@@ -172,7 +186,9 @@ pub fn match_files(root: &Tree, pattern: &str) -> Result<Vec<(String, FileMeta)>
     Ok(matched)
 }
 
+/// 深度优先收集文件，并将当前层级前缀拼成完整虚拟路径。
 fn collect(dir: &Tree, prefix: &str, out: &mut Vec<(String, FileMeta)>) {
+    // 深度优先遍历，prefix 保存从根到当前目录的已拼接路径。
     for (name, node) in dir {
         let path = if prefix.is_empty() {
             name.clone()
@@ -186,10 +202,12 @@ fn collect(dir: &Tree, prefix: &str, out: &mut Vec<(String, FileMeta)>) {
     }
 }
 
+/// 目录树插入、删除、遍历和通配符匹配的单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 构造只关心大小字段的测试文件元数据。
     fn meta(size: u64) -> FileMeta {
         FileMeta {
             size,
@@ -201,6 +219,7 @@ mod tests {
         }
     }
 
+    /// 验证文件插入、覆盖、查找、删除和空目录清理。
     #[test]
     fn insert_get_remove() {
         let mut root = Tree::new();
@@ -227,6 +246,7 @@ mod tests {
         assert!(!files.iter().any(|p| p.contains("c.txt")));
     }
 
+    /// 验证目录树序列化后反序列化保持相等。
     #[test]
     fn serialize_roundtrip() {
         let mut root = Tree::new();
@@ -238,6 +258,7 @@ mod tests {
         assert_eq!(back, root);
     }
 
+    /// 验证单层与递归通配符模式的文件匹配结果。
     #[test]
     fn match_files_wildcard() {
         let mut root = Tree::new();

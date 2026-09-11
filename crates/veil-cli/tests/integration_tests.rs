@@ -1,9 +1,12 @@
+//! 主 CLI 参数、帮助、链接和便携工作区集成测试。
+
 mod common;
 
 use assert_cmd::Command;
 use common::TestEnv;
 use predicates::prelude::*;
 
+/// 验证顶层帮助包含全部工作区命令。
 #[test]
 fn help_lists_workspace_model_commands() {
     Command::cargo_bin("veil")
@@ -19,6 +22,7 @@ fn help_lists_workspace_model_commands() {
         .stdout(predicate::str::contains("help"));
 }
 
+/// 验证版本输出与 workspace 发布版本一致。
 #[test]
 fn version_matches_workspace_release() {
     Command::cargo_bin("veil")
@@ -29,12 +33,14 @@ fn version_matches_workspace_release() {
         .stdout(predicate::str::contains("2.0.0"));
 }
 
+/// 验证初始化可使用自定义链接路径。
 #[test]
 fn init_accepts_custom_link_path() {
     let env = TestEnv::new("test-password");
     let custom_link = env.work.path().join("project/photos.veil-link");
     std::fs::create_dir_all(custom_link.parent().unwrap()).unwrap();
 
+    // 从主链接复制出第二个链接，再通过第二个链接写入共享工作区。
     env.command()
         .args([
             "init",
@@ -55,6 +61,7 @@ fn init_accepts_custom_link_path() {
         .success();
 }
 
+/// 验证多个链接可以指向同一工作区并共享内容。
 #[test]
 fn multiple_links_can_target_the_same_workspace() {
     let env = TestEnv::new("test-password");
@@ -84,6 +91,7 @@ fn multiple_links_can_target_the_same_workspace() {
         .stdout(predicate::str::contains("shared.txt"));
 }
 
+/// 验证主 CLI 支持创建专属工作区容器。
 #[test]
 fn dedicated_workspace_init_is_available_from_main_cli() {
     let env = TestEnv::new("test-password");
@@ -105,6 +113,7 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
         .success()
         .stdout(predicate::str::contains("创建容器成功"));
 
+    // 专属模式下列表项与 .veil-meta 都应直接位于指定工作区路径。
     assert!(link.exists());
     assert!(workspace.join(".veil-meta").exists());
 
@@ -115,6 +124,7 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
         .success();
 }
 
+/// 验证同名容器由不同 `veil_id` 区分且内容互不干扰。
 #[test]
 fn duplicate_container_names_are_distinguished_by_veil_id() {
     let env = TestEnv::new("test-password");
@@ -148,6 +158,7 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
         .assert()
         .success();
 
+    // 两个容器展示名相同，只有链接中持久化的 veil_id 能区分它们。
     let first = std::fs::read_to_string(&first_link).unwrap();
     let second = std::fs::read_to_string(&second_link).unwrap();
     let first_id = first
@@ -178,6 +189,7 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
         .stdout(predicate::str::contains("(空)"));
 }
 
+/// 验证便携模式把链接和工作区放在同一路径下。
 #[test]
 fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
     let env = TestEnv::new("test-password");
@@ -198,6 +210,7 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
         .success()
         .stdout(predicate::str::contains("工作区将创建在"));
 
+    // 便携模式的默认工作区根应位于链接所在目录内部。
     let workspace_root = portable_dir.join(".veil/workspaces/default");
     let container_dirs: Vec<_> = std::fs::read_dir(&workspace_root)
         .unwrap()
@@ -217,6 +230,7 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
     assert!(!link_content.contains("mount_path = "));
 }
 
+/// 验证文件类型帮助在英文环境下可用。
 #[test]
 fn help_files_is_available_in_english() {
     Command::cargo_bin("veil")

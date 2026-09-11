@@ -1,42 +1,35 @@
-/// 输出编码自适应模块
-///
-/// 核心思想：
-/// 1. 自动检测当前显示环境的编码（跨平台）
-/// 2. 提供 UTF-8 到目标编码的转换函数（统一 API）
-/// 3. 不负责实际输出，只提供编码转换能力
-///
-/// 适用场景：
-/// - CLI 控制台输出
-/// - TUI 文本界面
-/// - GUI 窗口显示
-/// - 日志文件输出
-///
-/// 设计原则：
-/// - 跨平台统一 API
-/// - 程序内部统一使用 UTF-8
-/// - 文件内容保持原始字节，不转码
-/// - 只在需要显示给用户时才进行编码转换
+//! 终端显示文本的编码适配。
+//!
+//! 程序内部统一使用 UTF-8；本模块只在向当前终端显示文本时转换编码。Windows 下根据
+//! 控制台输出代码页转换，Unix 平台直接返回 UTF-8 字节。模块不负责写出，也不转换
+//! 文件内容。
 #[cfg(target_os = "windows")]
 use std::io;
 
-/// 支持的编码类型
+/// 当前显示环境可识别的文本编码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayEncoding {
+    /// UTF-8。
     Utf8,
     #[cfg(target_os = "windows")]
+    /// GBK。
     Gbk,
     #[cfg(target_os = "windows")]
+    /// GB2312。
     Gb2312,
     #[cfg(target_os = "windows")]
+    /// Shift-JIS。
     ShiftJis,
     #[cfg(target_os = "windows")]
+    /// Big5。
     Big5,
     #[cfg(target_os = "windows")]
+    /// 未单独映射的 Windows 代码页。
     Unknown(u32),
 }
 
 impl DisplayEncoding {
-    /// 从代码页 ID 创建编码类型
+    /// 将 Windows 控制台代码页 ID 映射为已知编码。
     #[cfg(target_os = "windows")]
     fn from_code_page(cp: u32) -> Self {
         match cp {
@@ -50,7 +43,7 @@ impl DisplayEncoding {
     }
 }
 
-/// 获取当前显示环境的输出编码（跨平台）
+/// 检测当前显示环境的输出编码。
 ///
 /// - Windows: 通过 GetConsoleOutputCP() 检测
 /// - Unix/Linux/macOS: 默认 UTF-8（现代系统标准）
@@ -58,11 +51,15 @@ fn get_display_encoding() -> DisplayEncoding {
     get_display_encoding_impl()
 }
 
-// Windows 实现
+/// 在 Windows 上读取当前控制台输出代码页。
 #[cfg(target_os = "windows")]
 fn get_display_encoding_impl() -> DisplayEncoding {
+    // SAFETY: `GetConsoleOutputCP` 不接收指针，只读取当前进程控制台的整型代码页；
+    // 返回值由本函数立即按已知映射处理。
     unsafe {
+        // 声明当前进程所需的 Windows 控制台 API。
         unsafe extern "system" {
+            /// Windows API：读取当前控制台输出代码页。
             fn GetConsoleOutputCP() -> u32;
         }
         let cp = GetConsoleOutputCP();
@@ -70,61 +67,56 @@ fn get_display_encoding_impl() -> DisplayEncoding {
     }
 }
 
-// Unix/Linux/macOS 实现
+/// 在非 Windows 平台返回 UTF-8。
 #[cfg(not(target_os = "windows"))]
 fn get_display_encoding_impl() -> DisplayEncoding {
-    // Unix 系统现代默认都是 UTF-8
-    // 如果需要更精确的检测，可以读取 LANG 环境变量
     DisplayEncoding::Utf8
 }
 
-/// 将 UTF-8 字符串编码为显示环境可识别的字节序列（跨平台）
+/// 将 UTF-8 字符串编码为当前显示环境可识别的字节序列。
 ///
-/// 这是核心转换函数，适用于所有需要向用户显示文本的场景。
+/// UTF-8 环境直接复制原字节；Windows 非 UTF-8 代码页则先转换为 UTF-16，再转为目标
+/// 代码页。
 ///
 /// # 参数
 /// - `utf8_str`: 程序内部的 UTF-8 字符串
 ///
 /// # 返回
-/// - `Vec<u8>`: 目标编码的字节序列
+/// 返回可直接写入标准输出的目标编码字节序列。
 ///
 /// # 示例
-/// ```text
-/// // CLI 输出
+/// ```no_run
+/// # use std::io::Write;
+/// # use veil_cli::output_encoding::encode_for_display;
+/// # fn main() -> std::io::Result<()> {
 /// let bytes = encode_for_display("请输入密码: ");
 /// std::io::stdout().write_all(&bytes)?;
-///
-/// // TUI 渲染
-/// let bytes = encode_for_display("文件列表");
-/// tui.render_text(&bytes);
-///
-/// // GUI 显示
-/// let bytes = encode_for_display("保存成功");
-/// gui.set_label(&bytes);
+/// # Ok(())
+/// # }
 /// ```
 pub fn encode_for_display(utf8_str: &str) -> Vec<u8> {
     let encoding = get_display_encoding();
 
-    // 如果是 UTF-8，直接返回
     if matches!(encoding, DisplayEncoding::Utf8) {
         return utf8_str.as_bytes().to_vec();
     }
 
-    // 否则进行编码转换
     convert_utf8_to_encoding(utf8_str, encoding)
 }
 
-// ==================== 平台相关实现（内部函数） ====================
-
-// Windows: 使用 Windows API 进行编码转换
+/// 在 Windows 上通过系统 API 将 UTF-8 转为目标代码页。
+///
+/// 任一次转换调用失败时回退为原始 UTF-8 字节，避免终端输出流程中断。
 #[cfg(target_os = "windows")]
 fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8> {
     use winapi::um::stringapiset::{MultiByteToWideChar, WideCharToMultiByte};
     use winapi::um::winnls::CP_UTF8;
 
+    // SAFETY: 两次 API 调用均先查询长度，再使用该长度分配缓冲区；传入的指针和长度
+    // 与实际分配一致，且字符串字节在调用期间保持有效。
     unsafe {
-        // 步骤 1: UTF-8 → UTF-16
         let utf8_bytes = utf8_str.as_bytes();
+        // 先查询 UTF-16 长度，再按该长度分配输出缓冲区。
         let wide_len = MultiByteToWideChar(
             CP_UTF8,
             0,
@@ -139,6 +131,7 @@ fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8
         }
 
         let mut wide_buf = vec![0u16; wide_len as usize];
+        // 第二次调用把 UTF-8 字节实际转换为 UTF-16。
         MultiByteToWideChar(
             CP_UTF8,
             0,
@@ -148,7 +141,6 @@ fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8
             wide_len,
         );
 
-        // 步骤 2: UTF-16 → 目标编码
         let target_cp = match encoding {
             DisplayEncoding::Utf8 => CP_UTF8,
             DisplayEncoding::Gbk => 936,
@@ -158,6 +150,7 @@ fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8
             DisplayEncoding::Unknown(cp) => cp,
         };
 
+        // 再查询目标代码页所需字节数，避免固定缓冲区截断。
         let mb_len = WideCharToMultiByte(
             target_cp,
             0,
@@ -174,6 +167,7 @@ fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8
         }
 
         let mut mb_buf = vec![0u8; mb_len as usize];
+        // 最后把 UTF-16 转为 Windows 控制台所需的代码页字节。
         WideCharToMultiByte(
             target_cp,
             0,
@@ -189,16 +183,18 @@ fn convert_utf8_to_encoding(utf8_str: &str, encoding: DisplayEncoding) -> Vec<u8
     }
 }
 
-// Unix/Linux/macOS: UTF-8 是默认编码，直接返回
+/// 在非 Windows 平台直接返回 UTF-8 字节。
 #[cfg(not(target_os = "windows"))]
 fn convert_utf8_to_encoding(utf8_str: &str, _encoding: DisplayEncoding) -> Vec<u8> {
     utf8_str.as_bytes().to_vec()
 }
 
+/// 显示编码检测和转换的单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 验证当前平台能返回受支持的显示编码。
     #[test]
     fn test_encoding_detection() {
         let encoding = get_display_encoding();
@@ -215,6 +211,7 @@ mod tests {
         assert_eq!(encoding, DisplayEncoding::Utf8);
     }
 
+    /// 验证编码入口能够产生非空输出。
     #[test]
     fn test_utf8_conversion() {
         let test_str = "测试中文";

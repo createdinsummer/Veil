@@ -13,6 +13,7 @@ struct TempDir {
 }
 
 impl TempDir {
+    /// 创建并清空指定名称的临时目录，同时启用低开销测试 KDF。
     fn new(name: &str) -> Self {
         veil_core::kdf::enable_fast_test_kdf();
         let path = std::env::temp_dir().join(format!("veil_test_{}", name));
@@ -21,17 +22,20 @@ impl TempDir {
         Self { path }
     }
 
+    /// 返回临时目录路径。
     fn path(&self) -> &PathBuf {
         &self.path
     }
 }
 
 impl Drop for TempDir {
+    /// 删除临时目录，清理失败时忽略错误。
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
 
+/// 验证创建容器后重新打开仍保留 CLI 版本。
 #[test]
 fn test_create_and_open_container() {
     let temp_dir = TempDir::new("create_open");
@@ -48,6 +52,7 @@ fn test_create_and_open_container() {
     assert_eq!(container.cli_version(), "test/1.0.0");
 }
 
+/// 验证错误密码会返回解密错误。
 #[test]
 fn test_open_with_wrong_password() {
     let temp_dir = TempDir::new("wrong_password");
@@ -64,6 +69,7 @@ fn test_open_with_wrong_password() {
     }
 }
 
+/// 验证添加文件后能读回相同内容。
 #[test]
 fn test_add_and_read_file() {
     let temp_dir = TempDir::new("add_read");
@@ -80,6 +86,7 @@ fn test_add_and_read_file() {
     assert_eq!(read_content, content);
 }
 
+/// 验证多个层级文件均可写入并读取。
 #[test]
 fn test_add_multiple_files() {
     let temp_dir = TempDir::new("multiple_files");
@@ -102,6 +109,7 @@ fn test_add_multiple_files() {
     assert_eq!(meta.size, 9);
 }
 
+/// 验证删除文件会移除目录树条目，重复删除会失败。
 #[test]
 fn test_remove_file() {
     let temp_dir = TempDir::new("remove_file");
@@ -121,6 +129,7 @@ fn test_remove_file() {
     assert!(result.is_err());
 }
 
+/// 验证重命名后旧路径不存在且新路径内容不变。
 #[test]
 fn test_rename_file() {
     let temp_dir = TempDir::new("rename_file");
@@ -138,6 +147,7 @@ fn test_rename_file() {
     assert_eq!(container.read_file("new.txt").unwrap(), b"content");
 }
 
+/// 验证修改密码后旧密码失效、新密码可读取原文件。
 #[test]
 fn test_change_password() {
     let temp_dir = TempDir::new("change_password");
@@ -161,6 +171,7 @@ fn test_change_password() {
     assert_eq!(container.read_file("test.txt").unwrap(), b"content");
 }
 
+/// 验证通配符在顶层、指定目录和递归匹配场景下的结果。
 #[test]
 fn test_find_files_with_wildcard() {
     let temp_dir = TempDir::new("find_files");
@@ -189,6 +200,7 @@ fn test_find_files_with_wildcard() {
     assert_eq!(files, vec!["dir/image3.png", "image1.png", "image2.png"]);
 }
 
+/// 验证按路径导出文件并保持原始字节。
 #[test]
 fn test_extract_file() {
     let temp_dir = TempDir::new("extract_file");
@@ -208,6 +220,7 @@ fn test_extract_file() {
     assert_eq!(content, b"extracted content");
 }
 
+/// 验证跨块导出时进度回调单调递增且最终完成。
 #[test]
 fn test_extract_file_with_progress() {
     let temp_dir = TempDir::new("extract_progress");
@@ -236,6 +249,7 @@ fn test_extract_file_with_progress() {
     assert_eq!(fs::read(&extract_path).unwrap(), content);
 }
 
+/// 验证重新打开容器后已提交文件仍然存在。
 #[test]
 fn test_persistence_after_reopen() {
     let temp_dir = TempDir::new("persistence");
@@ -257,6 +271,7 @@ fn test_persistence_after_reopen() {
     }
 }
 
+/// 验证读取不存在的文件返回格式错误。
 #[test]
 fn test_read_nonexistent_file() {
     let temp_dir = TempDir::new("nonexistent");

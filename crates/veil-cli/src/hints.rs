@@ -1,30 +1,47 @@
+//! 一次性操作提示的判定与渲染。
+//!
+//! 提示级别可由 `VEIL_HINTS` 临时覆盖，否则读取全局配置。首次创建、打包和解包提示
+//! 会把“已展示”状态写回配置；链接恢复和文件类型歧义提示属于条件提示，不记录次数。
+
 use crate::i18n;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::config::{GlobalConfig, HintsLevel};
 
+/// 当前支持的提示场景。
 #[derive(Debug, Clone, Copy)]
 enum HintType {
+    /// 首次创建容器后的使用说明。
     FirstInit,
+    /// 首次打包后的文件用途说明。
     FirstPack,
+    /// 首次解包后的文件映射说明。
     FirstUnpack,
+    /// 链接缺失并完成恢复后的说明。
     LinkRecovery,
+    /// 同名链接和打包文件同时存在时的说明。
     FileTypeAmbiguity,
 }
 
 /// 当前生效的提示级别：`VEIL_HINTS` 环境变量优先，其次读取全局配置。
 pub fn current_level() -> HintsLevel {
+    // 环境变量是临时覆盖层，只有合法值才允许覆盖持久化配置。
     if let Ok(value) = std::env::var("VEIL_HINTS") {
         if let Some(level) = HintsLevel::parse(&value) {
             return level;
         }
     }
 
+    // 配置读取失败时回退到完整提示，保证新环境仍能获得帮助信息。
     GlobalConfig::load()
         .map(|config| config.preferences.hints_level)
         .unwrap_or(HintsLevel::Full)
 }
 
+/// 解析并持久化提示级别。
+///
+/// # 错误
+/// 级别无效、全局配置加载失败或保存失败时返回错误。
 pub fn set_hint_level(level: &str) -> anyhow::Result<()> {
     let parsed = HintsLevel::parse(level)
         .ok_or_else(|| anyhow::anyhow!("{}", i18n::t("config.invalid_level")))?;
@@ -34,7 +51,9 @@ pub fn set_hint_level(level: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 判断指定提示在当前级别下是否允许展示。
 fn allowed(hint_type: HintType, level: HintsLevel) -> bool {
+    // Brief 只保留解包和异常恢复类关键提示。
     match level {
         HintsLevel::Off => false,
         HintsLevel::Brief => matches!(
@@ -45,6 +64,9 @@ fn allowed(hint_type: HintType, level: HintsLevel) -> bool {
     }
 }
 
+/// 对需要记录状态的提示执行级别检查和一次性判定。
+///
+/// 返回 `true` 时立即把对应展示标记写回配置；配置读写失败时回退到仅按级别判断。
 fn should_show_once(hint_type: HintType) -> bool {
     let mut config = match GlobalConfig::load() {
         Ok(config) => config,
@@ -55,6 +77,7 @@ fn should_show_once(hint_type: HintType) -> bool {
         return false;
     }
 
+    // 只有首次使用类提示需要写回“已展示”状态，条件提示每次都允许出现。
     let already_shown = match hint_type {
         HintType::FirstInit => config.system.init_hint_shown,
         HintType::FirstPack => config.system.pack_hint_shown,
@@ -66,6 +89,7 @@ fn should_show_once(hint_type: HintType) -> bool {
         return false;
     }
 
+    // 标记成功后才尝试保存；保存失败不会阻止本次提示展示。
     match hint_type {
         HintType::FirstInit => config.system.init_hint_shown = true,
         HintType::FirstPack => config.system.pack_hint_shown = true,
@@ -77,11 +101,13 @@ fn should_show_once(hint_type: HintType) -> bool {
     true
 }
 
+/// 展示首次创建容器后的链接、工作区和打包/解包说明。
 pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_path: &Path) {
     if !allowed(HintType::FirstInit, current_level()) {
         return;
     }
 
+    // 优先使用实际链接文件名，异常路径才回退到容器名。
     let link_name = link_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -108,6 +134,7 @@ pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_pa
     println!();
 }
 
+/// 展示首次打包结果中链接与 `.veil` 文件的关系。
 pub fn show_pack_explain_hint(
     container_name: &str,
     link_path: Option<&Path>,
@@ -118,6 +145,7 @@ pub fn show_pack_explain_hint(
         return;
     }
 
+    // 打包可能从链接路径或容器名触发，两种来源都要正确展示。
     let link_display = link_path
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| format!("{}.veil-link", container_name));
@@ -141,11 +169,13 @@ pub fn show_pack_explain_hint(
     );
 }
 
+/// 展示首次解包后链接、文件数量和容器名称的对应关系。
 pub fn show_unpack_explain_hint(container_name: &str, link_path: &Path, file_count: usize) {
     if !should_show_once(HintType::FirstUnpack) {
         return;
     }
 
+    // 解包提示重点说明新链接与包文件的对应关系。
     let link_name = link_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -172,6 +202,7 @@ pub fn show_unpack_explain_hint(container_name: &str, link_path: &Path, file_cou
     );
 }
 
+/// 提示指定链接已通过配置缓存恢复。
 pub fn show_link_recovery_hint(link_path: &Path) {
     if !allowed(HintType::LinkRecovery, current_level()) {
         return;
@@ -187,6 +218,7 @@ pub fn show_link_recovery_hint(link_path: &Path) {
     );
 }
 
+/// 提示同名链接与打包文件同时存在，并说明当前采用链接。
 pub fn show_file_type_ambiguity_hint(link_path: &Path, container_path: &Path) {
     if !allowed(HintType::FileTypeAmbiguity, current_level()) {
         return;
@@ -204,10 +236,12 @@ pub fn show_file_type_ambiguity_hint(link_path: &Path, container_path: &Path) {
     );
 }
 
+/// 输出文件类型帮助主题的正文。
 pub fn show_files_help() {
     println!("\n{}", i18n::t("help.files.content"));
 }
 
+/// 使用统一边框输出标题和多行提示，并在末尾显示关闭提示的方法。
 pub fn print_hint_box(title: &str, lines: &[String]) {
     println!();
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black());

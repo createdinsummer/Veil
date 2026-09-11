@@ -1,26 +1,34 @@
+//! `veil pack` 子命令：把工作区打包为单文件 `.veil`。
+
 use anyhow::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::container_format::ContainerPacker;
 use veil_core::workspace_ops::WorkspaceManager;
 
-/// 打包工作区到 .veil 容器文件
+/// 将容器元数据和所有加密文件封装为可分享的 `.veil` 文件。
+///
+/// 输出已存在时拒绝覆盖；未指定路径时使用 `<容器名>.vault.veil`。
+///
+/// # 错误
+/// 容器解析、输出路径检查、密码读取、元数据读取或打包写入失败时返回错误。
 pub fn run_workspace(
     container_name: &str,
     output_path: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
+    // 打包目标是解析后的工作区，而不是输入链接文件。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    // 确定输出路径
+    // 未指定输出时沿用命令约定的 <名称>.vault.veil。
     let output = if let Some(path) = output_path {
         path.to_string()
     } else {
         format!("{}.vault.veil", resolved.name)
     };
 
-    // 检查输出文件是否已存在
+    // 打包文件整体覆写，因此必须显式拒绝已存在的输出路径。
     if Path::new(&output).exists() {
         anyhow::bail!("{}", crate::i18n::t1("pack.output_exists", "path", &output));
     }
@@ -32,19 +40,17 @@ pub fn run_workspace(
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 读取元数据
+    // 先完成密码验证和清单读取，再读取 .veil-meta 的完整字节。
     let manager = WorkspaceManager::new(workspace_path.clone());
     let metadata = manager.read_meta(password)?;
 
-    // 读取加密的元数据（完整的 TLV 格式，包含头部）
     let meta_path = workspace_path.join(".veil-meta");
     let meta_bytes = std::fs::read(&meta_path)?;
 
-    // 打包
+    // packer 只负责布局，不重新加密元数据或文件内容。
     let packer = ContainerPacker::new(&output);
     packer.pack(&workspace_path, &metadata, &meta_bytes)?;
 
-    // 计算总大小
     let output_size = std::fs::metadata(&output)?.len();
 
     println!(
@@ -63,7 +69,6 @@ pub fn run_workspace(
         .bright_black()
     );
 
-    // 显示打包解释提示
     crate::hints::show_pack_explain_hint(
         &resolved.name,
         resolved.link_path.as_deref(),
@@ -74,7 +79,7 @@ pub fn run_workspace(
     Ok(())
 }
 
-/// 格式化文件大小
+/// 将字节数格式化为 B、KB、MB 或 GB，并保留两位小数。
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

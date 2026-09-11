@@ -1,8 +1,11 @@
+//! 交互式 shell 子命令的端到端测试。
+
 mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
 
+/// 验证 shell 的帮助输出和退出命令。
 #[test]
 fn shell_help_and_exit_work() {
     let env = TestEnv::new("test-password");
@@ -22,6 +25,7 @@ fn shell_help_and_exit_work() {
         .stdout(predicate::str::contains("退出 shell"));
 }
 
+/// 验证 shell 内可以添加文件并列出结果。
 #[test]
 fn shell_add_and_list_work() {
     let env = TestEnv::new("test-password");
@@ -37,6 +41,7 @@ fn shell_add_and_list_work() {
         .stdout(predicate::str::contains("note.txt"));
 }
 
+/// 验证 shell 删除命令会更新容器内容。
 #[test]
 fn shell_remove_updates_workspace() {
     let env = TestEnv::new("test-password");
@@ -57,6 +62,7 @@ fn shell_remove_updates_workspace() {
         .stdout(predicate::str::contains("(空)"));
 }
 
+/// 验证 shell 导出命令与原始内容一致。
 #[test]
 fn shell_export_round_trip() {
     let env = TestEnv::new("test-password");
@@ -79,6 +85,7 @@ fn shell_export_round_trip() {
     assert_eq!(std::fs::read_to_string(output).unwrap(), "export me");
 }
 
+/// 验证未知命令只输出提示，不会提前退出 shell。
 #[test]
 fn shell_reports_unknown_commands_without_exiting() {
     let env = TestEnv::new("test-password");

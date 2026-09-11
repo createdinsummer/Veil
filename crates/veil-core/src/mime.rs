@@ -1,30 +1,27 @@
-//! # mime —— 按文件扩展名猜测 MIME 类型
+//! 按文件扩展名猜测 MIME 类型。
 //!
-//! 给 [`crate::index::FsNode::mime`] 赋值，供查看器（GUI）按类型分发：
-//! `image/*` 用图片查看器、`video/*`/`audio/*` 用播放器等。
+//! 结果用于填充 [`crate::index::FileMeta::mime`]，供上层按内容类型选择处理方式。
 //!
-//! 这是**纯扩展名映射**，不读文件内容；覆盖常见媒体/文档类型，未知返回 `None`
-//! （GUI 据此走「释放到本地由用户处理」的兜底）。将来要更准可换成读魔数嗅探。
+//! 此处只做静态扩展名映射，不读取文件内容，因此不会产生 I/O 开销，也无法识别
+//! 缺少扩展名或扩展名与实际内容不符的文件；未知类型返回 `None`。
 
 use std::path::Path;
 
-/// 按扩展名猜测 MIME 类型（扩展名大小写不敏感）。未知返回 `None`。
+/// 按扩展名猜测 MIME 类型，扩展名比较不区分大小写。
 ///
 /// # 参数
-/// - `path`: 文件路径或文件名（只用其扩展名）
+/// - `path`：文件路径或文件名；只有最后一个扩展名参与判断。
 ///
 /// # 返回
-/// - `Some(mime)`：识别到的 MIME 类型，如 `"image/jpeg"`
-/// - `None`：无扩展名、扩展名非法或未知类型
+/// 识别成功时返回标准 MIME 字符串；无扩展名、扩展名非 UTF-8 或未知时返回 `None`。
 pub fn guess_mime(path: &str) -> Option<String> {
-    // 取扩展名并转小写；没有扩展名 → None（`?` 提前返回）
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())?
         .to_ascii_lowercase();
 
     let mime = match ext.as_str() {
-        // 图片
+        // 图片格式用于上层图片查看器分发。
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
@@ -33,33 +30,34 @@ pub fn guess_mime(path: &str) -> Option<String> {
         "tif" | "tiff" => "image/tiff",
         "svg" => "image/svg+xml",
         "heic" => "image/heic",
-        // 视频
+        // 视频格式保留常见容器扩展名到标准 MIME 的映射。
         "mp4" | "m4v" => "video/mp4",
         "mkv" => "video/x-matroska",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "avi" => "video/x-msvideo",
-        // 音频
+        // 音频格式用于系统播放器或音频组件分发。
         "mp3" => "audio/mpeg",
         "flac" => "audio/flac",
         "wav" => "audio/wav",
         "aac" => "audio/aac",
         "ogg" => "audio/ogg",
         "m4a" => "audio/mp4",
-        // 文档
+        // 文档类型只做基础识别，不尝试解析文件内容。
         "pdf" => "application/pdf",
         "txt" => "text/plain",
         "md" => "text/markdown",
-        // 未知扩展名
         _ => return None,
     };
     Some(mime.to_owned())
 }
 
+/// MIME 扩展名映射的单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 验证常见扩展名的大小写和多级路径处理。
     #[test]
     fn guesses_common_types() {
         // 大小写不敏感、能从多级路径取扩展名

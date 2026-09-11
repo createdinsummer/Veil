@@ -1,20 +1,25 @@
+//! `veil free` 子命令：以简化树状视图展示容器内容。
+
 use anyhow::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 
-/// 树状显示容器内容
+/// 按原始相对路径排序并缩进展示文件，同时输出文件和总大小统计。
+///
+/// # 错误
+/// 容器解析、密码读取或元数据解密失败时返回错误。
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+    // 解析链接后只保留工作区路径，展示名称仍以元数据为准确认。
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    // 提示输入密码
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 读取元数据
+    // 解密清单后即可完整展示树状内容，无需读取文件密文本体。
     let manager = WorkspaceManager::new(workspace_path);
     let metadata = manager.read_meta(password)?;
 
@@ -26,7 +31,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
             format!("  {}", crate::i18n::t("common.empty")).bright_black()
         );
     } else {
-        // 简单列表显示，带缩进表示层级
+        // 先按完整虚拟路径排序，让同目录文件在输出中保持相邻。
         let mut sorted_files = metadata.files.clone();
         sorted_files.sort_by(|a, b| a.original_name.cmp(&b.original_name));
 
@@ -34,7 +39,6 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
             let is_last = i == sorted_files.len() - 1;
             let connector = if is_last { "└── " } else { "├── " };
 
-            // 简单处理：如果有路径分隔符，显示为目录结构
             let name = &file.original_name;
             if name.contains('/') {
                 let parts: Vec<&str> = name.split('/').collect();
@@ -52,7 +56,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
         }
     }
 
-    // 统计信息
+    // 统计信息直接基于元数据中的明文大小，不会触发额外解密。
     let file_count = metadata.files.len();
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
 
@@ -75,7 +79,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     Ok(())
 }
 
-/// 格式化文件大小
+/// 将字节数格式化为 B、KB、MB 或 GB，并保留两位小数。
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

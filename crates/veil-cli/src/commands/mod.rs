@@ -1,3 +1,9 @@
+//! Veil 子命令实现及命令层公共辅助函数。
+//!
+//! 本模块把全局配置解析、密码输入、链接路径生成和提示展示组合到各子命令中。
+//! 命令实现只负责用户交互与流程编排，容器加密、元数据和文件访问由
+//! `veil-core` 提供。
+
 pub mod add;
 pub mod config;
 pub mod ex;
@@ -6,7 +12,7 @@ pub mod init;
 pub mod link;
 pub mod rm;
 
-// 工作区架构命令
+// 工作区架构命令。
 pub mod free_workspace;
 pub mod list_workspace;
 pub mod mv_workspace;
@@ -19,10 +25,17 @@ use std::path::PathBuf;
 use veil_core::config::{GlobalConfig, ResolvedContainer};
 
 /// 解析 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。
+///
+/// 解析到缓存恢复或缺失链接后，会同步注册链接并展示恢复提示；若输入同时匹配
+/// 链接和打包文件，则展示歧义提示后继续使用链接。
+///
+/// # 错误
+/// 全局配置加载或 [`GlobalConfig::resolve_container`] 失败时返回错误。
 pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
     let mut config = GlobalConfig::load()?;
     let mut resolved = config.resolve_container(input)?;
 
+    // 已恢复的链接需要提示用户；后续分支会更新 Config 中的原始字节缓存。
     if resolved.recovered_link {
         if let Some(link_path) = resolved.link_path.as_deref() {
             crate::hints::show_link_recovery_hint(link_path);
@@ -30,6 +43,7 @@ pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
     }
 
     if let Some(link_path) = resolved.missing_link_path.clone() {
+        // 缺失链接可由容器记录重新生成，成功后视作已解析链接。
         config.register_link(&resolved.name, &link_path)?;
         crate::hints::show_link_recovery_hint(&link_path);
         resolved.link_path = Some(link_path);
@@ -37,6 +51,7 @@ pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
     }
 
     if let Some(ambiguity) = resolved.ambiguity.as_ref() {
+        // 链接优先，但必须提示同名 .veil 打包文件仍存在。
         crate::hints::show_file_type_ambiguity_hint(
             &ambiguity.link_path,
             &ambiguity.container_path,
@@ -46,6 +61,9 @@ pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
     Ok(resolved)
 }
 
+/// 返回当前目录下默认的 `<容器名>.veil-link` 路径。
+///
+/// 当前目录不可读取时以 `.` 作为回退目录；函数不检查该路径是否已存在。
 pub fn default_link_path(container_name: &str) -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -59,14 +77,17 @@ pub fn creation_timestamp() -> String {
 
 /// 为重名容器分配不会覆盖现有文件的默认链接路径。
 pub fn default_link_path_for_time(container_name: &str, creation_time: &str) -> PathBuf {
+    // 默认名称未冲突时直接使用，保持日常路径最简短。
     let default_path = default_link_path(container_name);
     if !default_path.exists() {
         return default_path;
     }
 
+    // 冲突后加入创建时间，尽量让不同批次生成的链接保持可读顺序。
     let base_name = veil_core::workspace::container_name_with_suffix(container_name, creation_time);
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+    // 同一秒内继续重名时追加递增序号，直到找到不存在的路径。
     for index in 1u32.. {
         let file_name = if index == 1 {
             format!("{}.veil-link", base_name)
@@ -82,19 +103,20 @@ pub fn default_link_path_for_time(container_name: &str, creation_time: &str) -> 
     unreachable!("默认链接名称序号不可能耗尽")
 }
 
-/// 密码输入辅助函数（自适应显示编码，跨平台）
+/// 显示提示词并读取一行无回显密码。
 ///
-/// 在所有平台上统一处理密码提示的显示编码转换
+/// 提示词会先转换为当前终端编码；密码内容始终按 UTF-8 字符串读取。
+///
+/// # 错误
+/// 标准输出写入、刷新或终端密码读取失败时返回 [`std::io::Error`]。
 fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
     use std::io::Write;
 
-    // 将提示文本编码为显示环境可识别的字节序列（跨平台）
+    // 提示文字需要适配旧式 Windows 控制台，密码内容本身保持 UTF-8。
     let prompt_bytes = crate::output_encoding::encode_for_display(prompt);
     std::io::stdout().write_all(&prompt_bytes)?;
     std::io::stdout().flush()?;
 
-    // 使用 rpassword 读取密码（它会处理不回显）
-    // 注意：密码输入始终返回 UTF-8 String，不需要编码转换
     rpassword::read_password()
 }
 
@@ -114,25 +136,29 @@ fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
 /// - `Err(anyhow::Error)`: 失败（TTY 不可用或读取失败）
 ///
 /// # 示例
-/// ```text
+/// ```no_run
+/// # fn main() -> anyhow::Result<()> {
+/// # use veil_cli::commands::prompt_password;
 /// let password = prompt_password("请输入密码: ", Some("mypass".to_string()))?;
 /// let password = prompt_password("请输入密码: ", None)?; // 环境变量或交互式
+/// # Ok(())
+/// # }
 /// ```
 pub fn prompt_password(
     prompt: &str,
     password_arg: Option<String>,
 ) -> anyhow::Result<age::secrecy::SecretString> {
-    // 优先使用命令行参数
+    // 显式参数优先级最高，适用于调用方已经获得密码的场景。
     if let Some(pwd) = password_arg {
         return Ok(age::secrecy::SecretString::from(pwd));
     }
 
-    // 其次从环境变量读取（方便测试和脚本）
+    // 环境变量用于脚本和自动化，读取后立即包装为 SecretString。
     if let Ok(password) = std::env::var("VEIL_PASSWORD") {
         return Ok(age::secrecy::SecretString::from(password));
     }
 
-    // 最后交互式读取（不回显）
+    // 最后才进入 TTY 读取，rpassword 负责关闭回显。
     let password = prompt_password_adaptive(prompt)?;
     Ok(age::secrecy::SecretString::from(password))
 }
@@ -152,24 +178,28 @@ pub fn prompt_password(
 /// - `Err(anyhow::Error)`: 失败（两次输入不一致、TTY 不可用或读取失败）
 ///
 /// # 示例
-/// ```text
+/// ```no_run
+/// # fn main() -> anyhow::Result<()> {
+/// # use veil_cli::commands::prompt_new_password;
 /// let password = prompt_new_password(Some("mypass".to_string()))?;
 /// let password = prompt_new_password(None)?; // 环境变量或交互式确认
+/// # Ok(())
+/// # }
 /// ```
 pub fn prompt_new_password(
     password_arg: Option<String>,
 ) -> anyhow::Result<age::secrecy::SecretString> {
-    // 命令行参数优先
+    // 显式参数跳过确认，调用方已经负责校验来源。
     if let Some(pwd) = password_arg {
         return Ok(age::secrecy::SecretString::from(pwd));
     }
 
-    // 从环境变量读取则跳过确认
+    // 环境变量同样跳过二次输入，便于非交互调用。
     if let Ok(password) = std::env::var("VEIL_PASSWORD") {
         return Ok(age::secrecy::SecretString::from(password));
     }
 
-    // 交互式输入并确认（不回显）
+    // 交互模式必须输入两次，不一致时不会向命令层返回任何密码。
     let password = prompt_password_adaptive(crate::i18n::t("prompt.new_password"))?;
     let confirm = prompt_password_adaptive(crate::i18n::t("prompt.confirm_password"))?;
 
