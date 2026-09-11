@@ -142,6 +142,24 @@ fn missing_link_is_rebuilt_from_config() {
 }
 
 #[test]
+fn operating_one_container_does_not_restore_sibling_link() {
+    let env = TestEnv::new("test-password");
+    let first_link = env.init("first");
+    let second_link = env.init("second");
+    let second_backup = env.work.path().join("second.veil-link.bak");
+
+    std::fs::rename(&second_link, &second_backup).unwrap();
+
+    env.command()
+        .args(["free", &env.path(&first_link)])
+        .assert()
+        .success();
+
+    assert!(!second_link.exists());
+    assert!(second_backup.exists());
+}
+
+#[test]
 fn help_files_and_hints_override_are_localized() {
     let env = TestEnv::new("test-password");
 

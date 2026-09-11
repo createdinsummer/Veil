@@ -4,12 +4,10 @@
 //!
 //! `config.toml` 除了记录链接位置，还保存每个 `.veil-link` 的原始字节副本：
 //! - 链接被删除时，可以按字节原样恢复；
-//! - 扫描工作区时，可以补齐同级容器的链接记录；
 //! - 容器与工作区映射始终以稳定 `veil_id` 作为身份依据。
 
 use crate::error::VeilError;
 use crate::link::{LINK_EXTENSION, VeilLink};
-use crate::metadata::MetaHeader;
 use crate::volume::{self, VolumeInfo};
 use crate::workspace::WorkspaceConfig;
 use serde::{Deserialize, Serialize};
@@ -203,8 +201,7 @@ pub struct LinkRecord {
     pub content_hash: String,
     /// 与 `.veil-link` 文件逐字节一致的十六进制副本。
     ///
-    /// 用户删除链接后可直接写回这些字节完成原样恢复；扫描工作区时也可据此
-    /// 补齐同级容器的链接记录。
+    /// 用户删除链接后可直接写回这些字节完成原样恢复。
     #[serde(default)]
     pub raw_hex: String,
     pub last_seen_at: String,
@@ -694,84 +691,6 @@ impl GlobalConfig {
         link.resolve_workspace_path_with_mount(link_path, mount_path)
     }
 
-    /// 扫描容器所在工作区，把同级容器的身份和链接记录同步进 `config.toml`。
-    ///
-    /// 对已有缓存副本的链接优先恢复原始字节；没有链接记录时，则根据工作区
-    /// 内的 `.veil-meta` 重建 `.veil-link`。
-    pub fn sync_workspace_links(&mut self, container_dir: &Path) -> Result<usize, VeilError> {
-        let workspace_root = container_dir.parent().unwrap_or(container_dir);
-        let mut changed = 0usize;
-
-        for entry in fs::read_dir(workspace_root)? {
-            let entry = entry?;
-            let sibling = entry.path();
-            let meta_path = sibling.join(".veil-meta");
-            if !sibling.is_dir() || !meta_path.exists() {
-                continue;
-            }
-
-            let bytes = fs::read(&meta_path)?;
-            let header = match MetaHeader::from_bytes(&bytes) {
-                Ok(header) => header,
-                Err(_) => continue,
-            };
-            if !self
-                .containers
-                .values()
-                .any(|container| container.veil_id == header.veil_id)
-            {
-                self.containers.insert(
-                    header.veil_id.clone(),
-                    ContainerConfig {
-                        veil_id: header.veil_id.clone(),
-                        container_name: header.container_name.clone(),
-                        workspace: None,
-                        container_dir: sibling
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .map(ToOwned::to_owned),
-                        workspace_path: Some(sibling.clone()),
-                        dedicated: header.workspace_type == "dedicated",
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        last_accessed: None,
-                        links: Vec::new(),
-                    },
-                );
-            }
-
-            let existing_records: Vec<LinkRecord> = self
-                .links
-                .iter()
-                .filter(|record| record.veil_id == header.veil_id)
-                .cloned()
-                .collect();
-
-            if existing_records.is_empty() {
-                let link_dir = workspace_root.join(".veil/links");
-                let link_path = link_dir.join(format!("{}.veil-link", header.veil_id));
-                self.write_link_for_container_path(&sibling, &header, &link_path)?;
-                changed += 1;
-            } else {
-                for record in existing_records {
-                    if record.link_path.exists() {
-                        self.cache_link(&record.link_path)?;
-                        changed += 1;
-                    } else if self.restore_cached_link(&record.link_path)? {
-                        changed += 1;
-                    } else {
-                        self.write_link_for_container_path(&sibling, &header, &record.link_path)?;
-                        changed += 1;
-                    }
-                }
-            }
-        }
-
-        if changed > 0 {
-            self.save()?;
-        }
-        Ok(changed)
-    }
-
     fn register_volume(&mut self, volume: &VolumeInfo) {
         self.volumes.insert(
             volume.volume_id.clone(),
@@ -783,31 +702,6 @@ impl GlobalConfig {
                 last_seen_at: chrono::Utc::now().to_rfc3339(),
             },
         );
-    }
-
-    fn write_link_for_container_path(
-        &mut self,
-        container_path: &Path,
-        header: &MetaHeader,
-        link_path: &Path,
-    ) -> Result<(), VeilError> {
-        let volume = volume::volume_for_path(container_path)?;
-        self.register_volume(&volume);
-        let relative_path = container_path
-            .strip_prefix(&volume.mount_path)
-            .unwrap_or(container_path)
-            .to_path_buf();
-        let link = VeilLink::new(
-            header.veil_id.clone(),
-            header.container_name.clone(),
-            relative_path,
-            volume.volume_id,
-            volume.volume_label,
-        );
-        link.save(link_path)?;
-        let raw = fs::read(link_path)?;
-        self.cache_link_content(link_path, &link, &raw);
-        Ok(())
     }
 
     /// 缓存 `.veil-link` 的原始字节和解析结果。

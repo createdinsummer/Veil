@@ -36,8 +36,6 @@ pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
         resolved.missing_link_path = None;
     }
 
-    config.sync_workspace_links(&resolved.workspace_path)?;
-
     if let Some(ambiguity) = resolved.ambiguity.as_ref() {
         crate::hints::show_file_type_ambiguity_hint(
             &ambiguity.link_path,
