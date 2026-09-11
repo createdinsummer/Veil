@@ -11,11 +11,11 @@
 ├── config.toml              # 全局配置
 └── workspaces/
     └── default/             # 默认工作区类型
-        ├── photos/          # 容器名称
+        ├── veil-7f3a9c2d1b4e/  # 容器 ID
         │   ├── .veil-meta   # 加密的元数据文件
         │   ├── abc123.enc   # 加密文件1
         │   └── def456.enc   # 加密文件2
-        └── documents/       # 另一个容器
+        └── veil-91c2e8a4f63d/  # 另一个容器
             ├── .veil-meta
             └── ...
 ```
@@ -254,12 +254,12 @@ default = "/Users/username/.veil/workspaces/default"
 
 [containers.photos]
 workspace_type = "default"
-container_dir = "photos"
+container_dir = "veil-7f3a9c2d1b4e"
 created_at = "2024-01-01T00:00:00Z"
 
 [containers.documents]
 workspace_type = "default"
-container_dir = "documents"
+container_dir = "veil-91c2e8a4f63d"
 created_at = "2024-01-02T00:00:00Z"
 ```
 

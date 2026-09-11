@@ -148,8 +148,8 @@ rage:       ~50 秒（逐个加密）
 工作区架构：
 ~/.veil/workspaces/
   ├── default/          # 默认工作区
-  │   ├── project-a/
-  │   └── project-b/
+  │   ├── veil-1f8c2d3e4a5b/
+  │   └── veil-6c7d8e9f0a1b/
   ├── work/             # 工作相关
   └── personal/         # 个人文件
 
@@ -335,7 +335,7 @@ rage/GPG:
 
 ```
 日常工作：
-  ~/.veil/workspaces/myfiles/
+  ~/.veil/workspaces/default/veil-7f3a9c2d1b4e/
   ├── file1.enc  ← 独立加密，支持并发
   ├── file2.enc
   └── file3.enc
@@ -414,13 +414,13 @@ veil pack secrets.veil-link  # 重新打包更新的秘密
   │   └── drafts/        ← 草稿
   │
   ├── work/              ← 工作相关
-  │   ├── project-a/
-  │   ├── project-b/
-  │   └── credentials/
+  │   ├── veil-1f8c2d3e4a5b/
+  │   ├── veil-6c7d8e9f0a1b/
+  │   └── veil-2b3c4d5e6f70/
   │
   └── personal/          ← 个人文件
-      ├── documents/
-      └── photos/
+      ├── veil-8a9b0c1d2e3f/
+      └── veil-4c5d6e7f8091/
 
 veil workspace list
 → default: 2 个容器
@@ -441,7 +441,7 @@ veil workspace list
 ```
 myfiles.veil-link (1 KB)     ← 配置文件，可删除
   ↓ 指向
-~/.veil/workspaces/myfiles/  ← 实际数据
+~/.veil/workspaces/default/veil-7f3a9c2d1b4e/  ← 实际数据
 
 优势：
 - 轻量级（1KB vs 数 GB 数据）

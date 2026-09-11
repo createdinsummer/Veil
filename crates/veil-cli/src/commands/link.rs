@@ -33,11 +33,7 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     } else {
         let manager = WorkspaceManager::new(resolved.workspace_path.clone());
         let header = manager.read_meta_header()?;
-        let container_name = if header.container_name.is_empty() {
-            resolved.name.clone()
-        } else {
-            header.container_name.clone()
-        };
+        let container_name = header.container_name.clone();
         if header.veil_id.is_empty() {
             anyhow::bail!(".veil-meta 缺少 veil_id");
         }

@@ -62,10 +62,8 @@ fn init_creates_a_reusable_veil_link() {
             "demo.veil-link is just a data entry point and does not store data",
         ))
         .stdout(predicate::str::contains("Data is stored in the workspace:"))
-        .stdout(predicate::str::contains(
-            "/.veil/workspaces/default/demo",
-        ))
-        .stdout(predicate::str::contains("veil pack demo"))
+        .stdout(predicate::str::contains("/.veil/workspaces/default/veil-"))
+        .stdout(predicate::str::contains("veil pack demo.veil-link"))
         .stdout(predicate::str::contains("veil unpack <file.veil>"))
         .stdout(predicate::str::contains("veil config --hints off"));
 
@@ -103,9 +101,7 @@ fn init_guidance_is_shown_for_each_new_container() {
             .stdout(predicate::str::contains(
                 "is just a data entry point and does not store data",
             ))
-            .stdout(predicate::str::contains(
-                "veil config --hints off",
-            ))
+            .stdout(predicate::str::contains("veil config --hints off"))
             .stdout(predicate::str::contains("veil pack"))
             .stdout(predicate::str::contains("veil unpack <file.veil>"));
     }

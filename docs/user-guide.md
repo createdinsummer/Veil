@@ -9,13 +9,13 @@
 veil init photos
 ```
 
-这会在 `~/.veil/workspaces/default/photos/` 创建工作区。
+这会在 `~/.veil/workspaces/default/veil-<容器 ID>/` 创建工作区。
 
 **输出示例**：
 ```
 创建新容器...
 ✓ 容器创建成功: photos
-  工作区: /Users/mac/.veil/workspaces/default/photos
+  工作区: /Users/mac/.veil/workspaces/default/veil-7f3a9c2d1b4e
 ```
 
 ### 2. 添加文件
@@ -113,17 +113,17 @@ veil move photos --to work
   ├── config.toml              ← 全局配置
   └── workspaces/
       └── default/             ← 默认工作区
-          ├── photos/          ← 容器目录
+          ├── veil-7f3a9c2d1b4e/  ← 容器目录
           │   ├── .veil-meta   ← 加密的元数据
           │   ├── a3f2c1d4.enc ← 加密文件 1
           │   └── b7e4f9a8.enc ← 加密文件 2
-          └── documents/       ← 另一个容器
+          └── veil-91c2e8a4f63d/  ← 另一个容器
 ```
 
 ### 两种文件格式
 
 #### 工作区（本地使用）
-- **位置**：`~/.veil/workspaces/default/photos/`
+- **位置**：`~/.veil/workspaces/default/veil-<容器 ID>/`
 - **用途**：日常添加、删除、提取文件
 - **特点**：支持并发操作，性能好
 

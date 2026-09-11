@@ -6,8 +6,8 @@ use crate::error::VeilError;
 use crate::kdf;
 use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305,
+    aead::{Aead, KeyInit},
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,22 @@ impl WorkspaceManager {
         workspace_type: &str,
         password: &str,
     ) -> Result<MetaData, VeilError> {
+        self.init_container_with_id(
+            &crate::metadata::generate_veil_id(),
+            container_name,
+            workspace_type,
+            password,
+        )
+    }
+
+    /// 使用指定的稳定 ID 初始化新容器。
+    pub fn init_container_with_id(
+        &self,
+        veil_id: &str,
+        container_name: &str,
+        workspace_type: &str,
+        password: &str,
+    ) -> Result<MetaData, VeilError> {
         // 创建容器目录
         fs::create_dir_all(&self.workspace_path)
             .map_err(|e| VeilError::WorkspaceError(format!("创建容器目录失败: {}", e)))?;
@@ -41,7 +57,11 @@ impl WorkspaceManager {
         let nonce = generate_random_bytes::<12>();
 
         // 创建初始元数据
-        let meta_data = MetaData::new(container_name.to_string(), workspace_type.to_string());
+        let meta_data = MetaData::with_veil_id(
+            veil_id.to_string(),
+            container_name.to_string(),
+            workspace_type.to_string(),
+        );
 
         // 创建头部
         let header = MetaHeader::new(

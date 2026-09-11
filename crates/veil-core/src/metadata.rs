@@ -3,6 +3,8 @@
 //! .veil-meta 文件格式：
 //! - 明文头部（TLV 格式）：magic, header_len, salt, nonce, algorithm 等
 //! - 加密数据：JSON 格式的元数据（文件列表、容器信息等）
+//!
+//! `.veil-meta` 是容器自己的权威身份和内容清单，不保存任何绝对路径。
 
 use crate::error::VeilError;
 use serde::{Deserialize, Serialize};
@@ -117,6 +119,16 @@ impl MetaHeader {
 
     /// 序列化头部为字节
     pub fn to_bytes(&self) -> Result<Vec<u8>, VeilError> {
+        if self.veil_id.is_empty() {
+            return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
+        }
+        if self.container_name.is_empty() {
+            return Err(VeilError::InvalidFormat("缺少容器名称".to_string()));
+        }
+        if self.workspace_type.is_empty() {
+            return Err(VeilError::InvalidFormat("缺少工作区类型".to_string()));
+        }
+
         let mut buf = Vec::new();
 
         // Magic
@@ -131,23 +143,17 @@ impl MetaHeader {
         write_tlv(&mut buf, MetaTag::Salt, &self.salt)?;
         write_tlv(&mut buf, MetaTag::Algorithm, &[self.algorithm as u8])?;
         write_tlv(&mut buf, MetaTag::Nonce, &self.nonce)?;
-        if !self.veil_id.is_empty() {
-            write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
-        }
-        if !self.container_name.is_empty() {
-            write_tlv(
-                &mut buf,
-                MetaTag::ContainerName,
-                self.container_name.as_bytes(),
-            )?;
-        }
-        if !self.workspace_type.is_empty() {
-            write_tlv(
-                &mut buf,
-                MetaTag::WorkspaceType,
-                self.workspace_type.as_bytes(),
-            )?;
-        }
+        write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
+        write_tlv(
+            &mut buf,
+            MetaTag::ContainerName,
+            self.container_name.as_bytes(),
+        )?;
+        write_tlv(
+            &mut buf,
+            MetaTag::WorkspaceType,
+            self.workspace_type.as_bytes(),
+        )?;
 
         // 回填 header_len
         let header_len = (buf.len() - 10) as u16;
@@ -208,13 +214,19 @@ impl MetaHeader {
                     nonce = Some(arr);
                 }
                 Some(MetaTag::VeilId) => {
-                    veil_id = String::from_utf8_lossy(value).into_owned();
+                    veil_id = String::from_utf8(value.to_vec()).map_err(|error| {
+                        VeilError::InvalidFormat(format!("veil_id 不是有效的 UTF-8: {}", error))
+                    })?;
                 }
                 Some(MetaTag::ContainerName) => {
-                    container_name = String::from_utf8_lossy(value).into_owned();
+                    container_name = String::from_utf8(value.to_vec()).map_err(|error| {
+                        VeilError::InvalidFormat(format!("容器名称不是有效的 UTF-8: {}", error))
+                    })?;
                 }
                 Some(MetaTag::WorkspaceType) => {
-                    workspace_type = String::from_utf8_lossy(value).into_owned();
+                    workspace_type = String::from_utf8(value.to_vec()).map_err(|error| {
+                        VeilError::InvalidFormat(format!("工作区类型不是有效的 UTF-8: {}", error))
+                    })?;
                 }
                 _ => {} // 跳过未知或长度不匹配的 tag
             }
@@ -227,14 +239,16 @@ impl MetaHeader {
             nonce: nonce.ok_or_else(|| VeilError::InvalidFormat("缺少 nonce".to_string()))?,
             algorithm: algorithm
                 .ok_or_else(|| VeilError::InvalidFormat("缺少算法 ID".to_string()))?,
-            version: version.unwrap_or(1),
-            veil_id: if veil_id.is_empty() {
-                return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
-            } else {
-                veil_id
-            },
-            container_name,
-            workspace_type,
+            version: version.ok_or_else(|| VeilError::InvalidFormat("缺少版本号".to_string()))?,
+            veil_id: (!veil_id.is_empty())
+                .then_some(veil_id)
+                .ok_or_else(|| VeilError::InvalidFormat("缺少 veil_id".to_string()))?,
+            container_name: (!container_name.is_empty())
+                .then_some(container_name)
+                .ok_or_else(|| VeilError::InvalidFormat("缺少容器名称".to_string()))?,
+            workspace_type: (!workspace_type.is_empty())
+                .then_some(workspace_type)
+                .ok_or_else(|| VeilError::InvalidFormat("缺少工作区类型".to_string()))?,
         })
     }
 
@@ -248,7 +262,10 @@ impl MetaHeader {
     }
 }
 
-/// 容器元数据（加密存储）
+/// 容器元数据（加密存储）。
+///
+/// 这是容器的权威身份与内容清单：身份字段用于恢复和去重，`files` 记录逻辑
+/// 目录树中的全部文件，但所有路径都相对于容器根目录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaData {
     /// 不随容器名称变化的稳定身份。
@@ -263,15 +280,24 @@ pub struct MetaData {
     /// 创建时间
     pub created_at: String,
 
-    /// 文件列表
+    /// 内容清单。
+    ///
+    /// 逻辑上是树状结构：目录层级由 [`FileEntry::original_name`] 中的相对路径
+    /// 分段表达，支持多级目录和文件；物理上使用扁平列表，便于逐文件加密、
+    /// 随机访问和增量增删。不得保存绝对路径。
     pub files: Vec<FileEntry>,
 }
 
 impl MetaData {
     /// 创建新的元数据
     pub fn new(container_name: String, workspace_type: String) -> Self {
+        Self::with_veil_id(generate_veil_id(), container_name, workspace_type)
+    }
+
+    /// 使用指定的稳定 ID 创建新的元数据。
+    pub fn with_veil_id(veil_id: String, container_name: String, workspace_type: String) -> Self {
         Self {
-            veil_id: generate_veil_id(),
+            veil_id,
             container_name,
             workspace_type,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -334,7 +360,7 @@ pub struct FileEntry {
     /// 加密后的文件名（随机 ID）
     pub encrypted_name: String,
 
-    /// 原始文件名
+    /// 相对于容器根目录的原始路径，使用 `/` 分隔多级目录。
     pub original_name: String,
 
     /// 文件大小（字节）

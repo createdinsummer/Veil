@@ -24,15 +24,70 @@ fn init_creates_workspace_and_link() {
 }
 
 #[test]
-fn duplicate_init_fails() {
+fn duplicate_container_names_use_distinct_directories_and_links() {
     let env = TestEnv::new("test-password");
-    env.init("photos");
+    let first_link = env.init("photos");
 
     env.command()
+        .env("VEIL_HINTS", "full")
         .args(["init", "photos", "test-password"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("已存在"));
+        .success()
+        .stdout(predicate::str::contains("veil pack photos-"));
+
+    let mut links: Vec<_> = std::fs::read_dir(env.work.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("veil-link")
+                && path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("photos"))
+        })
+        .collect();
+    links.sort();
+    assert_eq!(links.len(), 2);
+    assert!(links.contains(&first_link));
+    assert_eq!(
+        first_link.file_name().and_then(|name| name.to_str()),
+        Some("photos.veil-link")
+    );
+
+    let second_link = links
+        .iter()
+        .find(|path| *path != &first_link)
+        .unwrap()
+        .clone();
+    assert!(
+        second_link
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("photos-"))
+    );
+    let first_workspace = std::fs::read_to_string(&first_link).unwrap();
+    let second_workspace = std::fs::read_to_string(&second_link).unwrap();
+    assert_ne!(first_workspace, second_workspace);
+    assert!(first_workspace.contains("/workspaces/default/veil-"));
+    assert!(second_workspace.contains("/workspaces/default/veil-"));
+
+    let source = env.write_file("duplicate-name.txt", "second container");
+    env.command()
+        .args(["add", &env.path(&second_link), &env.path(&source)])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["free", &env.path(&first_link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(空)"));
+    env.command()
+        .args(["free", &env.path(&second_link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("duplicate-name.txt"));
 }
 
 #[test]

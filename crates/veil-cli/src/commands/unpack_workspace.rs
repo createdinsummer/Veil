@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use veil_core::config::{ContainerConfig, GlobalConfig};
 use veil_core::container_format::ContainerUnpacker;
 use veil_core::metadata::{MetaData, MetaHeader};
-use veil_core::workspace::WorkspaceConfig;
+use veil_core::workspace::{WorkspaceConfig, allocate_container_directory};
 
 /// 解包 .veil 容器文件到工作区
 pub fn run_workspace(
@@ -33,21 +33,6 @@ pub fn run_workspace(
             .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("unpack.name_extract_failed")))?;
         stem.strip_suffix(".vault").unwrap_or(stem).to_string()
     };
-    let link_path = link_output
-        .map(PathBuf::from)
-        .unwrap_or_else(|| super::default_link_path(&name));
-
-    if link_path.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1(
-                "link.output_exists",
-                "path",
-                &link_path.display().to_string()
-            )
-        );
-    }
-
     // 加载配置
     let mut config = GlobalConfig::load()?;
 
@@ -79,7 +64,31 @@ pub fn run_workspace(
         config.workspace.default.as_ref().unwrap().path.clone()
     };
 
-    let container_dir = workspace_root.join(&name);
+    let unpacker = ContainerUnpacker::new(container_path);
+    let encrypted_metadata = unpacker.read_encrypted_metadata()?;
+    let header = MetaHeader::from_bytes(&encrypted_metadata)?;
+    let veil_id = header.veil_id.clone();
+    if veil_id.is_empty() {
+        anyhow::bail!(".veil-meta 缺少 veil_id");
+    }
+
+    let creation_time = super::creation_timestamp();
+    let link_path = link_output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::default_link_path_for_time(&name, &creation_time));
+
+    if link_path.exists() {
+        anyhow::bail!(
+            "{}",
+            crate::i18n::t1(
+                "link.output_exists",
+                "path",
+                &link_path.display().to_string()
+            )
+        );
+    }
+
+    let container_dir = allocate_container_directory(&workspace_root, &veil_id, &creation_time);
 
     // 检查目录是否已存在
     if container_dir.exists() {
@@ -101,7 +110,6 @@ pub fn run_workspace(
     let password = password_str.expose_secret();
 
     // 解包
-    let unpacker = ContainerUnpacker::new(container_path);
     let encrypted_metadata = unpacker.unpack(&container_dir)?;
 
     // 解密元数据以获取文件映射
@@ -124,8 +132,8 @@ pub fn run_workspace(
 
     use chacha20poly1305::aead::generic_array::GenericArray;
     use chacha20poly1305::{
-        aead::{Aead, KeyInit},
         ChaCha20Poly1305,
+        aead::{Aead, KeyInit},
     };
 
     let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
@@ -160,7 +168,10 @@ pub fn run_workspace(
         veil_id: metadata.veil_id.clone(),
         container_name: name.clone(),
         workspace: Some(workspace_name.unwrap_or("default").to_string()),
-        container_dir: Some(name.clone()),
+        container_dir: container_dir
+            .file_name()
+            .and_then(|directory| directory.to_str())
+            .map(ToOwned::to_owned),
         workspace_path: None,
         dedicated: false,
         created_at: chrono::Utc::now().to_rfc3339(),

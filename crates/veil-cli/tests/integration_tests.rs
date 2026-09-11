@@ -198,12 +198,22 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
         .success()
         .stdout(predicate::str::contains("工作区将创建在"));
 
-    assert!(portable_dir
-        .join(".veil/workspaces/default/photos/.veil-meta")
-        .exists());
+    let workspace_root = portable_dir.join(".veil/workspaces/default");
+    let container_dirs: Vec<_> = std::fs::read_dir(&workspace_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("veil-"))
+                && path.join(".veil-meta").exists()
+        })
+        .collect();
+    assert_eq!(container_dirs.len(), 1);
 
     let link_content = std::fs::read_to_string(link).unwrap();
-    assert!(link_content.contains(".veil/workspaces/default/photos"));
+    assert!(link_content.contains(".veil/workspaces/default/veil-"));
     assert!(!link_content.contains("mount_path = "));
 }
 

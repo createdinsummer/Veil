@@ -34,17 +34,21 @@ Veil 当前的容器设计是将多个加密文件拼接成单一容器文件。
 **示例**：
 ```
 ~/.veil/workspaces/default/          ← 工作区（可包含多个容器）
-  ├── myfiles/                       ← 容器 myfiles
+  ├── veil-7f3a9c2d1b4e/             ← 容器 myfiles
   │   ├── .veil-meta
   │   ├── a3f2c1d4.enc
   │   └── b7e4f9a8.enc
-  ├── backup/                        ← 容器 backup
+  ├── veil-91c2e8a4f63d/             ← 容器 backup
   │   ├── .veil-meta
   │   └── c9f1e8d7.enc
-  └── photos/                        ← 容器 photos
+  └── veil-2d9b1e7c4a80/             ← 容器 photos
       ├── .veil-meta
       └── e6f8a9b2.enc
 ```
+
+工作区目录始终使用容器 ID（`veil_id`）。容器名只在链接文件名中展示；
+默认链接为 `<容器名>.veil-link`，重名时使用
+`<容器名>-YYYYMMDDHHMMSS.veil-link`。
 
 ### 2.2 工作区（Workspace）
 
@@ -66,9 +70,9 @@ Veil 当前的容器设计是将多个加密文件拼接成单一容器文件。
 
 ```
 ~/.veil/workspaces/default/
-  ├── myfiles/           ← 容器 myfiles
-  ├── backup/            ← 容器 backup
-  └── photos/            ← 容器 photos
+  ├── veil-7f3a9c2d1b4e/   ← 容器 myfiles
+  ├── veil-91c2e8a4f63d/   ← 容器 backup
+  └── veil-2d9b1e7c4a80/   ← 容器 photos
 ```
 
 - 自动创建，无需配置
@@ -79,13 +83,13 @@ Veil 当前的容器设计是将多个加密文件拼接成单一容器文件。
 
 ```
 ~/Documents/veil-work/      ← 自定义工作区 "work"
-  ├── project-a/            ← 容器 project-a
-  ├── project-b/            ← 容器 project-b
-  └── credentials/          ← 容器 credentials
+  ├── veil-1f8c2d3e4a5b/    ← 容器 project-a
+  ├── veil-6c7d8e9f0a1b/    ← 容器 project-b
+  └── veil-2b3c4d5e6f70/    ← 容器 credentials
 
 ~/Documents/veil-personal/  ← 自定义工作区 "personal"
-  ├── documents/            ← 容器 documents
-  └── photos/               ← 容器 photos
+  ├── veil-8a9b0c1d2e3f/    ← 容器 documents
+  └── veil-4c5d6e7f8091/    ← 容器 photos
 ```
 
 - 用户自定义位置
@@ -109,13 +113,15 @@ Veil 当前的容器设计是将多个加密文件拼接成单一容器文件。
 **定义**：工作区下的子目录，存储一个容器的加密文件
 
 ```
-~/.veil/workspaces/default/myfiles/  ← 容器目录
-  ├── .veil-meta                     ← 容器元数据
-  ├── a3f2c1d4.enc                   ← 加密文件（原名：photo.jpg）
-  └── b7e4f9a8.enc                   ← 加密文件（原名：notes.txt）
+~/.veil/workspaces/default/veil-7f3a9c2d1b4e/  ← 容器目录
+  ├── .veil-meta                               ← 容器元数据
+  ├── a3f2c1d4.enc                             ← 加密文件（原名：photo.jpg）
+  └── b7e4f9a8.enc                             ← 加密文件（原名：notes.txt）
 ```
 
 **特点**：
+- 目录名使用稳定的容器 ID，不依赖容器名称
+- 容器名称可以重复，不影响工作区路径
 - 每个文件独立加密，支持并发读写
 - 文件名加密（使用随机 ID）
 - 元数据记录在 `.veil-meta` 中
@@ -162,6 +168,7 @@ key_derivation = "Argon2id"
 
 **特点**：
 - 文件很小（< 1KB）
+- 默认名为 `<容器名>.veil-link`，重名时使用 `<容器名>-YYYYMMDDHHMMSS.veil-link`
 - 用户日常操作时使用
 - 可以删除和重新生成，不影响数据
 - 可以创建多个链接指向同一容器目录
@@ -172,8 +179,8 @@ key_derivation = "Argon2id"
 **定义**：每个容器目录内的元数据文件
 
 **位置示例**：
-- 共享工作区：`~/.veil/workspaces/default/myfiles/.veil-meta`
-- 自定义工作区：`~/Documents/veil-work/project-a/.veil-meta`
+- 共享工作区：`~/.veil/workspaces/default/veil-7f3a9c2d1b4e/.veil-meta`
+- 自定义工作区：`~/Documents/veil-work/veil-1f8c2d3e4a5b/.veil-meta`
 - 专属工作区：`~/EncryptedVolume/veil/.veil-meta`（直接在根目录）
 
 **作用**：
@@ -275,18 +282,18 @@ created_at = "2026-09-10T10:35:00Z"
 # 容器映射（容器名 → 工作区）
 [containers.myfiles]
 workspace = "default"           # 使用默认工作区
-container_dir = "myfiles"       # 在工作区中的子目录名
+container_dir = "veil-7f3a9c2d1b4e"
 created_at = "2026-09-10T11:00:00Z"
 last_accessed = "2026-09-10T14:30:00Z"
 
 [containers.backup]
 workspace = "default"
-container_dir = "backup"
+container_dir = "veil-91c2e8a4f63d"
 created_at = "2026-09-10T11:05:00Z"
 
 [containers.project-a]
 workspace = "work"              # 使用自定义工作区 work
-container_dir = "project-a"
+container_dir = "veil-1f8c2d3e4a5b"
 created_at = "2026-09-10T11:10:00Z"
 
 [containers.secrets]
@@ -327,7 +334,7 @@ parallelism = 4
   ↓
 获得工作区路径：~/.veil/workspaces/default/
   ↓
-拼接容器目录：~/.veil/workspaces/default/myfiles/
+拼接容器目录：~/.veil/workspaces/default/veil-7f3a9c2d1b4e/
 ```
 
 ---
@@ -360,7 +367,7 @@ parallelism = 4
 **示例**：
 ```bash
 veil init myfiles
-# 自动创建在 ~/.veil/workspaces/default/myfiles/
+# 自动创建在 ~/.veil/workspaces/default/veil-<容器 ID>/
 ```
 
 ### 4.2 自定义工作目录

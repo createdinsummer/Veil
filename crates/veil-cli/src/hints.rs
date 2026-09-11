@@ -97,7 +97,7 @@ pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_pa
     println!("  {}", i18n::t("hints.init.pack_title"));
     println!(
         "    {}",
-        i18n::t1("hints.init.pack_command", "container", container_name)
+        i18n::t1("hints.init.pack_command", "container", &link_name)
     );
     println!();
     println!("  {}", i18n::t("hints.init.unpack_title"));

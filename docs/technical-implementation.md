@@ -142,7 +142,7 @@ created_at = "2026-09-10T10:30:00Z"
 
 [containers.myfiles]
 workspace = "default"
-container_dir = "myfiles"
+container_dir = "veil-7f3a9c2d1b4e"
 created_at = "2026-09-10T11:00:00Z"
 
 [containers.secrets]

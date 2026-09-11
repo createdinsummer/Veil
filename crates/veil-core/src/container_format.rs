@@ -28,7 +28,7 @@
 use crate::error::VeilError;
 use crate::metadata::MetaData;
 use std::fs::File;
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// 容器文件魔数
@@ -243,11 +243,21 @@ impl ContainerUnpacker {
         }
     }
 
+    /// 只读取容器中的加密元数据，不创建或写入工作区文件。
+    pub fn read_encrypted_metadata(&self) -> Result<Vec<u8>, VeilError> {
+        let mut file = File::open(&self.container_path)?;
+
+        let mut header_buf = vec![0u8; 22];
+        file.read_exact(&mut header_buf)?;
+        let header = ContainerHeader::from_bytes(&header_buf)?;
+
+        let mut metadata_buf = vec![0u8; header.metadata_size as usize];
+        file.read_exact(&mut metadata_buf)?;
+        Ok(metadata_buf)
+    }
+
     /// 解包容器文件到工作区
-    pub fn unpack(
-        &self,
-        workspace_path: impl AsRef<Path>,
-    ) -> Result<Vec<u8>, VeilError> {
+    pub fn unpack(&self, workspace_path: impl AsRef<Path>) -> Result<Vec<u8>, VeilError> {
         let workspace_path = workspace_path.as_ref();
 
         // 打开容器文件
@@ -274,7 +284,8 @@ impl ContainerUnpacker {
             let name_len = u16::from_le_bytes([entry_header_buf[0], entry_header_buf[1]]) as usize;
             file.read_exact(&mut entry_header_buf[2..2 + name_len + 8])?;
 
-            let (entry_header, _) = FileEntryHeader::from_bytes(&entry_header_buf[..2 + name_len + 8])?;
+            let (entry_header, _) =
+                FileEntryHeader::from_bytes(&entry_header_buf[..2 + name_len + 8])?;
 
             // 读取文件数据
             let mut file_data = vec![0u8; entry_header.data_size as usize];

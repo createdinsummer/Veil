@@ -39,7 +39,7 @@ veil info photos               # 查看工作区
   ├── config.toml                    # 全局配置
   └── workspaces/
       └── default/                   # 默认工作区
-          └── photos/                # 容器目录
+          └── veil-7f3a9c2d1b4e/    # 容器目录（容器 ID）
               ├── .veil-meta         # 加密元数据
               ├── a3f2c1d4.enc       # 加密文件
               └── b7e4f9a8.enc       # 加密文件

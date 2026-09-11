@@ -120,24 +120,24 @@ tags = ["personal", "documents"]
 ├── config.toml                    # 全局配置
 ├── workspaces/                    # 工作区目录
 │   ├── default/                   # 默认工作区
-│   │   ├── myfiles/               # 容器 myfiles 的工作区
+│   │   ├── veil-7f3a9c2d1b4e/     # 容器 myfiles 的工作区
 │   │   │   ├── .veil-meta         # 工作区元数据
 │   │   │   ├── .veil-lock         # 锁文件（可选）
 │   │   │   ├── a3f2c1d4.enc       # 加密文件 1
 │   │   │   ├── b7e4f9a8.enc       # 加密文件 2
 │   │   │   └── c9f1e8d7.enc       # 加密文件 3
 │   │   │
-│   │   └── backup/                # 容器 backup 的工作区
+│   │   └── veil-91c2e8a4f63d/     # 容器 backup 的工作区
 │   │       ├── .veil-meta
 │   │       └── ...
 │   │
 │   ├── work/                      # 自定义工作区 "work"
-│   │   └── project-a/
+│   │   └── veil-1f8c2d3e4a5b/
 │   │       ├── .veil-meta
 │   │       └── ...
 │   │
 │   └── personal/                  # 自定义工作区 "personal"
-│       └── photos/
+│       └── veil-2d9b1e7c4a80/
 │           ├── .veil-meta
 │           └── ...
 │
@@ -232,7 +232,7 @@ parallelism = 4
 
 **路径**：每个工作区目录内
 
-**示例**：`~/.veil/workspaces/default/myfiles/.veil-meta`
+**示例**：`~/.veil/workspaces/default/veil-7f3a9c2d1b4e/.veil-meta`
 
 **内容示例**（JSON 格式）：
 ```json
@@ -307,8 +307,8 @@ parallelism = 4
 
 **示例**：
 ```
-~/.veil/workspaces/default/myfiles/a3f2c1d4e5f6.enc
-~/.veil/workspaces/default/myfiles/b7e4f9a8c3d2.enc
+~/.veil/workspaces/default/veil-7f3a9c2d1b4e/a3f2c1d4e5f6.enc
+~/.veil/workspaces/default/veil-7f3a9c2d1b4e/b7e4f9a8c3d2.enc
 ```
 
 **文件结构**：
@@ -336,7 +336,7 @@ parallelism = 4
 
 **路径**：工作区目录内
 
-**示例**：`~/.veil/workspaces/default/myfiles/.veil-lock`
+**示例**：`~/.veil/workspaces/default/veil-7f3a9c2d1b4e/.veil-lock`
 
 **内容示例**（JSON 格式）：
 ```json

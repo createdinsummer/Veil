@@ -57,13 +57,15 @@ pub fn run(
         target.to_string()
     };
 
-    let link_path = link_output.map(PathBuf::from).unwrap_or_else(|| {
-        if target_path.extension().and_then(|ext| ext.to_str()) == Some("veil-link") {
-            target_path.to_path_buf()
-        } else {
-            super::default_link_path(&container_name)
-        }
-    });
+    let veil_id = veil_core::metadata::generate_veil_id();
+    let creation_time = super::creation_timestamp();
+    let link_path = if let Some(path) = link_output {
+        PathBuf::from(path)
+    } else if target_path.extension().and_then(|ext| ext.to_str()) == Some("veil-link") {
+        target_path.to_path_buf()
+    } else {
+        super::default_link_path_for_time(&container_name, &creation_time)
+    };
     if link_path.exists() {
         anyhow::bail!(
             "{}",
@@ -121,10 +123,11 @@ pub fn run(
         config.workspace.default.as_ref().unwrap().path.clone()
     };
 
+    let container_dir = (!dedicated).then(|| veil_id.clone());
     let container_path = if dedicated {
         workspace_root.clone()
     } else {
-        workspace_root.join(&container_name)
+        workspace_root.join(&veil_id)
     };
 
     // 检查目录是否已存在
@@ -163,7 +166,8 @@ pub fn run(
     };
 
     let manager = WorkspaceManager::new(container_path.clone());
-    let metadata = manager.init_container(&container_name, workspace_type, password)?;
+    let metadata =
+        manager.init_container_with_id(&veil_id, &container_name, workspace_type, password)?;
 
     // 更新全局配置
     use veil_core::config::ContainerConfig;
@@ -184,7 +188,7 @@ pub fn run(
             veil_id: metadata.veil_id.clone(),
             container_name: container_name.clone(),
             workspace: Some(workspace_name.unwrap_or("default").to_string()),
-            container_dir: Some(container_name.clone()),
+            container_dir,
             workspace_path: None,
             dedicated: false,
             created_at: chrono::Utc::now().to_rfc3339(),

@@ -54,6 +54,36 @@ pub fn default_link_path(container_name: &str) -> PathBuf {
         .join(format!("{}.veil-link", container_name))
 }
 
+/// 当前本地时间，精确到秒，用于重名时生成后缀。
+pub fn creation_timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+}
+
+/// 为重名容器分配不会覆盖现有文件的默认链接路径。
+pub fn default_link_path_for_time(container_name: &str, creation_time: &str) -> PathBuf {
+    let default_path = default_link_path(container_name);
+    if !default_path.exists() {
+        return default_path;
+    }
+
+    let base_name = veil_core::workspace::container_name_with_suffix(container_name, creation_time);
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    for index in 1u32.. {
+        let file_name = if index == 1 {
+            format!("{}.veil-link", base_name)
+        } else {
+            format!("{}-{}.veil-link", base_name, index)
+        };
+        let candidate = current_dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("默认链接名称序号不可能耗尽")
+}
+
 /// 密码输入辅助函数（自适应显示编码，跨平台）
 ///
 /// 在所有平台上统一处理密码提示的显示编码转换

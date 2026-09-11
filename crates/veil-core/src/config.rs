@@ -1,10 +1,14 @@
 //! 全局配置管理模块
 //!
 //! 配置文件位置：~/.veil/config.toml
-//! 管理工作区、容器映射、用户偏好等全局设置
+//!
+//! `config.toml` 除了记录链接位置，还保存每个 `.veil-link` 的原始字节副本：
+//! - 链接被删除时，可以按字节原样恢复；
+//! - 扫描工作区时，可以补齐同级容器的链接记录；
+//! - 容器与工作区映射始终以稳定 `veil_id` 作为身份依据。
 
 use crate::error::VeilError;
-use crate::link::{VeilLink, LINK_EXTENSION};
+use crate::link::{LINK_EXTENSION, VeilLink};
 use crate::metadata::MetaHeader;
 use crate::volume::{self, VolumeInfo};
 use crate::workspace::WorkspaceConfig;
@@ -36,7 +40,9 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub volumes: HashMap<String, VolumeRecord>,
 
-    /// 已知 `.veil-link` 的完整字节副本
+    /// 已知 `.veil-link` 的完整原始字节副本。
+    ///
+    /// 这是对实际链接文件的字节级镜像，而不只是路径索引；链接丢失后可据此恢复。
     #[serde(default)]
     pub links: Vec<LinkRecord>,
 
@@ -132,11 +138,10 @@ pub struct WorkspaceSection {
 /// 容器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerConfig {
-    /// 容器稳定 ID；旧配置可能为空。
+    /// 容器稳定 ID。
     pub veil_id: String,
 
     /// 展示名称，不再作为唯一键。
-    #[serde(default)]
     pub container_name: String,
 
     /// 所属工作区名称（default 或自定义名称）
@@ -196,7 +201,10 @@ pub struct LinkRecord {
     pub status: LinkStatus,
     #[serde(default)]
     pub content_hash: String,
-    /// 原始 UTF-8 TOML 内容的十六进制副本，可字节级恢复。
+    /// 与 `.veil-link` 文件逐字节一致的十六进制副本。
+    ///
+    /// 用户删除链接后可直接写回这些字节完成原样恢复；扫描工作区时也可据此
+    /// 补齐同级容器的链接记录。
     #[serde(default)]
     pub raw_hex: String,
     pub last_seen_at: String,
@@ -573,10 +581,7 @@ impl GlobalConfig {
             let name = self
                 .containers
                 .get(&key)
-                .and_then(|container| {
-                    (!container.container_name.is_empty())
-                        .then_some(container.container_name.clone())
-                })
+                .map(|container| container.container_name.clone())
                 .unwrap_or_else(|| input.to_string());
             return Ok(ResolvedContainer {
                 name,
@@ -646,10 +651,7 @@ impl GlobalConfig {
         let container_key = self
             .containers
             .iter()
-            .find_map(|(key, container)| {
-                (container.veil_id == veil_id || container.container_name == container_name)
-                    .then(|| key.clone())
-            })
+            .find_map(|(key, container)| (container.veil_id == veil_id).then(|| key.clone()))
             .ok_or_else(|| {
                 VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
             })?;
@@ -692,7 +694,10 @@ impl GlobalConfig {
         link.resolve_workspace_path_with_mount(link_path, mount_path)
     }
 
-    /// 扫描容器所在工作区，把所有同级容器的链接记录同步进配置。
+    /// 扫描容器所在工作区，把同级容器的身份和链接记录同步进 `config.toml`。
+    ///
+    /// 对已有缓存副本的链接优先恢复原始字节；没有链接记录时，则根据工作区
+    /// 内的 `.veil-meta` 重建 `.veil-link`。
     pub fn sync_workspace_links(&mut self, container_dir: &Path) -> Result<usize, VeilError> {
         let workspace_root = container_dir.parent().unwrap_or(container_dir);
         let mut changed = 0usize;
@@ -710,10 +715,6 @@ impl GlobalConfig {
                 Ok(header) => header,
                 Err(_) => continue,
             };
-            if header.veil_id.is_empty() {
-                continue;
-            }
-
             if !self
                 .containers
                 .values()
@@ -723,15 +724,7 @@ impl GlobalConfig {
                     header.veil_id.clone(),
                     ContainerConfig {
                         veil_id: header.veil_id.clone(),
-                        container_name: if header.container_name.is_empty() {
-                            sibling
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("container")
-                                .to_string()
-                        } else {
-                            header.container_name.clone()
-                        },
+                        container_name: header.container_name.clone(),
                         workspace: None,
                         container_dir: sibling
                             .file_name()
@@ -804,18 +797,9 @@ impl GlobalConfig {
             .strip_prefix(&volume.mount_path)
             .unwrap_or(container_path)
             .to_path_buf();
-        let container_name = if header.container_name.is_empty() {
-            container_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("container")
-                .to_string()
-        } else {
-            header.container_name.clone()
-        };
         let link = VeilLink::new(
             header.veil_id.clone(),
-            container_name,
+            header.container_name.clone(),
             relative_path,
             volume.volume_id,
             volume.volume_label,
@@ -826,6 +810,9 @@ impl GlobalConfig {
         Ok(())
     }
 
+    /// 缓存 `.veil-link` 的原始字节和解析结果。
+    ///
+    /// `raw_hex` 保存与文件完全相同的字节，`content_hash` 用于检查恢复副本是否损坏。
     fn cache_link_content(&mut self, link_path: &Path, link: &VeilLink, raw: &[u8]) {
         let link_path = absolute_path(link_path);
         let now = chrono::Utc::now().to_rfc3339();
@@ -888,7 +875,7 @@ impl GlobalConfig {
             .get(&link.workspace.volume_id)
             .map(|volume| volume.mount_path.as_path());
         let workspace_path = link.resolve_workspace_path_with_mount(link_path, mount_path)?;
-        let name = link.container_name(link_path);
+        let name = link.container_name();
 
         Ok(ResolvedContainer {
             name,
@@ -943,6 +930,7 @@ impl GlobalConfig {
         })
     }
 
+    /// 从 `config.toml` 中的字节副本恢复缺失的 `.veil-link`。
     fn restore_cached_link(&mut self, link_path: &Path) -> Result<bool, VeilError> {
         let link_path = absolute_path(link_path);
         let Some(record) = self

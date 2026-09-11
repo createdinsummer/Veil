@@ -1,4 +1,7 @@
 //! `.veil-link` 链接文件模型。
+//!
+//! `.veil-link` 是当前有效的便携定位文件：它指向工作区内的容器目录，
+//! 并携带容器 ID、展示名称、卷 ID 和基础加密信息。链接本身不保存文件内容。
 
 use crate::error::VeilError;
 use crate::volume;
@@ -9,19 +12,19 @@ use std::path::{Path, PathBuf};
 
 pub const LINK_EXTENSION: &str = "veil-link";
 
+/// 便携定位文件，可复制到其他位置或由 `config.toml` 原样恢复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeilLink {
-    #[serde(default = "default_version")]
     pub version: String,
-    #[serde(default = "now")]
     pub created_at: String,
     pub workspace: LinkWorkspace,
-    #[serde(default)]
     pub encryption: LinkEncryption,
-    #[serde(default)]
     pub metadata: LinkMetadata,
 }
 
+/// 容器目录的位置和基础身份信息。
+///
+/// `path` 相对卷根目录保存，不写入容器自己的 `.veil-meta`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkWorkspace {
     pub veil_id: String,
@@ -30,20 +33,17 @@ pub struct LinkWorkspace {
     /// 工作区相对于卷根目录的路径。
     pub path: PathBuf,
 
-    /// 稳定卷 ID；为空时兼容旧格式，按链接文件所在目录解析。
+    /// 稳定卷 ID。
     pub volume_id: String,
 
     pub volume_label: String,
 
-    #[serde(default = "now")]
     pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkEncryption {
-    #[serde(default = "default_algorithm")]
     pub algorithm: String,
-    #[serde(default = "default_key_derivation")]
     pub key_derivation: String,
 }
 
@@ -136,16 +136,8 @@ impl VeilLink {
         self.resolve_workspace_path(link_path)
     }
 
-    pub fn container_name(&self, link_path: &Path) -> String {
-        if !self.workspace.container_name.trim().is_empty() {
-            return self.workspace.container_name.clone();
-        }
-
-        link_path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("container")
-            .to_string()
+    pub fn container_name(&self) -> String {
+        self.workspace.container_name.clone()
     }
 }
 
@@ -185,6 +177,6 @@ mod tests {
         let loaded = VeilLink::load(&link_path).unwrap();
 
         assert_eq!(loaded.workspace.veil_id, "veil-1234");
-        assert_eq!(loaded.container_name(&link_path), "photos");
+        assert_eq!(loaded.container_name(), "photos");
     }
 }

@@ -143,7 +143,7 @@ fn compute_version_id(version: &Version) -> VersionId {
 
 ### 4.1 版本数据库
 
-**位置**：`~/.veil/workspaces/default/myfiles/.veil-versions/`
+**位置**：`~/.veil/workspaces/default/veil-7f3a9c2d1b4e/.veil-versions/`
 
 **结构**：
 ```

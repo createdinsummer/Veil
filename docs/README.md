@@ -235,16 +235,16 @@
 1. **默认工作区**（共享）
    ```
    ~/.veil/workspaces/default/
-     ├── myfiles/
-     ├── backup/
-     └── photos/
+     ├── veil-7f3a9c2d1b4e/
+     ├── veil-91c2e8a4f63d/
+     └── veil-2d9b1e7c4a80/
    ```
 
 2. **自定义工作区**（共享）
    ```
    ~/Documents/veil-work/
-     ├── project-a/
-     └── project-b/
+     ├── veil-1f8c2d3e4a5b/
+     └── veil-6c7d8e9f0a1b/
    ```
 
 3. **专属工作区**（独占）
