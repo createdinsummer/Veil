@@ -1,283 +1,87 @@
-# Veil - 面纱
+# Veil
 
-一个简单、安全、高效的文件加密容器工具。
+Veil 是一个工作区模型的加密文件容器工具。CLI 通过 `.veil-link` 定位容器，工作区保存加密元数据和独立加密的文件内容，打包命令再把工作区整理为可传输的单个 `.veil` 文件。
 
-## 简介
+## 文档导航
 
-Veil 是一个基于现代加密算法的文件加密容器工具，将任意文件和目录加密存储在单个 `.veil` 容器文件中。支持完整的目录结构，提供命令行工具便于集成到工作流程中。
+| 文档 | 适合读者 | 主要范围 |
+| --- | --- | --- |
+| [CLI 使用说明](crates/veil-cli/README.md) | 命令使用者、运维和脚本维护者 | 参数、工作流、配置、链接、打包解包和 CLI 限制 |
+| [核心库说明](crates/veil-core/README.md) | 库维护者、格式维护者 | 存储模型、模块职责、磁盘格式、密钥流程、恢复和并发语义 |
+| [密码强度测试工具](crates/veil-brute-force/README.md) | 授权测试者、安全评审者 | 支持范围、攻击模式、线程模型、历史记录和安全边界 |
 
-## 特性
+## 产品定位
 
-- 🔒 **现代加密算法**：基于 age 加密（X25519 + ChaCha20-Poly1305）
-- 🔑 **两级密钥系统**：密码加密私钥，私钥加密内容，修改密码无需重新加密数据
-- 📦 **单文件容器**：所有数据存储在一个 `.veil` 文件中，便于传输和备份
-- 🌲 **目录树结构**：支持嵌套目录，保持文件组织
-- 💾 **流式处理**：大文件边读边加密，内存占用恒定（~64KB）
-- ⚡ **批处理模式**：Shell 模式性能提升 2-6 倍
-- 📊 **进度显示**：实时显示加密/解密进度
-- 💪 **崩溃安全**：追加写入 + Footer 提交点，确保数据完整性
-- 🌐 **完全跨平台**：支持 Windows、macOS、Linux，容器文件可跨平台传输
-- ✅ **完整测试**：47 个测试全部通过
+Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依赖云端服务，容器身份由稳定的 `veil_id` 表示，展示名称和磁盘路径变化不会改变容器身份。
 
-## 快速开始
+项目包含三个主要部分：
 
-### 安装
+| 组件 | 职责 |
+| --- | --- |
+| `veil-core` | 工作区操作、单文件容器、配置、链接、元数据、密钥派生和内容加解密 |
+| `veil-cli` | 用户命令、密码输入、链接恢复、工作区打包和解包 |
+| `veil-brute-force` | 对自行创建的单文件容器进行密码强度测试 |
 
-```bash
-# 从源码编译
-cargo build --release --package veil-cli
+## 工作模型
 
-# 或使用打包脚本
-./build.sh
+初始化容器后，Veil 会生成两个相互关联但用途不同的对象。
 
-# 安装到系统
-sudo cp release/bin/veil /usr/local/bin/
-```
+| 对象 | 内容 | 说明 |
+| --- | --- | --- |
+| `.veil-link` | 容器 ID、展示名称、卷 ID 和工作区相对路径 | 只是入口和定位信息，不保存文件内容 |
+| 工作区目录 | `.veil-meta` 和随机命名的 `.enc` 文件 | 真正的数据存储位置 |
 
-### 基本使用
+默认工作区位于 `~/.veil/workspaces/default`，每个容器使用独立目录。全局配置位于 `~/.veil/config.toml`，会缓存容器、卷和链接信息。链接被删除时，如果配置中仍有原始字节副本，Veil 会尝试恢复。
 
-```bash
-# 创建加密容器
-veil init vault.veil
+`veil pack` 会把工作区整理为一个便于传输的 `.veil` 文件。该文件包含加密元数据和已有密文，不会在打包时重新加密文件内容。`veil unpack` 使用原容器密码验证并还原工作区，然后生成新的链接和容器记录。
 
-# 添加文件
-veil add vault.veil document.pdf
+## 命令入口
 
-# 查看内容
-veil free vault.veil
+当前 CLI 提供容器创建、文件管理、信息查看、密码修改、交互式 shell、打包解包、配置和链接维护等命令。完整的参数和操作说明集中在 [CLI 文档](crates/veil-cli/README.md)。
 
-# 导出文件
-veil ex vault.veil document.pdf ./output.pdf
+| 操作类别 | 命令 |
+| --- | --- |
+| 创建 | `veil init` |
+| 文件管理 | `veil add`、`veil rm`、`veil mv`、`veil ex` |
+| 查看 | `veil list`、`veil free`、`veil info` |
+| 会话与维护 | `veil shell`、`veil passwd`、`veil config`、`veil link` |
+| 迁移 | `veil pack`、`veil unpack` |
+| 帮助 | `veil help` |
 
-# 批处理模式（高性能）
-veil shell vault.veil
-```
+命令同时支持位置参数和选项参数。生产环境建议使用交互式密码输入或环境变量，避免把密码直接留在 shell 历史和进程列表中。
 
-完整使用指南请查看 [CLI 文档](crates/veil-cli/README.md)。
+## 安全模型
+
+工作区容器使用由用户密码派生的主密钥保护元数据和文件内容。密钥派生采用 Argon2id，内容加密使用 ChaCha20-Poly1305，并为每个文件保存独立 nonce。工作区密码修改会重新加密元数据和全部文件。
+
+核心库同时提供单文件容器模型。该模型使用 x25519 和 age 加密文件 blob 与目录索引，使用 Argon2id 和 ChaCha20-Poly1305 保护容器私钥。单文件格式、打包格式和恢复语义详见 [Core 文档](crates/veil-core/README.md)。
+
+工作区文件读取依赖认证加密识别密文损坏；单文件容器还会通过 BLAKE3 校验完整读取后的明文内容。
+
+## 构建与测试
+
+开发环境需要 Rust 工具链和 Cargo。构建 CLI 使用 `cargo build --package veil-cli`，发布构建使用 `cargo build --release --package veil-cli`。
+
+运行完整测试使用 `cargo test --workspace --all-targets`。生成库文档使用 `cargo doc --workspace --no-deps`。
+
+## 关键边界
+
+- CLI 的 `add` 和 `ex` 当前只处理单文件。
+- 同一工作区没有跨进程写锁。
+- `passwd` 会重新加密工作区中的全部文件。
+- `.veil-link` 依赖稳定的卷身份和工作区相对路径。
+- 忘记密码后没有恢复通道。
+
+详细限制分别记录在 CLI 和 Core 文档中。
 
 ## 项目结构
 
-```
-Veil/
-├── crates/
-│   ├── veil-core/         # 核心加密库
-│   ├── veil-cli/          # 命令行工具
-│   └── veil-brute-force/  # 暴力破解工具（安全测试）
-├── build.sh               # 打包脚本
-├── INSTALL.md             # 安装指南
-└── README.md              # 本文件
-```
-
-## 核心组件
-
-- **[veil-core](crates/veil-core/README.md)** - 核心加密库，提供容器管理 API
-- **[veil-cli](crates/veil-cli/README.md)** - 命令行工具，9 个命令 + 批处理模式
-- **[veil-brute-force](crates/veil-brute-force/README.md)** - 密码强度测试工具（仅供教育目的）
-
-### 输出编码模块
-
-Veil 内置跨平台的输出编码自适应模块，确保在不同编码环境下正确显示中文和其他字符。
-
-**核心功能：**
-- 自动检测当前显示环境的编码（Windows GBK/UTF-8/GB2312，Unix UTF-8）
-- 将程序内部的 UTF-8 字符串转换为显示环境可识别的字节
-- 统一 API，所有平台使用相同代码
-
-**设计原则：**
-- 程序内部统一使用 UTF-8
-- 输出时根据环境自动转换编码
-- 文件内容保持原始字节，不进行编码转换
-
-**适用场景：**
-- CLI 控制台输出
-- TUI 文本界面（未来）
-- GUI 图形界面（未来）
-- 日志文件输出
-
-## 加密技术
-
-### 两级密钥系统
-
-```
-用户密码
-    ↓ Argon2id (256MB, 3 iterations, parallelism=4)
-密钥派生
-    ↓ ChaCha20-Poly1305 encrypt
-加密私钥 (存储在 Header)
-    ↓ ChaCha20-Poly1305 decrypt
-容器私钥 (内存中)
-    ↓
-加密/解密文件内容
-```
-
-**优势**：修改密码只需重新加密私钥（~100ms），无需重新加密所有数据。
-
-### 加密算法
-
-| 用途 | 算法 | 说明 |
-|------|------|------|
-| 密钥派生 | Argon2id | 抗暴力破解 |
-| 密钥交换 | X25519 | Curve25519 |
-| 对称加密 | ChaCha20-Poly1305 | AEAD 流密码 |
-| 哈希校验 | BLAKE3 | 256-bit |
-
-### 流密码特性
-
-Veil 使用 **ChaCha20-Poly1305 流密码**进行文件加密，具有以下优势：
-
-**内存高效：**
-- 加密时使用固定 64KB 缓冲区边读边加密
-- 4GB 视频只需 64KB 内存（传统方式需要 4GB）
-- 内存占用恒定，不随文件大小增长
-
-**灵活读写：**
-- 流密码生成连续的密文字节流，无块边界
-- 加密和解密的缓冲区大小可以完全不同
-- 支持任意位置 Seek 随机访问
-
-**技术原理：**
-```
-明文逐字节与密钥流 XOR：
-  明文: A B C D E F
-  密钥流: K1 K2 K3 K4 K5 K6
-  密文: A⊕K1 B⊕K2 C⊕K3 ... (连续字节流)
-
-解密时只需按顺序读取密文并与相同密钥流 XOR，
-无论一次读取 1 字节还是 1MB 都能正确还原明文。
-```
-
-这与分块密码（如 AES-CBC）不同，后者要求数据必须按固定块（16 字节）对齐，加密和解密的块大小必须一致。
-
-**性能提升：**
-
-| 文件大小 | 传统方式内存占用 | 流式处理内存占用 | 提升倍数 |
-|---------|----------------|----------------|----------|
-| 10 MB   | ~10 MB         | ~64 KB         | 156x     |
-| 100 MB  | ~100 MB        | ~64 KB         | 1562x    |
-| 1 GB    | ~1 GB          | ~64 KB         | 16000x   |
-| 4 GB    | 崩溃/交换        | ~64 KB         | 可用     |
-
-**向后兼容：**
-- 保留 `add_file(&[u8])` 接口供小文件使用
-- 两种加密方式生成的密文格式完全相同
-- 流式加密和整体加密的文件可以混存在同一容器中
-
-技术细节请查看 [Core 文档](crates/veil-core/README.md)。
-
-## 使用场景
-
-### 个人隐私保护
-
-```bash
-veil init private.veil
-veil add private.veil ~/Documents/confidential.pdf
-```
-
-### 敏感文件传输
-
-```bash
-# 加密打包
-veil init transfer.veil
-veil add transfer.veil secret.doc
-
-# 接收方解密
-veil ex transfer.veil secret.doc ./output.doc
-```
-
-### 批量加密
-
-```bash
-veil shell archive.veil
-veil> add photo1.jpg
-veil> add photo2.jpg
-veil> add photo3.jpg
-veil> exit
-```
-
-## 安全性
-
-- ✅ **加密算法**：军事级 ChaCha20-Poly1305 AEAD
-- ✅ **密钥派生**：Argon2id 抗暴力破解
-- ✅ **完整性校验**：BLAKE3 哈希验证
-- ✅ **崩溃安全**：追加写入 + Footer 提交点
-- ✅ **零泄漏**：私钥仅在内存中，进程结束自动销毁
-
-### 密码强度测试
-
-Veil 提供了暴力破解工具用于测试密码强度：
-
-```bash
-# 运行密码强度测试
-cargo run -p veil-brute-force --release
-
-# 测试弱密码容器（演示目的）
-# 支持字典攻击、字符集暴力破解、组词攻击等多种模式
-```
-
-⚠️ **重要**：此工具仅用于测试自己创建的容器，请勿用于攻击他人数据。详见 [暴力破解工具文档](crates/veil-brute-force/README.md)。
-
-## 开发
-
-### 环境要求
-
-- Rust 1.70+
-- Cargo
-
-### 编译
-
-```bash
-# 开发版本
-cargo build --package veil-cli
-
-# 发布版本
-cargo build --release --package veil-cli
-
-# 运行测试
-cargo test --all
-```
-
-### 测试覆盖
-
-- veil-core: 25 个单元测试
-- veil-cli: 22 个集成测试
-- 总计: 47 个测试
-
-## 常见问题
-
-**Q: 忘记密码怎么办？**  
-A: 无法恢复。Veil 使用强加密，没有后门。请妥善保管密码。
-
-**Q: 容器文件可以在不同系统间传输吗？**  
-A: 可以。`.veil` 文件格式跨平台。
-
-**Q: 大文件会占用很多内存吗？**  
-A: 不会。Veil 使用流式处理，加密 4GB 视频只需 64KB 内存。
-
-**Q: 修改密码需要多久？**  
-A: 约 100ms。只需重新加密私钥，无需重新加密数据。
-
-## 路线图
-
-- [x] 流式读写支持（已完成 - 处理超大文件）
-- [ ] 容器压缩
-- [ ] 增量更新
-- [ ] 死空间回收
-- [ ] 多容器合并
-- [ ] 文件去重
+| 路径 | 说明 |
+| --- | --- |
+| `crates/veil-core` | 核心库和存储格式 |
+| `crates/veil-cli` | `veil` 命令行程序和集成测试 |
+| `crates/veil-brute-force` | 密码强度测试工具 |
 
 ## 许可证
 
-Apache License 2.0
-
-详见 [LICENSE](LICENSE) 文件。
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request。
-
-## 致谢
-
-基于以下优秀的开源项目：
-- [age](https://github.com/str4d/rage) - 现代加密工具
-- [Argon2](https://github.com/P-H-C/phc-winner-argon2) - 密钥派生算法
-- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) - 快速哈希算法
+项目按 Apache License 2.0 发布，具体条款见仓库根目录的 `LICENSE` 文件。

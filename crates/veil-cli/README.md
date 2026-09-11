@@ -1,451 +1,192 @@
 # Veil CLI
 
-Veil的命令行工具 —— 一个简单、安全、高效的文件加密容器管理工具。
-
-## 特性
-
-- 🔒 **安全加密**：基于 age 加密（X25519 + ChaCha20-Poly1305）
-- 🔑 **两级密钥**：密码加密私钥，私钥加密内容，修改密码无需重新加密数据
-- 📦 **单文件容器**：所有数据存储在一个 `.veil` 文件中
-- 🌲 **目录树结构**：支持嵌套目录，保持文件组织
-- ⚡ **批处理模式**：Shell 模式性能提升 2-6 倍，适合批量操作
-- 🎯 **灵活参数**：支持位置参数和选项参数，可灵活混用
-- 🔐 **安全密码输入**：交互式输入不回显，支持环境变量和命令行参数
-- ✅ **完整测试**：22 个集成测试，覆盖所有核心功能
-
-## 安装
-
-```bash
-# 从源码编译
-cargo build --release --package veil-cli
-
-# 可执行文件位置
-./target/release/veil
-
-# 可选：安装到系统路径
-cargo install --path crates/veil-cli
-```
-
-## 快速开始
-
-```bash
-# 1. 创建加密容器
-veil init photos.veil
-请输入密码: ****
-请再次输入密码: ****
-✓ 容器创建成功
-
-# 2. 添加文件
-veil add photos.veil vacation.jpg 2024/vacation.jpg
-✓ 文件已添加
-
-# 3. 查看内容
-veil free photos.veil
-容器内容:
-└── 2024/
-    └── vacation.jpg
-
-# 4. 导出文件
-veil ex photos.veil 2024/vacation.jpg ./recovered.jpg
-✓ 文件已导出
-
-# 5. 批处理模式（性能优化）
-veil shell photos.veil
-veil> add photo1.jpg
-veil> add photo2.jpg
-veil> free
-veil> exit
-```
-
-## 命令概览
-
-```
-veil init       创建新容器
-veil add        添加文件/目录到容器
-veil rm         删除容器内的文件
-veil mv         移动/重命名文件
-veil free       树状显示容器内容
-veil ex         导出文件/目录
-veil info       显示容器信息
-veil passwd     修改容器密码
-veil shell      交互式批处理模式（性能优化）
-```
-
-## 使用方式
-
-所有命令支持**位置参数**（简洁）和**选项参数**（清晰）两种方式，可以灵活混用。
-
-### 批处理模式（推荐用于批量操作）
-
-**Shell 模式**可以一次解密私钥，然后执行多个命令，性能提升 2-6 倍：
-
-```bash
-# 启动 shell 模式
-$ veil shell photos.veil
-请输入密码: ****
-容器已打开，进入交互模式 ✓
-输入 'help' 查看可用命令，'exit' 退出
-
-# 批量添加文件（私钥只解密一次）
-veil> add vacation1.jpg photos/vacation1.jpg
-✓ 文件已添加: photos/vacation1.jpg
-
-veil> add vacation2.jpg photos/vacation2.jpg
-✓ 文件已添加: photos/vacation2.jpg
-
-veil> add vacation3.jpg photos/vacation3.jpg
-✓ 文件已添加: photos/vacation3.jpg
-
-# 查看内容
-veil> free
-容器内容:
-└── photos/
-    ├── vacation1.jpg
-    ├── vacation2.jpg
-    └── vacation3.jpg
+`veil` 是 Veil 的命令行入口。它管理全局配置、解析 `.veil-link`、处理密码输入，并调用 `veil-core` 完成工作区、元数据和文件内容的读写。
 
-# 查看信息
-veil> info
-容器信息:
-  文件数量: 3
-  总大小: 1.2 MB
+## 文档边界
 
-# 退出
-veil> exit
-正在退出...
-```
+本文负责命令行为、参数、工作流和用户可见限制。密钥封装、磁盘格式、索引结构和恢复算法由 [Core 文档](../veil-core/README.md) 维护。遇到命令输出与内部格式需要分别理解时，应先在这里确认操作路径，再在 Core 文档确认存储语义。
 
-**Shell 模式支持的命令**：
-- `add <source> [dest]` - 添加文件/目录
-- `rm <path>` - 删除文件
-- `mv <from> <to>` - 移动/重命名文件
-- `free` / `ls` - 树状显示内容
-- `info` - 显示容器信息
-- `ex <input> <output>` - 导出文件
-- `help` - 显示帮助
-- `exit` / `quit` - 退出 shell
+## 安装与构建
 
-### 1. 创建容器
+开发构建使用 `cargo build --package veil-cli`，发布构建使用 `cargo build --release --package veil-cli`。构建产物为 `target/debug/veil` 或 `target/release/veil`。
 
-```bash
-# 位置参数: veil init <容器> <密码>
-veil init photos.veil mypassword
+也可以通过 `cargo install --path crates/veil-cli` 安装到 Cargo 的用户二进制目录。
 
-# 选项参数
-veil init photos.veil -p mypassword
+## 工作模型
 
-# 交互式（最安全，会提示输入密码）
-veil init photos.veil
-请输入密码: ****
-请再次输入密码: ****
-```
+CLI 当前以工作区为默认模型。`veil init` 会创建：
 
-### 2. 添加文件
+| 对象 | 说明 |
+| --- | --- |
+| `.veil-link` | 指向工作区的便携入口 |
+| 容器工作区 | 保存 `.veil-meta` 和独立加密文件 |
+| 全局配置记录 | 在 `~/.veil/config.toml` 中登记容器、卷和链接 |
 
-自动识别是文件还是目录。
+默认工作区根目录是 `~/.veil/workspaces/default`，每个容器在其中使用以 `veil_id` 命名的目录。链接默认写入当前目录，也可以通过 `--link` 指定。
 
-```bash
-# 位置参数: veil add <容器> <输入(外部)> <输出(容器内)> <密码>
-veil add photos.veil vacation.jpg 2024/vacation.jpg mypassword
+命令参数既可以使用位置形式，也可以使用选项形式。容器参数可以是容器名、工作区路径或 `.veil-link` 路径。
 
-# 不指定输出路径，使用文件名
-veil add photos.veil vacation.jpg mypassword
+## 命令索引
 
-# 选项参数: -i 输入, -o 输出, -p 密码
-veil add photos.veil -i vacation.jpg -o 2024/vacation.jpg -p mypassword
+| 使用目标 | 命令 | 本文位置 |
+| --- | --- | --- |
+| 创建容器 | `veil init` | 初始化 |
+| 添加内容 | `veil add` | 添加文件 |
+| 查看内容 | `veil list`、`veil free`、`veil info` | 列出和查看 |
+| 导出内容 | `veil ex` | 导出文件 |
+| 整理内容 | `veil rm`、`veil mv` | 删除和重命名 |
+| 修改凭据 | `veil passwd` | 修改密码 |
+| 连续操作 | `veil shell` | 交互式 shell |
+| 备份和迁移 | `veil pack`、`veil unpack` | 打包与解包 |
+| 配置和链接 | `veil config`、`veil link` | 配置与提示、链接管理 |
 
-# 混合使用
-veil add photos.veil vacation.jpg -o 2024/vacation.jpg -p mypassword
+## 详细命令
 
-# 添加整个目录
-veil add photos.veil ~/Pictures/ backup/ mypassword
+### 初始化
 
-# 环境变量方式（脚本使用）
-export VEIL_PASSWORD=mypassword
-veil add photos.veil vacation.jpg
-```
+`veil init <容器名称>` 创建容器、工作区、配置记录和链接。密码可以交互输入，也可以通过位置参数、`--password` 或 `VEIL_PASSWORD` 提供。
 
-### 3. 查看内容
+初始化还支持以下选项：
 
-树状显示容器内的所有文件和目录。
+| 选项 | 作用 |
+| --- | --- |
+| `--link <路径>` | 指定链接输出位置 |
+| `--workspace <名称>` | 使用已注册的命名工作区 |
+| `--workspace-path <路径>` | 指定工作区根路径 |
+| `--dedicated` | 让工作区只属于当前容器 |
+| `--portable` | 把工作区放在链接所在卷 |
 
-```bash
-# 位置参数: veil free <容器> <密码>
-veil free photos.veil mypassword
+当链接位于外部卷，或者显式使用 `--portable` 时，默认工作区会放在链接目录下的隐藏工作区中。
 
-# 选项参数
-veil free photos.veil -p mypassword
+### 添加文件
 
-# 输出示例：
-容器内容:
-├── 2024/
-│   ├── vacation.jpg
-│   └── family.jpg
-└── archive/
-    └── old-photos/
-        └── photo.jpg
+`veil add <容器> <源文件>` 读取本地文件，加密后写入工作区，并更新 `.veil-meta`。
 
-统计信息:
-  文件数量: 4
-  总大小: 5242880 字节 (5.00 MB)
-```
+命令定义保留了目标路径参数和 `-i`、`-o`、`-p` 选项。当前实现按源文件的文件名登记条目，目标路径参数尚未参与最终存储路径计算。
 
-### 4. 导出文件
+### 列出和查看
 
-```bash
-# 位置参数: veil ex <容器> <输入(容器内)> <输出(外部)> <密码>
-veil ex photos.veil 2024/vacation.jpg ./recovered.jpg mypassword
+`veil list <容器>` 输出文件名称、大小、加密时间和总大小。
 
-# 选项参数: -i 输入, -o 输出, -p 密码
-veil ex photos.veil -i 2024/vacation.jpg -o ./recovered.jpg -p mypassword
+`veil free <容器>` 按原始相对路径排序，并用缩进表示目录层级。当前实现输出的是简化缩进列表，不是完整目录树渲染。
 
-# 导出整个目录
-veil ex photos.veil 2024/ ./recovered-photos/ mypassword
+`veil info <容器>` 输出容器名称、工作区路径、工作区类型、创建时间、文件数量、总大小和文件清单。
 
-# 导出全部内容
-veil ex photos.veil -a ./all-files/ mypassword
-```
+### 导出文件
 
-### 5. 删除文件
+`veil ex <容器> <容器内路径> <输出路径>` 解密指定文件并写入本地路径。输出路径是必填项。
 
-```bash
-# 位置参数: veil rm <容器> <路径> <密码>
-veil rm photos.veil 2024/vacation.jpg mypassword
+当前 CLI 按精确虚拟路径查找单个文件。虽然帮助文本保留了通配符描述，但当前命令层调用的是单文件导出接口。
 
-# 选项参数
-veil rm photos.veil -i 2024/vacation.jpg -p mypassword
-```
+### 删除和重命名
 
-### 6. 移动/重命名文件
+`veil rm <容器> <容器内路径>` 删除对应密文并更新元数据。
 
-```bash
-# 位置参数: veil mv <容器> <源路径> <目标路径> <密码>
-veil mv photos.veil old.jpg archive/old.jpg mypassword
+`veil mv <容器> <原路径> <新路径>` 修改 `.veil-meta` 中的原始路径。该操作不会移动或重命名磁盘上的随机加密文件名，也不会重新加密文件内容。
 
-# 选项参数: -f from, -t to, -p 密码
-veil mv photos.veil -f old.jpg -t archive/old.jpg -p mypassword
-```
+目标路径已经存在时，重命名会被拒绝。
 
-### 7. 查看容器信息
+### 修改密码
 
-```bash
-# 位置参数: veil info <容器> <密码>
-veil info photos.veil mypassword
+`veil passwd <容器>` 使用旧密码解密容器，再用新密码重新加密元数据和所有文件。
 
-# 选项参数
-veil info photos.veil -p mypassword
+位置参数形式为旧密码、新密码；选项形式使用 `--password` 和 `--new-password`。工作区中的每个文件都有自己的 nonce，密码修改不能只更新一个头部字段。
 
-# 输出示例：
-容器信息:
-  路径: photos.veil
-  容器大小: 5242880 字节 (5.00 MB)
+### 交互式 shell
 
-内容统计:
-  文件数量: 10
-  内容总大小: 4718592 字节 (4.50 MB)
+`veil shell <容器>` 验证密码后进入交互循环。当前支持：
 
-文件类型分布:
-  image/jpeg                     8
-  image/png                      2
-```
+| 会话命令 | 作用 |
+| --- | --- |
+| `ls` 或 `list` | 列出文件 |
+| `info` | 显示容器信息 |
+| `add <文件>` | 添加文件 |
+| `rm <文件>` | 删除文件 |
+| `ex <文件> <输出>` | 导出文件 |
+| `help` | 显示会话帮助 |
+| `exit`、`quit` 或 `q` | 退出 |
 
-### 8. 修改容器密码
+Shell 不缓存派生密钥。每次文件操作仍由 `WorkspaceManager` 读取并解密必要的元数据或文件，因此它主要提供操作便利，不应被描述为批量操作的性能缓存。
 
-修改密码只需重新加密私钥，不需要重新加密数据（两级密钥的优势）。
+## 打包与解包
 
-```bash
-# 位置参数: veil passwd <容器> <旧密码> <新密码>
-veil passwd photos.veil oldpass newpass
+`veil pack <容器>` 把工作区的加密元数据和已有密文写入单个 `.veil` 文件。默认输出名是 `<容器名>.vault.veil`，可用 `--output` 覆盖。
 
-# 选项参数: -p 旧密码, -n 新密码
-veil passwd photos.veil -p oldpass -n newpass
+打包阶段不重新加密文件内容。输出文件已经存在时，命令会拒绝覆盖。
 
-# 混合使用
-veil passwd photos.veil oldpass -n newpass
+`veil unpack <文件.veil>` 读取包内元数据，分配新的工作区目录，并在密码验证通过后重建 `.veil-meta`、容器配置和链接。
 
-# 交互式（最安全）
-veil passwd photos.veil
-请输入当前密码: ****
-请设置新密码: ****
-请再次输入密码: ****
-```
+常用选项如下：
 
-## 密码管理
+| 选项 | 作用 |
+| --- | --- |
+| `--name <名称>` | 指定解包后的展示名称 |
+| `--workspace <名称>` | 指定命名工作区 |
+| `--link <路径>` | 指定新链接位置 |
+| `--password <密码>` | 提供容器密码 |
 
-### 三种密码输入方式
+## 配置与提示
 
-1. **交互式输入（推荐）** - 最安全
-   ```bash
-   veil init photos.veil
-   请输入密码: [输入不回显]
-   ```
+`veil config` 或 `veil config show` 显示当前有效配置。`veil config --hints full|brief|off` 修改提示级别。
 
-2. **环境变量** - 适合脚本
-   ```bash
-   export VEIL_PASSWORD=mypassword
-   veil add photos.veil file.jpg
-   ```
+提示级别也可以通过 `VEIL_HINTS` 临时覆盖。`full` 显示全部提示，`brief` 只保留关键恢复和解包提示，`off` 关闭提示。
 
-3. **命令行参数** - 快速测试（不推荐生产环境）
-   ```bash
-   veil add photos.veil file.jpg mypassword
-   # 注意：密码会在终端历史和进程列表中可见
-   ```
+全局配置位于 `~/.veil/config.toml`，主要内容包括：
 
-### 密码生存周期
+| 配置项 | 说明 |
+| --- | --- |
+| 工作区 | 默认工作区和命名工作区路径 |
+| 容器记录 | `veil_id`、展示名称、目录名和链接列表 |
+| 卷记录 | 卷 ID、标签、挂载路径和最近探测时间 |
+| 链接缓存 | 链接原始字节副本、哈希和状态 |
+| 用户偏好 | 提示级别等设置 |
 
-- **交互式输入**：仅在内存中短暂存在，使用后销毁
-- **环境变量**：
-  - 临时设置（单命令）：`VEIL_PASSWORD=pass veil add ...` - 命令结束后销毁
-  - export：持续到终端关闭或 `unset VEIL_PASSWORD`
-- **命令行参数**：明文可见，不推荐
+部分偏好字段已经保留在配置模型中，但当前 CLI 行为不会读取全部字段。
 
-## 密钥管理
+## 链接管理
 
-### 两级密钥设计
+`veil link <容器或工作区>` 生成新的 `.veil-link`。如果已有链接，命令会复制原文件并缓存其字节；如果容器已经登记但没有链接，则按配置重新生成；如果只能定位到工作区，则从 `.veil-meta` 明文头部读取容器身份。
 
-```
-用户密码
-  ↓ (Argon2id)
-加密私钥 (存储在 Header)
-  ↓
-容器私钥 (内存中)
-  ↓
-加密/解密文件内容
-```
+多个链接可以指向同一工作区，因此通过任一链接执行的写操作都会影响同一份元数据和文件。
 
-### 性能特性
+配置中存在链接原始字节时，缺失链接可以在后续解析过程中自动恢复。恢复后仍会校验内容哈希。
 
-**单命令模式**：
-- 每个命令都是独立进程
-- 每次都需要解密私钥（~150ms）
-- 适合偶尔使用
+## 密码输入顺序
 
-**Shell 批处理模式**：
-- 一次解密私钥（~150ms）
-- 后续命令复用私钥（~10ms）
-- 性能提升 2-6 倍
-- 适合批量操作
+命令按以下顺序尝试获取密码：
 
-**修改密码**：
-- 只重新加密私钥
-- 不重新加密数据
-- 速度快（~100ms）
+1. 命令行参数或对应选项。
+2. `VEIL_PASSWORD` 环境变量。
+3. 当前终端交互输入。
 
-## 线程安全性
-
-- ❌ **不支持**多线程并发操作同一个容器
-- ✅ **支持**多线程使用不同的容器
-- ✅ **CLI 单线程**设计足够满足需求
-- 💡 **GUI 应用**可在应用层使用 `Arc<RwLock<Container>>` 包装
-
-## 示例场景
-
-### 场景 1：备份私人照片
-
-```bash
-# 创建容器
-veil init my-photos.veil
-
-# 批量添加照片（使用 shell 模式）
-veil shell my-photos.veil
-veil> add ~/Pictures/2024-01-01.jpg 2024/jan/01.jpg
-veil> add ~/Pictures/2024-01-02.jpg 2024/jan/02.jpg
-veil> add ~/Pictures/2024-01-03.jpg 2024/jan/03.jpg
-veil> free
-veil> exit
-
-# 查看容器信息
-veil info my-photos.veil
-```
-
-### 场景 2：加密敏感文档
-
-```bash
-# 创建容器
-veil init documents.veil
-
-# 添加文档
-veil add documents.veil contract.pdf legal/contract.pdf
-veil add documents.veil tax-return.pdf finance/2024/tax.pdf
-
-# 查看内容
-veil free documents.veil
-
-# 需要时导出
-veil ex documents.veil legal/contract.pdf ./contract.pdf
-```
-
-### 场景 3：定期备份脚本
-
-```bash
-#!/bin/bash
-
-# 使用环境变量
-export VEIL_PASSWORD="your-secure-password"
-
-# 创建容器（如果不存在）
-if [ ! -f backup.veil ]; then
-    veil init backup.veil
-fi
-
-# 使用 shell 模式批量备份
-veil shell backup.veil <<EOF
-add ~/Documents/ documents/
-add ~/Projects/ projects/
-info
-exit
-EOF
-
-echo "备份完成"
-```
-
-### 场景 4：文件整理
-
-```bash
-# 进入 shell 模式
-veil shell archive.veil
-
-# 整理文件
-veil> mv temp.txt archive/2024/temp.txt
-veil> mv old-file.txt archive/2023/old-file.txt
-veil> rm duplicates/file1.txt
-veil> free
-
-# 退出
-veil> exit
-```
-
-## 技术细节
-
-### 加密算法
-- **密钥派生**：Argon2id（256MB, 3 iterations, parallelism=4）
-- **非对称加密**：X25519（密钥交换）
-- **对称加密**：ChaCha20-Poly1305（数据加密）
-- **哈希**：BLAKE3（完整性校验）
-
-### 文件格式
-```
-+------------------+
-| Header           |
-|  - Magic         |
-|  - Version       |
-|  - Encrypted Key |
-+------------------+
-| Blob 1           |
-+------------------+
-| Blob 2           |
-+------------------+
-| ...              |
-+------------------+
-| Index            |
-+------------------+
-| Footer           |
-+------------------+
-```
-
-### 崩溃安全
-- 所有写入追加到文件末尾
-- Footer 作为提交点
-- 未提交的数据在下次打开时自动截断
+新建容器或修改密码时，交互模式要求输入两次。参数和环境变量方式会跳过二次确认。
 
+命令行密码可能进入 shell 历史或进程参数列表。需要自动化的场景优先使用环境变量或受控的调用环境。
+
+## 输出与本地化
+
+CLI 默认输出中文，也可以通过 `VEIL_LANG` 选择语言。当前资源包含中文和英文。
+
+Windows 控制台会根据输出代码页转换提示文字；Unix 平台按 UTF-8 输出。文件内容始终按二进制处理，不参与终端编码转换。
+
+`veil help files` 显示各文件扩展名和容器文件的用途说明。
+
+## 并发与一致性
+
+同一工作区的操作没有跨进程写锁。两个进程同时修改同一容器时，后写入的元数据可能覆盖先前修改。
+
+不同容器可以使用不同工作区或不同容器目录，彼此没有共享写状态。应用需要在同一进程内并发访问容器时，应由上层显式提供锁和生命周期管理。
+
+## 测试
+
+CLI 测试位于 `crates/veil-cli/tests`，覆盖初始化、链接、配置、打包解包、密码修改、文件增删导出和 shell 会话。运行全部 workspace 测试使用 `cargo test --workspace --all-targets`。
+
+## 当前限制
+
+- `add` 和 `ex` 当前只处理单文件。
+- `add` 的目标路径参数尚未实际生效。
+- `shell` 不提供密钥或容器对象的长期缓存。
+- 同一工作区没有并发写锁。
+- `passwd` 会重新加密全部工作区文件。
+- 链接依赖稳定的卷身份和相对路径。
+- 忘记密码后没有恢复通道。
