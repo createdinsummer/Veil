@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 解密元数据并输出文件名称、大小、加密时间和总大小。
 ///
@@ -11,8 +10,8 @@ use veil_core::workspace_ops::WorkspaceManager;
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
     // list 只读取容器元数据，不需要打开每个文件 blob。
     let resolved = super::resolve_container(container_name)?;
+    let manager = super::workspace_manager(&resolved);
     let display_name = resolved.name;
-    let workspace_path = resolved.workspace_path;
 
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
@@ -21,7 +20,6 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let password = password_str.expose_secret();
 
     // 读取清单成功即表示密码正确，随后即可安全展示文件信息。
-    let manager = WorkspaceManager::new(workspace_path);
     let mut files = manager.list_files(password)?;
     files.sort_by(|left, right| left.original_name.cmp(&right.original_name));
 

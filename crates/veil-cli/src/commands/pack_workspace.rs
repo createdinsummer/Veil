@@ -4,7 +4,6 @@ use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::container_format::ContainerPacker;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 将容器元数据和所有加密文件封装为可分享的 `.veil` 文件。
 ///
@@ -19,7 +18,7 @@ pub fn run_workspace(
 ) -> Result<()> {
     // 打包目标是解析后的工作区，而不是输入链接文件。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     // 未指定输出时沿用命令约定的 <名称>.vault.veil。
     let output = if let Some(path) = output_path {
@@ -41,15 +40,14 @@ pub fn run_workspace(
     let password = password_str.expose_secret();
 
     // 先完成密码验证和清单读取，再读取 .veil-meta 的完整字节。
-    let manager = WorkspaceManager::new(workspace_path.clone());
     let metadata = manager.read_meta(password)?;
 
-    let meta_path = workspace_path.join(".veil-meta");
+    let meta_path = manager.workspace_path.join(".veil-meta");
     let meta_bytes = std::fs::read(&meta_path)?;
 
     // packer 只负责布局，不重新加密元数据或文件内容。
     let packer = ContainerPacker::new(&output);
-    packer.pack(&workspace_path, &metadata, &meta_bytes)?;
+    packer.pack(&manager.workspace_path, &metadata, &meta_bytes)?;
 
     let output_size = std::fs::metadata(&output)?.len();
 

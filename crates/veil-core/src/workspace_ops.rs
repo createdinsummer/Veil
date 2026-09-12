@@ -66,6 +66,8 @@ struct StagedPasswordFile {
 pub struct WorkspaceManager {
     /// 包含 `.veil-meta` 和加密文件的工作区根路径。
     pub workspace_path: PathBuf,
+    /// 调用方解析出的预期容器 ID；设置后所有元数据访问都会校验该身份。
+    expected_veil_id: Option<String>,
 }
 
 impl WorkspaceManager {
@@ -73,7 +75,37 @@ impl WorkspaceManager {
     ///
     /// 构造过程只保存路径，不访问文件系统。
     pub fn new(workspace_path: PathBuf) -> Self {
-        Self { workspace_path }
+        Self {
+            workspace_path,
+            expected_veil_id: None,
+        }
+    }
+
+    /// 创建绑定到指定稳定 ID 的工作区管理器。
+    ///
+    /// 后续每次读取或写入元数据都会确认实际 `veil_id` 与预期值一致，避免链接或
+    /// 工作区路径变化后误操作其他容器。
+    pub fn for_container(workspace_path: PathBuf, veil_id: impl Into<String>) -> Self {
+        Self {
+            workspace_path,
+            expected_veil_id: Some(veil_id.into()),
+        }
+    }
+
+    /// 校验元数据身份是否与解析阶段得到的稳定 ID 一致。
+    fn verify_veil_id(&self, actual: &str) -> Result<(), VeilError> {
+        let Some(expected) = self.expected_veil_id.as_deref() else {
+            return Ok(());
+        };
+
+        if expected != actual {
+            return Err(VeilError::ContainerIdConflict(format!(
+                "预期容器 ID '{}'，实际读取到 '{}'",
+                expected, actual
+            )));
+        }
+
+        Ok(())
     }
 
     /// 为新容器生成稳定 ID 并初始化工作区。
@@ -107,6 +139,8 @@ impl WorkspaceManager {
         workspace_type: &str,
         password: &str,
     ) -> Result<MetaData, VeilError> {
+        self.verify_veil_id(veil_id)?;
+
         fs::create_dir_all(&self.workspace_path)
             .map_err(|e| VeilError::WorkspaceError(format!("创建容器目录失败: {}", e)))?;
 
@@ -156,6 +190,7 @@ impl WorkspaceManager {
 
         let bytes = fs::read(&meta_path)?;
         let header = MetaHeader::from_bytes(&bytes)?;
+        self.verify_veil_id(&header.veil_id)?;
         let master_key = derive_master_key(password, &header.salt)?;
         let header_len = MetaHeader::header_len(&bytes)?;
         let encrypted_data = &bytes[header_len..];
@@ -172,7 +207,9 @@ impl WorkspaceManager {
     pub fn read_meta_header(&self) -> Result<MetaHeader, VeilError> {
         let meta_path = self.workspace_path.join(".veil-meta");
         let bytes = fs::read(&meta_path).map_err(VeilError::Io)?;
-        MetaHeader::from_bytes(&bytes)
+        let header = MetaHeader::from_bytes(&bytes)?;
+        self.verify_veil_id(&header.veil_id)?;
+        Ok(header)
     }
 
     /// 编码、加密并原子替换 `.veil-meta`。
@@ -185,6 +222,7 @@ impl WorkspaceManager {
         meta_data: &MetaData,
         master_key: &[u8; 32],
     ) -> Result<(), VeilError> {
+        self.verify_veil_id(&header.veil_id)?;
         let meta_path = self.workspace_path.join(".veil-meta");
 
         let header_bytes = header.to_bytes()?;
@@ -362,6 +400,7 @@ impl WorkspaceManager {
         let meta_path = self.workspace_path.join(".veil-meta");
         let meta_bytes = fs::read(&meta_path)?;
         let header = MetaHeader::from_bytes(&meta_bytes)?;
+        self.verify_veil_id(&header.veil_id)?;
 
         let master_key = derive_master_key(password, &header.salt)?;
 

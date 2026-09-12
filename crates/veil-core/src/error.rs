@@ -43,6 +43,10 @@ pub enum VeilError {
     #[error("容器未找到: {0}")]
     ContainerNotFound(String),
 
+    /// 同一稳定 `veil_id` 被注册给多个容器。
+    #[error("容器 ID 冲突: {0}")]
+    ContainerIdConflict(String),
+
     /// 文件格式或字段内容无效。
     #[error("无效的格式: {0}")]
     InvalidFormat(String),

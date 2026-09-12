@@ -110,6 +110,7 @@ pub fn run(
     let explicit_workspace_path = workspace_path.is_some();
 
     let mut config = GlobalConfig::load()?;
+    config.ensure_container_id_available(&veil_id)?;
 
     if config.workspace.default.is_none() {
         config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
@@ -185,7 +186,7 @@ pub fn run(
         "custom"
     };
 
-    let manager = WorkspaceManager::new(container_path.clone());
+    let manager = WorkspaceManager::for_container(container_path.clone(), veil_id.clone());
     use veil_core::config::ContainerConfig;
     let creation_result = (|| -> Result<()> {
         let metadata = manager
@@ -228,9 +229,7 @@ pub fn run(
             }
         };
 
-        config
-            .containers
-            .insert(metadata.veil_id.clone(), container_config);
+        config.register_container(container_config)?;
         // register_link_at 将链接写入后再保存配置；任一步失败都可整体回滚。
         config
             .register_link_at(

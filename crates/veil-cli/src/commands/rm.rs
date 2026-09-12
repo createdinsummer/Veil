@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::{RemovedPathKind, WorkspaceManager};
+use veil_core::workspace_ops::RemovedPathKind;
 
 /// 从容器删除文件或目录（工作区架构）。
 ///
@@ -22,9 +22,9 @@ use veil_core::workspace_ops::{RemovedPathKind, WorkspaceManager};
 /// veil rm photos vacation.jpg
 /// ```
 pub fn run(container_name: &str, file_name: &str, password: Option<String>) -> Result<()> {
-    // 先解析链接，确保后续删除针对的是最终工作区而不是输入本身。
+    // 先解析稳定 ID，确保后续删除针对的是最终工作区而不是输入本身。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     // 删除前先输出目标；真正删除仍需要密码和元数据查找成功。
     crate::outln!(
@@ -38,7 +38,6 @@ pub fn run(container_name: &str, file_name: &str, password: Option<String>) -> R
     let password = password_str.expose_secret();
 
     // core 会先提交更新后的元数据，再清理失去引用的密文文件。
-    let manager = WorkspaceManager::new(workspace_path);
     let removed = manager.remove_path(file_name, password)?;
 
     let message_key = match removed {

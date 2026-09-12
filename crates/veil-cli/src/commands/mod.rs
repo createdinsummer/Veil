@@ -24,10 +24,14 @@ pub mod unpack_workspace;
 
 use std::path::PathBuf;
 use veil_core::config::{GlobalConfig, ResolvedContainer};
+use veil_core::workspace_ops::WorkspaceManager;
 
 use crate::error::Result;
 
-/// 解析 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。
+/// 所有需要选择已有容器的命令都必须经过这里。
+///
+/// 支持 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。无论输入形式
+/// 如何，返回前都会读取 `.veil-meta` 确认真实 `veil_id`。
 ///
 /// 解析到缓存恢复或缺失链接后，会同步注册链接并展示恢复提示；若输入同时匹配
 /// 链接和打包文件，则展示歧义提示后继续使用链接。
@@ -47,7 +51,7 @@ pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
 
     if let Some(link_path) = resolved.missing_link_path.clone() {
         // 缺失链接可由容器记录重新生成，成功后视作已解析链接。
-        config.register_link(&resolved.name, &link_path)?;
+        config.register_link(&resolved.veil_id, &link_path)?;
         crate::hints::show_link_recovery_hint(&link_path);
         resolved.link_path = Some(link_path);
         resolved.missing_link_path = None;
@@ -62,6 +66,11 @@ pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
     }
 
     Ok(resolved)
+}
+
+/// 为解析结果创建工作区管理器，并绑定已经确认的稳定容器 ID。
+pub fn workspace_manager(resolved: &ResolvedContainer) -> WorkspaceManager {
+    WorkspaceManager::for_container(resolved.workspace_path.clone(), resolved.veil_id.clone())
 }
 
 /// 返回当前目录下默认的 `<容器名>.veil-link` 路径。

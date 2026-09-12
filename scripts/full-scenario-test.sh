@@ -1516,6 +1516,11 @@ run_pack_unpack_section() {
     assert_file_missing "PACK-07-file" "错误密码打包不应留下文件" "$RUN_ROOT/wrong-password.veil"
 
     PACKAGE="$RUN_ROOT/custom-package.veil"
+    UNPACK_01_HOME="$RUN_ROOT/home-pack-unpack-01"
+    UNPACK_03_HOME="$RUN_ROOT/home-pack-unpack-03"
+    UNPACK_04_HOME="$RUN_ROOT/home-pack-unpack-04"
+    UNPACK_FAIL_HOME="$RUN_ROOT/home-pack-unpack-fail"
+    mkdir -p "$UNPACK_01_HOME" "$UNPACK_03_HOME" "$UNPACK_04_HOME" "$UNPACK_FAIL_HOME"
     printf '\n[格式] 包头部和可见路径\n'
     dd if="$PACKAGE" bs=1 count=22 2>/dev/null | od -An -tx1 -v
     printf '魔数: '
@@ -1524,31 +1529,34 @@ run_pack_unpack_section() {
     strings "$PACKAGE" | grep -E 'payload\.txt|binary\.bin|文字' || true
 
     run_case "UNPACK-01" 0 "解包到默认工作区" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_01_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name restored
     assert_file_exists "UNPACK-01-link" "解包后的链接存在" "$PHASE_WORK/restored.veil-link"
     run_case "UNPACK-02-export" 0 "解包后导出文件" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" ex restored payload.txt "$RUN_ROOT/restored-payload.txt"
+        env HOME="$UNPACK_01_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" ex restored payload.txt "$RUN_ROOT/restored-payload.txt"
     assert_file_equals "UNPACK-02-bytes" "解包后的内容一致" \
         "$RUN_ROOT/restored-payload.txt" "$FIXTURES/hello.txt"
     run_case "UNPACK-03-name-extract" 0 "从包文件名推导容器名" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack \
-        "$RUN_ROOT/pack-parent/nested/package.veil"
+        env HOME="$UNPACK_03_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack \
+        "$RUN_ROOT/pack-parent/nested/package.veil" --link "$PHASE_WORK/name-extract.veil-link"
     run_case "UNPACK-04-custom-name" 0 "解包时指定展示名称" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_04_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name custom-name --link "$PHASE_WORK/custom-unpack.veil-link"
+    run_case "UNPACK-04-duplicate-id" 1 "同一配置重复解包拒绝 ID 冲突" \
+        env HOME="$UNPACK_04_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        --name duplicate-id --link "$PHASE_WORK/duplicate-id.veil-link"
     run_case "UNPACK-06-missing-workspace" 1 "解包时拒绝未知命名工作区" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name workspace-missing --workspace no-such-workspace
     run_case "UNPACK-08-bad-extension" 1 "解包时检查链接扩展名" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name bad-link --link "$PHASE_WORK/bad-unpack.txt"
     run_case "UNPACK-09-existing-link" 1 "解包拒绝覆盖已有链接" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name existing --link "$PHASE_WORK/restored.veil-link"
 
     run_case "UNPACK-11-wrong-password" 1 "错误密码在创建产物前失败" \
-        env VEIL_PASSWORD=wrong VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=wrong VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name wrong-unpack --link "$PHASE_WORK/wrong-unpack.veil-link"
     assert_file_missing "UNPACK-11-link" "错误密码解包不应留下链接" "$PHASE_WORK/wrong-unpack.veil-link"
 
@@ -1556,49 +1564,49 @@ run_pack_unpack_section() {
     trunc="$RUN_ROOT/truncated.veil"
     dd if="$PACKAGE" of="$trunc" bs=1 count=10 2>/dev/null
     run_case "UNPACK-12-truncated" 1 "拒绝截断的包" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$trunc" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$trunc" \
         --name trunc --link "$PHASE_WORK/trunc.veil-link"
 
     bad_magic="$RUN_ROOT/bad-magic.veil"
     cp "$PACKAGE" "$bad_magic"
     printf 'X' | dd of="$bad_magic" bs=1 seek=0 conv=notrunc 2>/dev/null
     run_case "UNPACK-12-magic" 1 "拒绝错误魔数" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_magic" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_magic" \
         --name magic --link "$PHASE_WORK/magic.veil-link"
 
     bad_version="$RUN_ROOT/bad-version.veil"
     cp "$PACKAGE" "$bad_version"
     printf '\002\000' | dd of="$bad_version" bs=1 seek=8 conv=notrunc 2>/dev/null
     run_case "UNPACK-13-version" 1 "拒绝不支持的包版本" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_version" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_version" \
         --name version --link "$PHASE_WORK/version.veil-link"
 
     bad_header_size="$RUN_ROOT/bad-header-size.veil"
     cp "$PACKAGE" "$bad_header_size"
     printf '\027\000\000\000' | dd of="$bad_header_size" bs=1 seek=10 conv=notrunc 2>/dev/null
     run_case "UNPACK-13-header-size" 1 "拒绝不支持的包头长度" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_header_size" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_header_size" \
         --name header-size --link "$PHASE_WORK/header-size.veil-link"
 
     bad_meta_len="$RUN_ROOT/bad-meta-len.veil"
     cp "$PACKAGE" "$bad_meta_len"
     printf '\000\000\000\004' | dd of="$bad_meta_len" bs=1 seek=14 conv=notrunc 2>/dev/null
     run_case "UNPACK-14-meta-len" 1 "拒绝超过文件的元数据长度" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_meta_len" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_meta_len" \
         --name meta-len --link "$PHASE_WORK/meta-len.veil-link"
 
     bad_count_low="$RUN_ROOT/bad-count-low.veil"
     cp "$PACKAGE" "$bad_count_low"
     printf '\000\000\000\000' | dd of="$bad_count_low" bs=1 seek=18 conv=notrunc 2>/dev/null
     run_case "UNPACK-15-count-low" 1 "拒绝少于元数据声明的文件数" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_count_low" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_count_low" \
         --name count-low --link "$PHASE_WORK/count-low.veil-link"
 
     bad_count_high="$RUN_ROOT/bad-count-high.veil"
     cp "$PACKAGE" "$bad_count_high"
     printf '\377\377\377\377' | dd of="$bad_count_high" bs=1 seek=18 conv=notrunc 2>/dev/null
     run_case "UNPACK-16-count-high" 1 "拒绝多于元数据声明的文件数" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_count_high" \
+        env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$bad_count_high" \
         --name count-high --link "$PHASE_WORK/count-high.veil-link"
 
     oversized_meta="$RUN_ROOT/oversized-meta.veil"
@@ -1606,7 +1614,7 @@ run_pack_unpack_section() {
     printf '\000\000\000\100' | dd of="$oversized_meta" bs=1 seek=14 conv=notrunc 2>/dev/null
     run_shell_case "UNPACK-22-bounded-allocation" 1 \
         "声明 64 MiB 元数据时应有界失败" \
-        "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$oversized_meta' --name oversized --link '$PHASE_WORK/oversized.veil-link'"
+        "HOME='$UNPACK_FAIL_HOME' VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$oversized_meta' --name oversized --link '$PHASE_WORK/oversized.veil-link'"
 
     PACK_WS=$(resolve_workspace_for_link "$PHASE_WORK/package.veil-link")
     run_case "PACK-08-missing-ciphertext" 1 "密文缺失时打包失败" \
@@ -1617,6 +1625,8 @@ run_pack_unpack_section() {
 run_config_link_section() {
     section "CFG/LINK/RES：配置、链接恢复和篡改处理"
     phase "config-link"
+    REC_11_HOME="$RUN_ROOT/home-detached"
+    mkdir -p "$REC_11_HOME"
 
     run_case "CFG-01" 0 "无配置文件的配置查看" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" config
@@ -1797,14 +1807,18 @@ run_corruption_section() {
     run_case "REC-10-lost-config" 0 "配置丢失后直接访问工作区" \
         sh -c "mv '$PHASE_HOME/.veil/config.toml' '$RUN_ROOT/config-lost.toml'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$WS'; rc=\$?; mv '$RUN_ROOT/config-lost.toml' '$PHASE_HOME/.veil/config.toml'; exit \$rc"
     run_case "REC-11-header-link" 0 "根据工作区元数据头重建链接" \
-        sh -c "cp -R '$WS' '$RUN_ROOT/detached-workspace'; mv '$RUN_ROOT/detached-workspace' '$RUN_ROOT/detached-workspace-renamed'; VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-workspace-renamed' --output '$RUN_ROOT/detached.veil-link'"
+        sh -c "cp -R '$WS' '$RUN_ROOT/detached-workspace'; mv '$RUN_ROOT/detached-workspace' '$RUN_ROOT/detached-workspace-renamed'; HOME='$REC_11_HOME' VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-workspace-renamed' --output '$RUN_ROOT/detached.veil-link'"
     run_case "REC-11-open" 0 "打开重建的脱离工作区链接" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/detached.veil-link"
+        env HOME="$REC_11_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/detached.veil-link"
 }
 
 run_e2e_section() {
     section "E2E：用户旅程和选项参数等价性"
     phase "e2e"
+    E2E_BACKUP_HOME="$RUN_ROOT/home-e2e-backup"
+    E2E_MIGRATE_HOME="$RUN_ROOT/home-e2e-migrate"
+    E2E_EMPTY_HOME="$RUN_ROOT/home-e2e-empty"
+    mkdir -p "$E2E_BACKUP_HOME" "$E2E_MIGRATE_HOME" "$E2E_EMPTY_HOME"
 
     run_case "E2E-01-init" 0 "E2E 位置参数形式初始化" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init journey 1
@@ -1828,24 +1842,26 @@ run_e2e_section() {
         sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init multilink && VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link multilink --output '$RUN_ROOT/other-link.veil-link' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' add '$RUN_ROOT/other-link.veil-link' '$FIXTURES/hello.txt' shared.txt && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list multilink"
 
     run_case "E2E-04-backup" 0 "打包、移动、解包、导出备份工作流" \
-        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init backup && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' add backup '$FIXTURES/binary.bin' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack backup --output '$RUN_ROOT/backup.veil' && mkdir -p '$RUN_ROOT/moved' && mv '$RUN_ROOT/backup.veil' '$RUN_ROOT/moved/backup.veil' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/moved/backup.veil' --name restored-backup --link '$RUN_ROOT/restored-backup.veil-link' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' ex '$RUN_ROOT/restored-backup.veil-link' binary.bin '$RUN_ROOT/backup-export.bin'"
+        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init backup && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' add backup '$FIXTURES/binary.bin' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack backup --output '$RUN_ROOT/backup.veil' && mkdir -p '$RUN_ROOT/moved' && mv '$RUN_ROOT/backup.veil' '$RUN_ROOT/moved/backup.veil' && HOME='$E2E_BACKUP_HOME' VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/moved/backup.veil' --name restored-backup --link '$RUN_ROOT/restored-backup.veil-link' && HOME='$E2E_BACKUP_HOME' VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' ex '$RUN_ROOT/restored-backup.veil-link' binary.bin '$RUN_ROOT/backup-export.bin'"
     assert_file_equals "E2E-04-bytes" "backup export matches" "$RUN_ROOT/backup-export.bin" "$FIXTURES/binary.bin"
 
     run_case "E2E-05-password-migration" 0 "改密迁移工作流" \
-        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init migrate && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' add migrate '$FIXTURES/hello.txt' && VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' passwd migrate && VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack migrate --output '$RUN_ROOT/migrated.veil' && VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/migrated.veil' --name migrated --link '$RUN_ROOT/migrated.veil-link'"
+        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init migrate && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' add migrate '$FIXTURES/hello.txt' && VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' passwd migrate && VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack migrate --output '$RUN_ROOT/migrated.veil' && HOME='$E2E_MIGRATE_HOME' VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/migrated.veil' --name migrated --link '$RUN_ROOT/migrated.veil-link'"
     run_case "E2E-05-old-fails" 1 "迁移后旧密码失效" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/migrated.veil-link"
+        env HOME="$E2E_MIGRATE_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/migrated.veil-link"
     run_case "E2E-05-new-works" 0 "新密码可打开迁移后的包" \
-        env VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/migrated.veil-link"
+        env HOME="$E2E_MIGRATE_HOME" VEIL_PASSWORD=3 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/migrated.veil-link"
 
     run_case "E2E-10-empty-lifecycle" 1 "空生命周期，末尾删除不存在文件预期失败" \
-        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init empty-e2e && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack empty-e2e --output '$RUN_ROOT/empty-e2e.veil' && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/empty-e2e.veil' --name empty-e2e-copy --link '$RUN_ROOT/empty-e2e-copy.veil-link' && VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=4 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' passwd empty-e2e-copy && VEIL_PASSWORD=4 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' rm empty-e2e-copy missing-file"
+        sh -c "VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' init empty-e2e && VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack empty-e2e --output '$RUN_ROOT/empty-e2e.veil' && HOME='$E2E_EMPTY_HOME' VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$RUN_ROOT/empty-e2e.veil' --name empty-e2e-copy --link '$RUN_ROOT/empty-e2e-copy.veil-link' && HOME='$E2E_EMPTY_HOME' VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=4 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' passwd empty-e2e-copy && HOME='$E2E_EMPTY_HOME' VEIL_PASSWORD=4 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' rm empty-e2e-copy missing-file"
     printf '[观察] 空生命周期末尾删除不存在文件应正常失败；组合命令退出码见上方。\n'
 }
 
 run_release_section() {
     section "Release 构建：安全提示和核心生命周期"
     phase "release"
+    RELEASE_COPY_HOME="$RUN_ROOT/home-release-copy"
+    mkdir -p "$RELEASE_COPY_HOME"
 
     run_case "GLB-02" 0 "Release 版本安全提示" \
         env VEIL_HINTS=off "$RELEASE_BIN" --version
@@ -1860,10 +1876,10 @@ run_release_section() {
     run_case "REL-04-pack" 0 "Release 打包" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off "$RELEASE_BIN" pack release-box --output "$RUN_ROOT/release.veil"
     run_case "REL-05-unpack" 0 "Release 解包" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off "$RELEASE_BIN" unpack "$RUN_ROOT/release.veil" \
+        env HOME="$RELEASE_COPY_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off "$RELEASE_BIN" unpack "$RUN_ROOT/release.veil" \
         --name release-copy --link "$PHASE_WORK/release-copy.veil-link"
     run_case "REL-06-export-copy" 0 "Release 导出解包副本" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off "$RELEASE_BIN" ex release-copy release.txt "$RUN_ROOT/release-copy-export.txt"
+        env HOME="$RELEASE_COPY_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off "$RELEASE_BIN" ex release-copy release.txt "$RUN_ROOT/release-copy-export.txt"
     assert_file_equals "REL-06-bytes" "Release round-trip matches" \
         "$RUN_ROOT/release-copy-export.txt" "$FIXTURES/hello.txt"
 

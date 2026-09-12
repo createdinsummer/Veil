@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use veil_core::config::GlobalConfig;
 use veil_core::link::VeilLink;
 use veil_core::volume;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 根据现有链接、配置记录或 `.veil-meta` 生成新的 `.veil-link`。
 ///
@@ -23,6 +22,10 @@ use veil_core::workspace_ops::WorkspaceManager;
 pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     let mut config = GlobalConfig::load()?;
     let resolved = super::resolve_container(target)?;
+    if resolved.veil_id.is_empty() {
+        crate::cli_bail!(LinkMissingVeilId);
+    }
+    let manager = super::workspace_manager(&resolved);
     let output_path = output
         .map(PathBuf::from)
         .unwrap_or_else(|| super::default_link_path(&resolved.name));
@@ -47,27 +50,20 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
             // 已有链接直接逐字节复制，避免重新序列化改变内容。
             std::fs::copy(existing_link, &output_path)?;
             config.cache_link(&output_path)?;
-        } else if config.find_container_key(&resolved.name).is_some() {
+        } else if config.find_container_key(&resolved.veil_id).is_some() {
             // 容器已注册但没有现有链接时，由配置模型生成新链接。
-            config.register_link(&resolved.name, &output_path)?;
+            config.register_link(&resolved.veil_id, &output_path)?;
         } else {
-            // 仅能定位工作区时，从明文头部读取身份并现场构造链接。
-            let manager = WorkspaceManager::new(resolved.workspace_path.clone());
-            let header = manager.read_meta_header()?;
-            let container_name = header.container_name.clone();
-            if header.veil_id.is_empty() {
-                crate::cli_bail!(LinkMissingVeilId);
-            }
-            let veil_id = header.veil_id.clone();
-            let volume = volume::volume_for_path(&resolved.workspace_path)?;
-            let relative_path = resolved
+            // 未注册的脱离工作区也使用解析阶段确认过的稳定 ID。
+            let volume = volume::volume_for_path(&manager.workspace_path)?;
+            let relative_path = manager
                 .workspace_path
                 .strip_prefix(&volume.mount_path)
-                .unwrap_or(&resolved.workspace_path)
+                .unwrap_or(&manager.workspace_path)
                 .to_path_buf();
             VeilLink::new(
-                veil_id,
-                container_name,
+                resolved.veil_id.clone(),
+                resolved.name.clone(),
                 relative_path,
                 volume.volume_id,
                 volume.volume_label,

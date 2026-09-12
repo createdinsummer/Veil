@@ -3,7 +3,6 @@
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 导出文件到本地文件系统（工作区架构）。
 ///
@@ -29,9 +28,9 @@ pub fn run(
     output: &str,
     password: Option<String>,
 ) -> Result<()> {
-    // 链接可同时指向工作区和容器身份，这里取实际工作区根目录。
+    // 链接只负责定位，实际操作绑定到确认后的稳定 ID。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;
@@ -44,7 +43,6 @@ pub fn run(
     let password = password_str.expose_secret();
 
     // 输出路径由调用方决定，core 负责查找、解密和写入。
-    let manager = WorkspaceManager::new(workspace_path);
     let output_path = Path::new(output);
 
     manager.extract_file(file_name, output_path, password)?;

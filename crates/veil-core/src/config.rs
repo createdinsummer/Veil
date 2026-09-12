@@ -8,10 +8,11 @@
 
 use crate::error::VeilError;
 use crate::link::{LINK_EXTENSION, VeilLink};
+use crate::metadata::MetaHeader;
 use crate::volume::{self, VolumeInfo};
 use crate::workspace::WorkspaceConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -352,6 +353,8 @@ impl HintsLevel {
 pub struct ResolvedContainer {
     /// 容器展示名称。
     pub name: String,
+    /// 从实际 `.veil-meta` 明文头确认的稳定容器 ID。
+    pub veil_id: String,
     /// 容器工作区根路径。
     pub workspace_path: PathBuf,
     /// 成功解析到的链接文件路径。
@@ -498,6 +501,7 @@ impl GlobalConfig {
         if config.version.is_empty() {
             config.version = default_version();
         }
+        config.validate_container_ids()?;
 
         Ok(config)
     }
@@ -510,6 +514,7 @@ impl GlobalConfig {
     /// 目录创建、序列化、临时文件写入、同步或原子替换失败时返回
     /// [`VeilError::ConfigError`]。
     pub fn save(&self) -> Result<(), VeilError> {
+        self.validate_container_ids()?;
         let path = Self::config_path()?;
 
         // 配置目录可能尚未存在，保存前按需创建。
@@ -535,6 +540,110 @@ impl GlobalConfig {
         temp_file
             .persist(&path)
             .map_err(|e| VeilError::ConfigError(format!("替换配置文件失败: {}", e.error)))?;
+
+        Ok(())
+    }
+
+    /// 确认稳定 ID 尚未注册给其他容器。
+    ///
+    /// 配置键和容器记录中的 `veil_id` 都参与检查。同一容器可以保存多个链接，
+    /// 因此这里不把链接记录视为 ID 冲突。
+    pub fn ensure_container_id_available(&self, veil_id: &str) -> Result<(), VeilError> {
+        if veil_id.trim().is_empty() {
+            return Err(VeilError::InvalidFormat("容器 ID 不能为空".to_string()));
+        }
+
+        if self.containers.contains_key(veil_id)
+            || self
+                .containers
+                .values()
+                .any(|container| container.veil_id == veil_id)
+            || self.links.iter().any(|link| link.veil_id == veil_id)
+        {
+            return Err(VeilError::ContainerIdConflict(format!(
+                "容器 ID '{}' 已被占用",
+                veil_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 注册新容器，并保证稳定 ID 不会被静默覆盖。
+    pub fn register_container(&mut self, container: ContainerConfig) -> Result<(), VeilError> {
+        self.ensure_container_id_available(&container.veil_id)?;
+        let veil_id = container.veil_id.clone();
+        self.containers.insert(veil_id, container);
+        Ok(())
+    }
+
+    /// 返回唯一持有指定稳定 ID 的配置键。
+    fn container_key_by_veil_id(&self, veil_id: &str) -> Result<String, VeilError> {
+        let matched_keys: Vec<_> = self
+            .containers
+            .iter()
+            .filter(|(_, container)| container.veil_id == veil_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        match matched_keys.as_slice() {
+            [key] => Ok(key.clone()),
+            [] => Err(VeilError::ContainerNotFound(format!(
+                "容器 ID '{}' 不存在",
+                veil_id
+            ))),
+            _ => Err(VeilError::ContainerIdConflict(format!(
+                "容器 ID '{}' 对应多个容器记录",
+                veil_id
+            ))),
+        }
+    }
+
+    /// 确认工作区实际身份与配置中的稳定 ID 一致。
+    ///
+    /// 未注册的脱离工作区允许直接使用；只要 ID 已注册，其工作区路径就必须一致。
+    fn ensure_workspace_matches_container(
+        &self,
+        veil_id: &str,
+        workspace_path: &Path,
+    ) -> Result<(), VeilError> {
+        let key = match self.container_key_by_veil_id(veil_id) {
+            Ok(key) => key,
+            Err(VeilError::ContainerNotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+
+        let configured_path = self.get_container_workspace_path(&key)?;
+        if comparable_path(&configured_path) != comparable_path(workspace_path) {
+            return Err(VeilError::ContainerIdConflict(format!(
+                "容器 ID '{}' 已绑定到 {}，不能再次绑定到 {}",
+                veil_id,
+                configured_path.display(),
+                workspace_path.display()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 校验所有容器记录的稳定 ID 唯一且非空。
+    fn validate_container_ids(&self) -> Result<(), VeilError> {
+        let mut seen = HashSet::new();
+
+        for (key, container) in &self.containers {
+            if container.veil_id.trim().is_empty() {
+                return Err(VeilError::InvalidFormat(format!(
+                    "配置项 '{}' 缺少 veil_id",
+                    key
+                )));
+            }
+            if !seen.insert(container.veil_id.as_str()) {
+                return Err(VeilError::ContainerIdConflict(format!(
+                    "容器 ID '{}' 在配置中重复",
+                    container.veil_id
+                )));
+            }
+        }
 
         Ok(())
     }
@@ -610,7 +719,40 @@ impl GlobalConfig {
         }
     }
 
-    /// 将用户输入解析成容器名、工作区路径和链接文件。
+    /// 通过配置键读取实际工作区身份，并确认明文头中的 `veil_id`。
+    fn resolve_registered_container(&self, key: &str) -> Result<ResolvedContainer, VeilError> {
+        let container = self
+            .containers
+            .get(key)
+            .ok_or_else(|| VeilError::ContainerNotFound(format!("容器记录 '{}' 不存在", key)))?;
+        if container.veil_id.trim().is_empty() {
+            return Err(VeilError::InvalidFormat(format!(
+                "容器记录 '{}' 缺少 veil_id",
+                key
+            )));
+        }
+
+        let workspace_path = self.get_container_workspace_path(key)?;
+        let header = read_workspace_header(&workspace_path)?;
+        if header.veil_id != container.veil_id {
+            return Err(VeilError::ContainerIdConflict(format!(
+                "容器记录 '{}' 的 ID 为 '{}'，工作区实际 ID 为 '{}'",
+                key, container.veil_id, header.veil_id
+            )));
+        }
+
+        Ok(ResolvedContainer {
+            name: header.container_name,
+            veil_id: header.veil_id,
+            workspace_path,
+            link_path: None,
+            missing_link_path: None,
+            ambiguity: None,
+            recovered_link: false,
+        })
+    }
+
+    /// 将用户输入解析成实际 `veil_id`、容器名、工作区路径和链接文件。
     ///
     /// 支持 `.veil-link`、配置中的容器名，以及直接指向工作区目录的路径。
     /// 输入指向 `.veil` 打包文件时不会自动解包，而是返回包含操作建议的错误。
@@ -627,13 +769,11 @@ impl GlobalConfig {
 
             // 目录必须包含 .veil-meta，避免把任意目录误认成容器。
             if input_path.is_dir() && input_path.join(".veil-meta").exists() {
-                let name = input_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("container")
-                    .to_string();
+                let header = read_workspace_header(&input_path)?;
+                self.ensure_workspace_matches_container(&header.veil_id, &input_path)?;
                 return Ok(ResolvedContainer {
-                    name,
+                    name: header.container_name,
+                    veil_id: header.veil_id,
                     workspace_path: input_path,
                     link_path: None,
                     missing_link_path: None,
@@ -681,19 +821,7 @@ impl GlobalConfig {
         }
 
         if let Some(key) = self.find_container_key(input) {
-            let name = self
-                .containers
-                .get(&key)
-                .map(|container| container.container_name.clone())
-                .unwrap_or_else(|| input.to_string());
-            return Ok(ResolvedContainer {
-                name,
-                workspace_path: self.get_container_workspace_path(&key)?,
-                link_path: None,
-                missing_link_path: None,
-                ambiguity: None,
-                recovered_link: false,
-            });
+            return self.resolve_registered_container(&key);
         }
 
         Err(VeilError::ContainerNotFound(format!(
@@ -710,28 +838,25 @@ impl GlobalConfig {
     /// 容器或工作区不存在、缺少 `veil_id`、链接写入或配置保存失败时返回错误。
     pub fn register_link(
         &mut self,
-        container_name: &str,
+        veil_id: &str,
         link_path: &Path,
     ) -> Result<VeilLink, VeilError> {
-        // 先由容器名解析配置键，再取得当前工作区和稳定身份。
-        let container_key = self.find_container_key(container_name).ok_or_else(|| {
-            VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
-        })?;
+        // 先由稳定 ID 定位唯一容器，再取得当前工作区。
+        let container_key = self.container_key_by_veil_id(veil_id)?;
+        let container = self
+            .containers
+            .get(&container_key)
+            .ok_or_else(|| VeilError::ContainerNotFound(format!("容器 ID '{}' 不存在", veil_id)))?;
+        if container.veil_id.is_empty() {
+            return Err(VeilError::InvalidFormat(format!(
+                "容器 ID '{}' 缺少 veil_id",
+                veil_id
+            )));
+        }
+        let container_name = container.container_name.clone();
         let workspace_path = self.get_container_workspace_path(&container_key)?;
-        let veil_id = {
-            let container = self.containers.get(&container_key).ok_or_else(|| {
-                VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
-            })?;
-            if container.veil_id.is_empty() {
-                return Err(VeilError::ConfigError(format!(
-                    "容器 '{}' 缺少 veil_id",
-                    container_name
-                )));
-            }
-            container.veil_id.clone()
-        };
 
-        self.register_link_at(&veil_id, container_name, &workspace_path, link_path)
+        self.register_link_at(veil_id, &container_name, &workspace_path, link_path)
     }
 
     /// 使用调用方提供的容器身份和工作区路径创建链接。
@@ -747,6 +872,15 @@ impl GlobalConfig {
         workspace_path: &Path,
         link_path: &Path,
     ) -> Result<VeilLink, VeilError> {
+        let container_key =
+            self.container_key_by_veil_id(veil_id)
+                .map_err(|error| match error {
+                    VeilError::ContainerNotFound(_) => {
+                        VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
+                    }
+                    other => other,
+                })?;
+
         // 先登记卷，再计算相对路径；链接文件只保存相对卷根的路径。
         let volume = volume::volume_for_path(workspace_path)?;
         self.register_volume(&volume);
@@ -766,13 +900,6 @@ impl GlobalConfig {
         let raw = fs::read(link_path)?;
         self.cache_link_content(link_path, &link, &raw);
 
-        let container_key = self
-            .containers
-            .iter()
-            .find_map(|(key, container)| (container.veil_id == veil_id).then(|| key.clone()))
-            .ok_or_else(|| {
-                VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
-            })?;
         let container = self.containers.get_mut(&container_key).ok_or_else(|| {
             VeilError::ContainerNotFound(format!("容器 '{}' 不存在", container_name))
         })?;
@@ -911,17 +1038,25 @@ impl GlobalConfig {
         // 先读取原始字节，随后解析和缓存都使用同一份内容。
         let raw = fs::read(link_path)?;
         let link = VeilLink::load(link_path)?;
-        self.cache_link_content(link_path, &link, &raw);
         // 优先使用已缓存且仍存在的挂载路径，否则回退到链接自身的卷校验。
         let mount_path = self
             .volumes
             .get(&link.workspace.volume_id)
             .map(|volume| volume.mount_path.as_path());
         let workspace_path = link.resolve_workspace_path_with_mount(link_path, mount_path)?;
-        let name = link.container_name();
+        let header = read_workspace_header(&workspace_path)?;
+        if header.veil_id != link.workspace.veil_id {
+            return Err(VeilError::ContainerIdConflict(format!(
+                "链接记录的 ID 为 '{}'，工作区实际 ID 为 '{}'",
+                link.workspace.veil_id, header.veil_id
+            )));
+        }
+        self.ensure_workspace_matches_container(&header.veil_id, &workspace_path)?;
+        self.cache_link_content(link_path, &link, &raw);
 
         Ok(ResolvedContainer {
-            name,
+            name: header.container_name,
+            veil_id: header.veil_id,
             workspace_path,
             link_path: Some(link_path.to_path_buf()),
             missing_link_path: None,
@@ -945,24 +1080,24 @@ impl GlobalConfig {
             return Ok(resolved);
         }
 
-        let registered_name = self.containers.iter().find_map(|(name, container)| {
+        let registered_key = self.containers.iter().find_map(|(key, container)| {
             container
                 .links
                 .iter()
                 .any(|registered| registered == &missing_path)
-                .then(|| name.clone())
+                .then(|| key.clone())
         });
-        let inferred_name = link_path
+        let inferred_key = link_path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("container")
             .to_string();
-        let name = registered_name
+        let key = registered_key
             // 其次使用容器记录中登记过的链接路径，最后尝试与文件名同名的容器键。
             .or_else(|| {
                 self.containers
-                    .contains_key(&inferred_name)
-                    .then_some(inferred_name)
+                    .contains_key(&inferred_key)
+                    .then_some(inferred_key)
             })
             .ok_or_else(|| {
                 VeilError::ContainerNotFound(format!(
@@ -971,14 +1106,9 @@ impl GlobalConfig {
                 ))
             })?;
 
-        Ok(ResolvedContainer {
-            name: name.clone(),
-            workspace_path: self.get_container_workspace_path(&name)?,
-            link_path: None,
-            missing_link_path: Some(link_path.to_path_buf()),
-            ambiguity: None,
-            recovered_link: false,
-        })
+        let mut resolved = self.resolve_registered_container(&key)?;
+        resolved.missing_link_path = Some(link_path.to_path_buf());
+        Ok(resolved)
     }
 
     /// 从 `config.toml` 中的原始字节副本恢复缺失的 `.veil-link`。
@@ -1031,6 +1161,113 @@ impl GlobalConfig {
         self.save()?;
         Ok(true)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_ops::WorkspaceManager;
+
+    /// 构造仅用于配置唯一性测试的容器记录。
+    fn container(veil_id: &str, container_name: &str) -> ContainerConfig {
+        ContainerConfig {
+            veil_id: veil_id.to_string(),
+            container_name: container_name.to_string(),
+            workspace: Some("default".to_string()),
+            container_dir: Some(veil_id.to_string()),
+            workspace_path: None,
+            dedicated: false,
+            created_at: "2026-09-12T00:00:00Z".to_string(),
+            last_accessed: None,
+            links: Vec::new(),
+        }
+    }
+
+    /// 注册第二个同 ID 的容器时必须拒绝，并保留原记录。
+    #[test]
+    fn register_container_rejects_duplicate_veil_id() {
+        let mut config = GlobalConfig::default();
+        config
+            .register_container(container("veil-same", "first"))
+            .unwrap();
+
+        let error = config
+            .register_container(container("veil-same", "second"))
+            .unwrap_err();
+
+        assert!(matches!(error, VeilError::ContainerIdConflict(_)));
+        assert_eq!(config.containers["veil-same"].container_name, "first");
+    }
+
+    /// 加载或保存前的校验必须拒绝同一 ID 出现在两条容器记录中。
+    #[test]
+    fn validate_container_ids_rejects_duplicate_values() {
+        let mut config = GlobalConfig::default();
+        config
+            .containers
+            .insert("first-key".to_string(), container("veil-same", "first"));
+        config
+            .containers
+            .insert("second-key".to_string(), container("veil-same", "second"));
+
+        let error = config.validate_container_ids().unwrap_err();
+
+        assert!(matches!(error, VeilError::ContainerIdConflict(_)));
+    }
+
+    /// 直接传入工作区目录时也必须从 `.veil-meta` 得到真实 `veil_id`。
+    #[test]
+    fn resolve_container_reads_veil_id_from_workspace_metadata() {
+        crate::kdf::enable_fast_test_kdf();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let workspace_path = temp_dir.path().join("detached");
+        WorkspaceManager::new(workspace_path.clone())
+            .init_container_with_id("veil-actual", "actual-name", "default", "password")
+            .unwrap();
+
+        let resolved = GlobalConfig::default()
+            .resolve_container(workspace_path.to_str().unwrap())
+            .unwrap();
+
+        assert_eq!(resolved.veil_id, "veil-actual");
+        assert_eq!(resolved.name, "actual-name");
+        assert_eq!(resolved.workspace_path, workspace_path);
+    }
+
+    /// 绑定预期 ID 的管理器不能读取另一身份的工作区。
+    #[test]
+    fn workspace_manager_rejects_mismatched_veil_id() {
+        crate::kdf::enable_fast_test_kdf();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let workspace_path = temp_dir.path().join("detached");
+        WorkspaceManager::new(workspace_path.clone())
+            .init_container_with_id("veil-actual", "actual-name", "default", "password")
+            .unwrap();
+
+        let manager = WorkspaceManager::for_container(workspace_path, "veil-expected");
+        let error = manager.read_meta_header().unwrap_err();
+
+        assert!(matches!(error, VeilError::ContainerIdConflict(_)));
+    }
+}
+
+/// 读取工作区 `.veil-meta` 明文头，用于确认容器稳定身份。
+fn read_workspace_header(workspace_path: &Path) -> Result<MetaHeader, VeilError> {
+    let meta_path = workspace_path.join(".veil-meta");
+    let bytes = fs::read(&meta_path).map_err(|error| {
+        VeilError::ConfigError(format!(
+            "读取容器元数据失败 {}: {}",
+            meta_path.display(),
+            error
+        ))
+    })?;
+    MetaHeader::from_bytes(&bytes)
+}
+
+/// 对工作区路径做可比较的规范化，优先消除符号链接和相对路径差异。
+fn comparable_path(path: &Path) -> PathBuf {
+    let absolute = absolute_path(path);
+    fs::canonicalize(&absolute).unwrap_or(absolute)
 }
 
 /// 判断路径扩展名是否严格等于 `.veil-link`。

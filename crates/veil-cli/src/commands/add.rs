@@ -3,7 +3,7 @@
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::workspace_ops::{AddFileSpec, WorkspaceManager};
+use veil_core::workspace_ops::AddFileSpec;
 use walkdir::WalkDir;
 
 /// 添加本地文件或目录到容器（工作区架构）。
@@ -32,9 +32,9 @@ pub fn run(
     dest: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
-    // 先解析链接或容器名，后续所有操作都针对解析出的工作区路径。
+    // 先解析容器身份，后续所有操作都绑定确认后的 veil_id。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     // 提前收集所有源路径和目标路径，避免密码输入后才发现路径无效。
     let source_path = Path::new(source);
@@ -55,7 +55,6 @@ pub fn run(
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    let manager = WorkspaceManager::new(workspace_path);
     let encrypted_names = manager.add_files(&files, password)?;
 
     if files.len() == 1 {

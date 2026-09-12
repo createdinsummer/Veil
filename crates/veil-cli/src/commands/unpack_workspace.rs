@@ -64,6 +64,7 @@ pub fn run_workspace(
     if header.veil_id.is_empty() {
         crate::cli_bail!(UnpackMissingVeilId);
     }
+    config.ensure_container_id_available(&header.veil_id)?;
 
     let creation_time = super::creation_timestamp();
     let link_path = link_output
@@ -123,9 +124,7 @@ pub fn run_workspace(
             last_accessed: None,
             links: Vec::new(),
         };
-        config
-            .containers
-            .insert(metadata.veil_id.clone(), container_config);
+        config.register_container(container_config)?;
 
         // 注册链接会写入链接文件并保存完整配置。
         config.register_link_at(&metadata.veil_id, &name, &container_dir, &link_path)?;

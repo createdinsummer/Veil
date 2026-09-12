@@ -78,6 +78,7 @@ pub enum ErrorCode {
     FileNotFound = 9014,
     FileAlreadyExists = 9015,
     VolumeUnavailable = 9016,
+    ContainerIdConflict = 9017,
 }
 
 /// 错误码对应的模板和进程退出码。
@@ -307,6 +308,12 @@ impl ErrorCode {
                 "error.core_volume_unavailable",
                 1,
             ),
+            Self::ContainerIdConflict => Self::define(
+                value,
+                "CONTAINER_ID_CONFLICT",
+                "error.core_container_id_conflict",
+                1,
+            ),
         }
     }
 
@@ -453,6 +460,7 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::FileNotFound(error) => (ErrorCode::FileNotFound, error),
             VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error),
             VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
+            VeilError::ContainerIdConflict(error) => (ErrorCode::ContainerIdConflict, error),
         };
 
         Self::coded(code).param("error", detail)

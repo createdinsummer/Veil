@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::{WorkspaceManager, normalize_container_path};
+use veil_core::workspace_ops::normalize_container_path;
 
 /// 判断容器内路径是否存在。
 ///
@@ -15,7 +15,7 @@ pub fn run_workspace(container_name: &str, path: &str, password: Option<String>)
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
-    let manager = WorkspaceManager::new(resolved.workspace_path);
+    let manager = super::workspace_manager(&resolved);
     let metadata = manager.read_meta(password)?;
 
     // 根路径代表容器本身，始终是存在的目录。

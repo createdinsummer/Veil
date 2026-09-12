@@ -15,7 +15,8 @@ use veil_core::workspace_ops::WorkspaceManager;
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
     // shell 生命周期内复用同一 WorkspaceManager，避免每次命令重新解析链接。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let display_name = resolved.name.clone();
+    let manager = super::workspace_manager(&resolved);
 
     crate::outln!(
         "{}",
@@ -28,14 +29,13 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let pwd = password_str.expose_secret();
 
     // 入口处先验证密码；失败时直接退出，不进入交互循环。
-    let manager = WorkspaceManager::new(workspace_path.clone());
     manager.read_meta(pwd)?;
 
     crate::outln!("{}", crate::i18n::t("shell.opened_named").green());
     crate::outln!();
     crate::outln!(
         "{}",
-        crate::i18n::t1("shell.title_named", "name", container_name).bright_cyan()
+        crate::i18n::t1("shell.title_named", "name", &display_name).bright_cyan()
     );
     crate::outln!("{}", crate::i18n::t("shell.command_hint").bright_black());
     crate::outln!();
@@ -70,7 +70,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
             }
             "info" => match manager.read_meta(pwd) {
                 Ok(current_metadata) => {
-                    if let Err(e) = show_info(container_name, &current_metadata) {
+                    if let Err(e) = show_info(&display_name, &current_metadata) {
                         crate::outln!(
                             "{}",
                             crate::i18n::t1("shell.info_failed", "error", &e.to_string()).red()

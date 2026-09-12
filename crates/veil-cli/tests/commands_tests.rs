@@ -669,7 +669,24 @@ fn pack_and_unpack_create_reusable_links() {
     let package = env.work.path().join("package.vault.veil");
     assert!(package.exists());
 
+    // 同一配置中再次注册相同 veil_id 必须被拒绝，不能静默覆盖原容器。
     env.command()
+        .args([
+            "unpack",
+            &env.path(&package),
+            "-n",
+            "restored",
+            "-p",
+            "test-password",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[9017]"));
+
+    // 换一个干净的用户配置后，同一个包可以按原 ID 恢复。
+    let restored_home = tempfile::TempDir::new().unwrap();
+    env.command()
+        .env("HOME", restored_home.path())
         .args([
             "unpack",
             &env.path(&package),
@@ -686,6 +703,7 @@ fn pack_and_unpack_create_reusable_links() {
     assert!(restored_link.exists());
 
     env.command()
+        .env("HOME", restored_home.path())
         .args(["free", &env.path(&restored_link)])
         .assert()
         .success()
@@ -710,9 +728,11 @@ fn unpack_failures_roll_back_artifacts() {
 
     let package = env.work.path().join("package-source.vault.veil");
     let before_count = default_container_count(&env);
+    let unpack_home = tempfile::TempDir::new().unwrap();
 
     let wrong_link = env.work.path().join("wrong.veil-link");
     env.command_with_password("wrong-password")
+        .env("HOME", unpack_home.path())
         .args([
             "unpack",
             &env.path(&package),
@@ -733,6 +753,7 @@ fn unpack_failures_roll_back_artifacts() {
 
     let damaged_link = env.work.path().join("damaged.veil-link");
     env.command()
+        .env("HOME", unpack_home.path())
         .args([
             "unpack",
             &env.path(&package),

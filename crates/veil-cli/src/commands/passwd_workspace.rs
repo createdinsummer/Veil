@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 读取旧密码和新密码，并重新加密容器元数据和所有文件内容。
 ///
@@ -15,7 +14,7 @@ pub fn run_workspace(
 ) -> Result<()> {
     // 密码修改必须作用于容器工作区，而不是链接文件本身。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     crate::outln!("{}", crate::i18n::t("passwd.changing").cyan());
 
@@ -30,7 +29,6 @@ pub fn run_workspace(
     let new_password_str = new_pwd.expose_secret();
 
     // core 在修改过程中保持原始 veil_id 和工作区结构不变。
-    let manager = WorkspaceManager::new(workspace_path);
     manager.change_password(old_password_str, new_password_str)?;
 
     crate::outln!("{}", crate::i18n::t("passwd.changed").green());

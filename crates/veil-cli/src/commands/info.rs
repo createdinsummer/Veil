@@ -4,7 +4,6 @@ use crate::error::Result;
 use colored::Colorize;
 use std::collections::BTreeMap;
 use std::path::Path;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 显示容器详细信息（工作区架构）。
 ///
@@ -23,9 +22,10 @@ use veil_core::workspace_ops::WorkspaceManager;
 /// veil info photos
 /// ```
 pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
-    // info 只需要工作区路径，展示名称以加密元数据中的值为准。
+    // info 绑定已确认的 ID，展示名称以加密元数据中的值为准。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
+    let workspace_path = manager.workspace_path.clone();
 
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
@@ -34,7 +34,6 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     let password = password_str.expose_secret();
 
     // 读取元数据同时完成密码验证；失败时不会打印任何容器内容。
-    let manager = WorkspaceManager::new(workspace_path.clone());
     let metadata = manager.read_meta(password)?;
 
     crate::outln!("\n{}", crate::i18n::t("info.title").cyan().bold());

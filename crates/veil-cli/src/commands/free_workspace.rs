@@ -3,7 +3,6 @@
 use crate::error::Result;
 use colored::Colorize;
 use std::collections::BTreeMap;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// `free` 展示用的文件系统节点。
 enum TreeNode {
@@ -18,9 +17,9 @@ enum TreeNode {
 /// # 错误
 /// 容器解析、密码读取或元数据解密失败时返回错误。
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
-    // 解析链接后只保留工作区路径，展示名称仍以元数据为准确认。
+    // 解析后绑定稳定 ID，展示名称以实际元数据为准。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
@@ -29,7 +28,6 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let password = password_str.expose_secret();
 
     // 解密清单后即可完整展示树状内容，无需读取文件密文本体。
-    let manager = WorkspaceManager::new(workspace_path);
     let metadata = manager.read_meta(password)?;
 
     crate::outln!("\n{}", crate::i18n::t("free.title").cyan().bold());

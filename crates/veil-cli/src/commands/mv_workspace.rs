@@ -2,7 +2,6 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::WorkspaceManager;
 
 /// 移动或重命名文件、目录在容器元数据中的原始路径。
 ///
@@ -18,7 +17,7 @@ pub fn run_workspace(
 ) -> Result<()> {
     // mv 只改变元数据中的原始路径，不复制或重新加密 blob。
     let resolved = super::resolve_container(container_name)?;
-    let workspace_path = resolved.workspace_path;
+    let manager = super::workspace_manager(&resolved);
 
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
@@ -33,7 +32,6 @@ pub fn run_workspace(
     );
 
     // 移动失败时原元数据保持不变，成功后再打印最终目标路径。
-    let manager = WorkspaceManager::new(workspace_path);
     let (_, final_target) = manager.move_path(from, to, pwd)?;
 
     crate::outln!(

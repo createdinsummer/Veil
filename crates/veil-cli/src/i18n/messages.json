@@ -374,6 +374,10 @@
     "zh": "卷不可用: {error}",
     "en": "Volume unavailable: {error}"
   },
+  "error.core_container_id_conflict": {
+    "zh": "容器 ID 冲突: {error}",
+    "en": "Container ID conflict: {error}"
+  },
 
   "init.exists": {
     "zh": "容器文件已存在: {path}",
