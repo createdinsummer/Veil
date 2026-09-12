@@ -242,34 +242,154 @@
     "zh": "两次输入的密码不一致",
     "en": "Passwords do not match"
   },
+  "error.password_empty": {
+    "zh": "新密码不能为空",
+    "en": "New password must not be empty"
+  },
+  "error.unknown_argument": {
+    "zh": "未知参数: {arg}",
+    "en": "Unknown argument: {arg}"
+  },
+  "error.argument_conflict": {
+    "zh": "参数冲突: {arg} 不能与 {prior} 同时使用",
+    "en": "Argument conflict: {arg} cannot be used with {prior}"
+  },
+  "error.argument_conflict_single": {
+    "zh": "参数冲突: {arg} 不能重复使用",
+    "en": "Argument conflict: {arg} cannot be used multiple times"
+  },
+  "error.invalid_arguments": {
+    "zh": "参数无效",
+    "en": "Invalid arguments"
+  },
   "error.require_container": {
-    "zh": "❌ 错误: 请指定容器名称",
-    "en": "❌ Error: Please specify container file path"
+    "zh": "请指定容器名称",
+    "en": "Please specify container file path"
   },
   "error.require_input_path": {
-    "zh": "❌ 错误: 请指定输入路径（位置参数或 -i）",
-    "en": "❌ Error: Please specify input path (positional argument or -i)"
+    "zh": "请指定输入路径（位置参数或 -i）",
+    "en": "Please specify input path (positional argument or -i)"
   },
   "error.require_delete_path": {
-    "zh": "❌ 错误: 请指定要删除的路径",
-    "en": "❌ Error: Please specify path to delete"
+    "zh": "请指定要删除的路径",
+    "en": "Please specify path to delete"
   },
   "error.require_src_dst": {
-    "zh": "❌ 错误: 请指定源路径和目标路径",
-    "en": "❌ Error: Please specify source and destination paths"
+    "zh": "请指定源路径和目标路径",
+    "en": "Please specify source and destination paths"
   },
   "error.require_output_path": {
-    "zh": "❌ 错误: 请指定输出路径（位置参数或 -o）",
-    "en": "❌ Error: Please specify output path (positional argument or -o)"
+    "zh": "请指定输出路径（位置参数或 -o）",
+    "en": "Please specify output path (positional argument or -o)"
   },
-  "error.prefix": {
-    "zh": "❌ 错误: {error}",
-    "en": "❌ Error: {error}"
+  "error.display": {
+    "zh": "❌ 错误 [{code}]: {message}",
+    "en": "❌ Error [{code}]: {message}"
+  },
+  "error.unexpected": {
+    "zh": "{error}",
+    "en": "{error}"
+  },
+  "error.core_io": {
+    "zh": "I/O 错误: {error}",
+    "en": "I/O error: {error}"
+  },
+  "error.core_encrypt": {
+    "zh": "age 加密失败: {error}",
+    "en": "age encryption failed: {error}"
+  },
+  "error.core_decrypt": {
+    "zh": "age 解密失败: {error}",
+    "en": "age decryption failed: {error}"
+  },
+  "error.core_serialize": {
+    "zh": "索引序列化失败: {error}",
+    "en": "Index serialization failed: {error}"
+  },
+  "error.core_format": {
+    "zh": "容器格式错误: {error}",
+    "en": "Container format error: {error}"
+  },
+  "error.core_workspace": {
+    "zh": "工作区错误: {error}",
+    "en": "Workspace error: {error}"
+  },
+  "error.core_config": {
+    "zh": "配置错误: {error}",
+    "en": "Configuration error: {error}"
+  },
+  "error.core_container_not_found": {
+    "zh": "容器未找到: {error}",
+    "en": "Container not found: {error}"
+  },
+  "error.core_invalid_format": {
+    "zh": "无效格式: {error}",
+    "en": "Invalid format: {error}"
+  },
+  "error.core_serialization": {
+    "zh": "序列化错误: {error}",
+    "en": "Serialization error: {error}"
+  },
+  "error.core_encryption": {
+    "zh": "加密错误: {error}",
+    "en": "Encryption error: {error}"
+  },
+  "error.core_decryption": {
+    "zh": "解密错误: {error}",
+    "en": "Decryption error: {error}"
+  },
+  "error.core_key_derivation": {
+    "zh": "密钥派生失败: {error}",
+    "en": "Key derivation failed: {error}"
+  },
+  "error.core_file_not_found": {
+    "zh": "文件未找到: {error}",
+    "en": "File not found: {error}"
+  },
+  "error.core_file_already_exists": {
+    "zh": "文件已存在: {error}",
+    "en": "File already exists: {error}"
+  },
+  "error.core_volume_unavailable": {
+    "zh": "卷不可用: {error}",
+    "en": "Volume unavailable: {error}"
   },
 
   "init.exists": {
     "zh": "容器文件已存在: {path}",
     "en": "Container file already exists: {path}"
+  },
+  "init.conflicting_workspace_options": {
+    "zh": "--workspace 与 --workspace-path 不能同时使用",
+    "en": "--workspace and --workspace-path cannot be used together"
+  },
+  "init.dedicated_requires_workspace_path": {
+    "zh": "--dedicated 必须与 --workspace-path 一起使用",
+    "en": "--dedicated must be used with --workspace-path"
+  },
+  "init.portable_conflicts_workspace": {
+    "zh": "--portable 不能与 --workspace 或 --workspace-path 同时使用",
+    "en": "--portable cannot be combined with --workspace or --workspace-path"
+  },
+  "init.workspace_not_found": {
+    "zh": "命名工作区不存在: {name}",
+    "en": "Named workspace does not exist: {name}"
+  },
+  "init.dedicated_path_not_empty": {
+    "zh": "专属工作区路径必须为空目录: {path}",
+    "en": "Dedicated workspace path must be an empty directory: {path}"
+  },
+  "init.link_registration_failed": {
+    "zh": "链接注册失败: {path} ({error})",
+    "en": "Link registration failed: {path} ({error})"
+  },
+  "init.workspace_create_failed": {
+    "zh": "工作区创建失败: {path} ({error})",
+    "en": "Workspace creation failed: {path} ({error})"
+  },
+  "init.invalid_link_extension": {
+    "zh": "链接文件必须以 .veil-link 结尾: {path}",
+    "en": "Link file must end with .veil-link: {path}"
   },
   "init.creating": {
     "zh": "创建新容器...",
@@ -519,12 +639,12 @@
     "en": "Create a new container"
   },
   "cmd.init.usage": {
-    "zh": "veil init <容器名称> [密码] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--portable] [--link <链接文件>]",
-    "en": "veil init <container-name> [password] [--workspace <workspace> | --workspace-path <path> --dedicated] [--portable] [--link <link-file>]"
+    "zh": "veil init <容器名称> [密码] [--workspace <已注册工作区> | --workspace-path <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
+    "en": "veil init <container-name> [password] [--workspace <registered-workspace> | --workspace-path <workspace-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
   },
   "cmd.init.usage_opt": {
-    "zh": "veil init <容器名称> [-p <密码>] [--workspace <工作区> | --workspace-path <路径> --dedicated] [--portable] [--link <链接文件>]",
-    "en": "veil init <container-name> [-p <password>] [--workspace <workspace> | --workspace-path <path> --dedicated] [--portable] [--link <link-file>]"
+    "zh": "veil init <容器名称> [-p <密码>] [--workspace <已注册工作区> | --workspace-path <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
+    "en": "veil init <container-name> [-p <password>] [--workspace <registered-workspace> | --workspace-path <workspace-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
   },
   "cmd.add.about": {
     "zh": "添加文件或目录到容器",
@@ -692,8 +812,8 @@
     "en": "topic"
   },
   "arg.workspace": {
-    "zh": "工作区",
-    "en": "workspace"
+    "zh": "工作区名称",
+    "en": "workspace-name"
   },
   "arg.container_name": {
     "zh": "容器名称",
@@ -725,20 +845,20 @@
     "en": "Custom .veil-link output path"
   },
   "help.init.workspace": {
-    "zh": "使用命名工作区",
-    "en": "Use a named workspace"
+    "zh": "使用已注册的命名工作区（名称，不是路径）",
+    "en": "Use a registered named workspace (name, not a path)"
   },
   "help.init.workspace_path": {
-    "zh": "使用指定工作区路径",
-    "en": "Use a specific workspace path"
+    "zh": "使用指定工作区根路径并自动注册给当前容器（不会新增命名工作区）",
+    "en": "Use a workspace root and auto-register it for this container (does not create a named workspace)"
   },
   "help.init.dedicated": {
-    "zh": "工作区由该容器独占",
-    "en": "Give this container a dedicated workspace"
+    "zh": "工作区由该容器独占（需配合 --workspace-path）",
+    "en": "Give this container a dedicated workspace (requires --workspace-path)"
   },
   "help.init.portable": {
-    "zh": "强制将工作区放在链接文件所在的卷",
-    "en": "Force the workspace onto the link file's volume"
+    "zh": "强制将工作区放在链接文件所在的卷（不能与工作区选项同用）",
+    "en": "Force the workspace onto the link file's volume (cannot be combined with workspace options)"
   },
   "help.container": {
     "zh": "容器名称或 .veil-link 路径",
@@ -925,6 +1045,10 @@
   "unpack.name_extract_failed": {
     "zh": "无法从文件名提取容器名称",
     "en": "Could not derive a container name from the filename"
+  },
+  "unpack.missing_veil_id": {
+    "zh": "打包文件缺少容器身份",
+    "en": "Package file is missing the container identity"
   },
   "unpack.already_exists": {
     "zh": "容器 '{name}' 已存在，请使用不同的名称或先删除现有容器",
@@ -1114,6 +1238,10 @@
     "zh": "链接文件已存在: {path}",
     "en": "Link file already exists: {path}"
   },
+  "link.missing_veil_id": {
+    "zh": "链接文件缺少容器身份",
+    "en": "Link file is missing the container identity"
+  },
   "cmd.link.about": {
     "zh": "根据工作区或容器名重建 .veil-link",
     "en": "Rebuild a .veil-link from a workspace or container name"
@@ -1159,8 +1287,8 @@
     "en": "The .veil package file to unpack"
   },
   "help.unpack.workspace": {
-    "zh": "目标工作区名称",
-    "en": "Destination workspace name"
+    "zh": "目标命名工作区（已注册名称，不是路径）",
+    "en": "Destination named workspace (registered name, not a path)"
   },
   "help.unpack.link": {
     "zh": "解包后生成的 .veil-link 路径",

@@ -1,6 +1,6 @@
 //! `veil list` 子命令：列出工作区容器的文件清单。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 

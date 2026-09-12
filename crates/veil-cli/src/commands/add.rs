@@ -1,6 +1,6 @@
 //! `veil add` 子命令：向工作区容器添加本地文件。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::workspace_ops::WorkspaceManager;
@@ -17,7 +17,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 ///
 /// # 返回
 /// - `Ok(())`: 文件已加密并添加到容器
-/// - `Err(anyhow::Error)`: 失败
+/// - `Err(CommandError)`: 失败
 ///
 /// # 示例
 /// ```bash
@@ -37,14 +37,11 @@ pub fn run(
     // 提前校验源路径，避免用户输入密码后才发现文件不存在。
     let file = Path::new(source);
     if !file.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1("add.source_not_found", "path", source)
-        );
+        crate::cli_bail!(AddSourceNotFound, "path" => source);
     }
 
     if !file.is_file() {
-        anyhow::bail!("{}", crate::i18n::t1("add.not_file", "path", source));
+        crate::cli_bail!(AddNotFile, "path" => source);
     }
 
     println!("{}", crate::i18n::t("opening_container").cyan());

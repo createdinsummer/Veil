@@ -13,6 +13,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -77,7 +78,7 @@ impl WorkspaceManager {
         let header = MetaHeader::new(
             salt,
             nonce,
-            AlgorithmId::Aes256Gcm,
+            AlgorithmId::ChaCha20Poly1305,
             meta_data.veil_id.clone(),
             meta_data.container_name.clone(),
             meta_data.workspace_type.clone(),
@@ -111,7 +112,7 @@ impl WorkspaceManager {
         let header_len = MetaHeader::header_len(&bytes)?;
         let encrypted_data = &bytes[header_len..];
 
-        let decrypted = decrypt_aes256gcm(&master_key, encrypted_data, &header.nonce)?;
+        let decrypted = decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?;
 
         let meta_data = MetaData::from_json(&decrypted)?;
 
@@ -143,7 +144,7 @@ impl WorkspaceManager {
         let header_bytes = header.to_bytes()?;
 
         let json_bytes = meta_data.to_json()?;
-        let encrypted = encrypt_aes256gcm(master_key, &json_bytes, &header.nonce)?;
+        let encrypted = encrypt_chacha20poly1305(master_key, &json_bytes, &header.nonce)?;
 
         // .veil-meta 使用“明文 TLV 头部 + 密文 JSON”的连续布局。
         let mut file_data = header_bytes;
@@ -211,7 +212,7 @@ impl WorkspaceManager {
 
         let master_key = derive_master_key(password, &header.salt)?;
 
-        let encrypted_data = encrypt_aes256gcm(&master_key, &file_data, &file_nonce)?;
+        let encrypted_data = encrypt_chacha20poly1305(&master_key, &file_data, &file_nonce)?;
 
         // 先落盘密文，再发布指向它的元数据条目，避免元数据提前引用缺失文件。
         let encrypted_path = self.workspace_path.join(&encrypted_name);
@@ -255,7 +256,7 @@ impl WorkspaceManager {
 
         let master_key = derive_master_key(password, &header.salt)?;
 
-        let decrypted = decrypt_aes256gcm(&master_key, &encrypted_data, &entry.nonce)?;
+        let decrypted = decrypt_chacha20poly1305(&master_key, &encrypted_data, &entry.nonce)?;
 
         fs::write(output_path, decrypted)?;
 
@@ -313,7 +314,8 @@ impl WorkspaceManager {
 
         let header_len = MetaHeader::header_len(&meta_bytes)?;
         let encrypted_data = &meta_bytes[header_len..];
-        let decrypted = decrypt_aes256gcm(&old_master_key, encrypted_data, &old_header.nonce)?;
+        let decrypted =
+            decrypt_chacha20poly1305(&old_master_key, encrypted_data, &old_header.nonce)?;
         let meta_data = MetaData::from_json(&decrypted)?;
 
         let new_salt = generate_random_bytes::<32>();
@@ -322,12 +324,13 @@ impl WorkspaceManager {
         let new_master_key = derive_master_key(new_password, &new_salt)?;
 
         let json_bytes = meta_data.to_json()?;
-        let new_encrypted_data = encrypt_aes256gcm(&new_master_key, &json_bytes, &new_nonce)?;
+        let new_encrypted_data =
+            encrypt_chacha20poly1305(&new_master_key, &json_bytes, &new_nonce)?;
 
         let new_header = MetaHeader::new(
             new_salt,
             new_nonce,
-            AlgorithmId::Aes256Gcm,
+            AlgorithmId::ChaCha20Poly1305,
             old_header.veil_id.clone(),
             old_header.container_name.clone(),
             old_header.workspace_type.clone(),
@@ -345,9 +348,10 @@ impl WorkspaceManager {
 
             let encrypted_file_data = fs::read(&encrypted_path)?;
             let plaintext =
-                decrypt_aes256gcm(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
+                decrypt_chacha20poly1305(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
 
-            let new_encrypted = encrypt_aes256gcm(&new_master_key, &plaintext, &file_entry.nonce)?;
+            let new_encrypted =
+                encrypt_chacha20poly1305(&new_master_key, &plaintext, &file_entry.nonce)?;
 
             atomic_write(&encrypted_path, &new_encrypted)?;
         }
@@ -370,7 +374,7 @@ impl WorkspaceManager {
 
         let header_len = MetaHeader::header_len(&meta_bytes)?;
         let encrypted_data = &meta_bytes[header_len..];
-        let decrypted = decrypt_aes256gcm(&master_key, encrypted_data, &header.nonce)?;
+        let decrypted = decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?;
         let mut meta_data = MetaData::from_json(&decrypted)?;
 
         let file_entry = meta_data
@@ -416,11 +420,9 @@ fn derive_master_key(password: &str, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 3
 
 /// 使用 ChaCha20-Poly1305 加密字节。
 ///
-/// 函数名沿用历史命名，实际 cipher 由当前实现决定。
-///
 /// # 错误
 /// 加密失败时返回 [`VeilError::EncryptionError`]。
-fn encrypt_aes256gcm(
+fn encrypt_chacha20poly1305(
     key: &[u8; 32],
     plaintext: &[u8],
     nonce: &[u8; 12],
@@ -438,12 +440,10 @@ fn encrypt_aes256gcm(
 
 /// 使用 ChaCha20-Poly1305 解密并验证字节。
 ///
-/// 函数名沿用历史命名，实际 cipher 由当前实现决定。
-///
 /// # 错误
 /// 密码错误、密文损坏或认证标签校验失败时返回
 /// [`VeilError::DecryptionError`]。
-fn decrypt_aes256gcm(
+fn decrypt_chacha20poly1305(
     key: &[u8; 32],
     ciphertext: &[u8],
     nonce: &[u8; 12],
@@ -475,16 +475,19 @@ fn generate_random_id() -> String {
     hex::encode(bytes)
 }
 
-/// 先写同路径的 `.tmp` 文件，再通过重命名替换目标文件。
+/// 先写同目录临时文件，再通过原子替换更新目标文件。
 ///
 /// # 错误
-/// 临时文件写入或重命名失败时返回 I/O 错误。
+/// 临时文件创建、写入、同步或替换失败时返回 I/O 错误。
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), VeilError> {
-    // 临时文件与目标同目录，确保 rename 不跨卷并且替换具有原子性。
-    let temp_path = path.with_extension("tmp");
-
-    fs::write(&temp_path, data)?;
-    fs::rename(&temp_path, path)?;
+    // 临时文件与目标同目录，避免跨卷移动，并兼容 Windows 的覆盖语义。
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
+    temp_file.write_all(data)?;
+    temp_file.as_file().sync_all()?;
+    temp_file
+        .persist(path)
+        .map_err(|error| VeilError::Io(error.error))?;
 
     Ok(())
 }

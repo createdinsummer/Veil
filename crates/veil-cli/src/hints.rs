@@ -4,6 +4,7 @@
 //! 会把“已展示”状态写回配置；链接恢复和文件类型歧义提示属于条件提示，不记录次数。
 
 use crate::i18n;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::config::{GlobalConfig, HintsLevel};
@@ -42,9 +43,9 @@ pub fn current_level() -> HintsLevel {
 ///
 /// # 错误
 /// 级别无效、全局配置加载失败或保存失败时返回错误。
-pub fn set_hint_level(level: &str) -> anyhow::Result<()> {
-    let parsed = HintsLevel::parse(level)
-        .ok_or_else(|| anyhow::anyhow!("{}", i18n::t("config.invalid_level")))?;
+pub fn set_hint_level(level: &str) -> Result<()> {
+    let parsed =
+        HintsLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
     let mut config = GlobalConfig::load()?;
     config.preferences.hints_level = parsed;
     config.save()?;

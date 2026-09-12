@@ -1,6 +1,6 @@
 //! `veil ex` 子命令：从工作区容器解密导出文件。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::workspace_ops::WorkspaceManager;
@@ -17,7 +17,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 ///
 /// # 返回
 /// - `Ok(())`: 文件已解密并导出
-/// - `Err(anyhow::Error)`: 失败
+/// - `Err(CommandError)`: 失败
 ///
 /// # 示例
 /// ```bash
@@ -34,8 +34,7 @@ pub fn run(
     let workspace_path = resolved.workspace_path;
 
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
-    let file_name =
-        file_name.ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("ex.specify_path")))?;
+    let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;
 
     println!("{}", crate::i18n::t("opening_container").cyan());
     let password_str =

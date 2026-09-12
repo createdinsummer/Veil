@@ -78,6 +78,7 @@ fn init_creates_a_reusable_veil_link() {
     assert!(link.contains("veil_id = \"veil-"));
     assert!(link.contains("container_name = \"demo\""));
     assert!(link.contains("volume_id = "));
+    assert!(link.contains("algorithm = \"ChaCha20-Poly1305\""));
 
     let source = env.write_file("note.txt", "hello");
     env.command()

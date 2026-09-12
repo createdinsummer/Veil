@@ -1,7 +1,8 @@
 //! `veil init` 子命令：创建新的工作区容器和链接。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use veil_core::config::GlobalConfig;
 use veil_core::workspace::WorkspaceConfig;
@@ -16,14 +17,14 @@ use veil_core::workspace_ops::WorkspaceManager;
 /// - `target`: 容器名称、链接文件名或工作区目标路径。
 /// - `password`: 用户密码；`None` 时按命令层规则从环境变量或终端读取。
 /// - `link_output`: 自定义 `.veil-link` 输出路径。
-/// - `workspace_name`: 可选的命名工作区。
-/// - `workspace_path`: 可选的显式工作区根路径。
-/// - `dedicated`: 是否让新工作区由当前容器独占。
+/// - `workspace_name`: 可选的已注册命名工作区名称，不是路径。
+/// - `workspace_path`: 可选的显式工作区根路径，自动登记到当前容器，不新增命名工作区。
+/// - `dedicated`: 是否让 `workspace_path` 指定的目录由当前容器独占。
 /// - `portable`: 是否强制把工作区放在链接文件所在卷。
 ///
 /// # 返回
 /// - `Ok(())`: 容器创建成功
-/// - `Err(anyhow::Error)`: 名称、路径、密码、配置或容器写入失败。
+/// - `Err(CommandError)`: 名称、路径、密码、配置或容器写入失败。
 ///
 /// # 示例
 /// ```bash
@@ -42,28 +43,41 @@ pub fn run(
     dedicated: bool,
     portable: bool,
 ) -> Result<()> {
+    // 工作区来源必须唯一，避免参数解析成功但其中一项被静默忽略。
+    if workspace_name.is_some() && workspace_path.is_some() {
+        crate::cli_bail!(InitConflictingWorkspaceOptions);
+    }
+    if dedicated && workspace_path.is_none() {
+        crate::cli_bail!(InitDedicatedRequiresWorkspacePath);
+    }
+    if portable && (workspace_name.is_some() || workspace_path.is_some()) {
+        crate::cli_bail!(InitPortableConflictsWorkspace);
+    }
+
     let target_path = Path::new(target);
     // 链接目标使用文件名，目录目标使用最后一级名称，普通名称原样保留。
-    let container_name = if target_path.extension().and_then(|ext| ext.to_str())
-        == Some("veil-link")
-    {
-        target_path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("init.invalid_link_name")))?
-            .to_string()
-    } else if target_path
-        .parent()
-        .is_some_and(|parent| !parent.as_os_str().is_empty())
-    {
-        target_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("init.invalid_container_name")))?
-            .to_string()
-    } else {
-        target.to_string()
-    };
+    let container_name =
+        if target_path.extension().and_then(|ext| ext.to_str()) == Some("veil-link") {
+            target_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| crate::cli_error!(InitInvalidLinkName))?
+                .to_string()
+        } else if target_path
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty())
+        {
+            target_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| crate::cli_error!(InitInvalidContainerName))?
+                .to_string()
+        } else {
+            target.to_string()
+        };
+    if container_name.trim().is_empty() {
+        crate::cli_bail!(InitInvalidContainerName);
+    }
 
     let veil_id = veil_core::metadata::generate_veil_id();
     let creation_time = super::creation_timestamp();
@@ -74,15 +88,11 @@ pub fn run(
     } else {
         super::default_link_path_for_time(&container_name, &creation_time)
     };
+    if link_path.extension().and_then(|ext| ext.to_str()) != Some("veil-link") {
+        crate::cli_bail!(InitInvalidLinkExtension, "path" => link_path.display());
+    }
     if link_path.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1(
-                "link.output_exists",
-                "path",
-                &link_path.display().to_string()
-            )
-        );
+        crate::cli_bail!(LinkOutputExists, "path" => link_path.display());
     }
 
     let absolute_link_path = if link_path.is_absolute() {
@@ -97,6 +107,7 @@ pub fn run(
     // 外部卷或显式 portable 参数会自动把默认工作区放到链接所在卷。
     let portable_mode =
         workspace_name.is_none() && workspace_path.is_none() && (portable || external_location);
+    let explicit_workspace_path = workspace_path.is_some();
 
     let mut config = GlobalConfig::load()?;
 
@@ -108,8 +119,12 @@ pub fn run(
         // 便携模式固定使用链接目录下的隐藏工作区，保证链接与数据一起移动。
         link_dir.join(".veil/workspaces/default")
     } else if let Some(path) = workspace_path {
+        // 显式路径直接使用，并把实际容器根路径登记到容器记录；它不会成为新的
+        // workspace.custom 命名工作区。
         path
     } else if let Some(name) = workspace_name {
+        // 命名工作区只查配置注册表；default 可在首次运行时自动补全，自定义名称
+        // 当前没有 CLI 注册命令，必须预先写入配置。
         if name == "default" {
             config.workspace.default.as_ref().unwrap().path.clone()
         } else {
@@ -117,18 +132,15 @@ pub fn run(
                 .workspace
                 .custom
                 .get(name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{}",
-                        crate::i18n::t1("unpack.workspace_not_found", "name", name)
-                    )
-                })?
+                .ok_or_else(|| crate::cli_error!(InitWorkspaceNotFound, "name" => name))?
                 .path
                 .clone()
         }
     } else {
         config.workspace.default.as_ref().unwrap().path.clone()
     };
+    let workspace_root = make_absolute(&workspace_root)?;
+    let workspace_root_existed = workspace_root.exists();
 
     // 共享工作区以 veil_id 作为目录名，专属工作区则直接使用 workspace_root。
     let container_dir = (!dedicated).then(|| veil_id.clone());
@@ -138,11 +150,14 @@ pub fn run(
         workspace_root.join(&veil_id)
     };
 
-    if container_path.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1("init.exists", "path", &container_path.display().to_string())
-        );
+    let container_path_existed = container_path.exists();
+    if container_path_existed && (!dedicated || !is_empty_directory(&container_path)?) {
+        let error = if dedicated {
+            crate::cli_error!(InitDedicatedPathNotEmpty, "path" => container_path.display())
+        } else {
+            crate::cli_error!(InitContainerExists, "path" => container_path.display())
+        };
+        return Err(error);
     }
 
     println!("{}", crate::i18n::t("init.creating").cyan());
@@ -171,47 +186,79 @@ pub fn run(
     };
 
     let manager = WorkspaceManager::new(container_path.clone());
-    let metadata =
-        manager.init_container_with_id(&veil_id, &container_name, workspace_type, password)?;
-
     use veil_core::config::ContainerConfig;
-    let container_config = if dedicated {
-        ContainerConfig {
-            veil_id: metadata.veil_id.clone(),
-            container_name: container_name.clone(),
-            workspace: None,
-            container_dir: None,
-            workspace_path: Some(workspace_root),
-            dedicated: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_accessed: None,
-            links: Vec::new(),
-        }
-    } else {
-        ContainerConfig {
-            veil_id: metadata.veil_id.clone(),
-            container_name: container_name.clone(),
-            workspace: Some(workspace_name.unwrap_or("default").to_string()),
-            container_dir,
-            workspace_path: None,
-            dedicated: false,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_accessed: None,
-            links: Vec::new(),
-        }
-    };
+    let creation_result = (|| -> Result<()> {
+        let metadata = manager
+            .init_container_with_id(&veil_id, &container_name, workspace_type, password)
+            .map_err(|error| {
+                crate::cli_error!(
+                    InitWorkspaceCreateFailed,
+                    "path" => container_path.display(),
+                    "error" => error
+                )
+            })?;
 
-    config
-        .containers
-        .insert(metadata.veil_id.clone(), container_config);
-    config.save()?;
-    // 注册链接时会再次写入配置，确保容器与链接两侧都能独立恢复。
-    config.register_link_at(
-        &metadata.veil_id,
-        &container_name,
-        &container_path,
-        &link_path,
-    )?;
+        let container_config = if dedicated {
+            ContainerConfig {
+                veil_id: metadata.veil_id.clone(),
+                container_name: container_name.clone(),
+                workspace: None,
+                container_dir: None,
+                workspace_path: Some(workspace_root.clone()),
+                dedicated: true,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_accessed: None,
+                links: Vec::new(),
+            }
+        } else {
+            // 显式路径和便携工作区不来自命名工作区，必须保存实际容器根路径供
+            // 链接丢失后的配置恢复使用。
+            let resolved_workspace_path =
+                (explicit_workspace_path || portable_mode).then(|| container_path.clone());
+            ContainerConfig {
+                veil_id: metadata.veil_id.clone(),
+                container_name: container_name.clone(),
+                workspace: Some(workspace_name.unwrap_or("default").to_string()),
+                container_dir,
+                workspace_path: resolved_workspace_path,
+                dedicated: false,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_accessed: None,
+                links: Vec::new(),
+            }
+        };
+
+        config
+            .containers
+            .insert(metadata.veil_id.clone(), container_config);
+        // register_link_at 将链接写入后再保存配置；任一步失败都可整体回滚。
+        config
+            .register_link_at(
+                &metadata.veil_id,
+                &container_name,
+                &container_path,
+                &link_path,
+            )
+            .map_err(|error| {
+                crate::cli_error!(
+                    InitLinkRegistrationFailed,
+                    "path" => link_path.display(),
+                    "error" => error
+                )
+            })?;
+        Ok(())
+    })();
+
+    if let Err(error) = creation_result {
+        cleanup_failed_init(
+            &container_path,
+            container_path_existed,
+            &workspace_root,
+            workspace_root_existed,
+            &link_path,
+        );
+        return Err(error);
+    }
 
     println!(
         "{}",
@@ -299,5 +346,47 @@ fn nearest_existing_path(path: &Path) -> PathBuf {
         if !current.pop() {
             return PathBuf::new();
         }
+    }
+}
+
+/// 将用户提供的相对工作区路径固定到当前目录。
+fn make_absolute(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+/// 判断路径是否是可直接交给专属容器的空目录。
+fn is_empty_directory(path: &Path) -> Result<bool> {
+    if !path.is_dir() {
+        return Ok(false);
+    }
+
+    Ok(fs::read_dir(path)?.next().is_none())
+}
+
+/// 初始化失败时移除本次创建的链接、元数据和容器目录。
+///
+/// 已存在且为空的专属目录不能整体删除，只清理本次初始化可能写入的元数据文件。
+fn cleanup_failed_init(
+    container_path: &Path,
+    container_path_existed: bool,
+    workspace_root: &Path,
+    workspace_root_existed: bool,
+    link_path: &Path,
+) {
+    let _ = fs::remove_file(link_path);
+
+    if container_path_existed {
+        let _ = fs::remove_file(container_path.join(".veil-meta"));
+    } else {
+        let _ = fs::remove_dir_all(container_path);
+    }
+
+    // 共享工作区根目录如果是本次创建且仍为空，也一并删除，避免失败后留下空目录。
+    if !workspace_root_existed && workspace_root != container_path {
+        let _ = fs::remove_dir(workspace_root);
     }
 }

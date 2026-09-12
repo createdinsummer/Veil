@@ -1,6 +1,6 @@
 //! `veil shell` 子命令：提供针对单个容器的交互式命令循环。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::io::{self, Write};
 use veil_core::workspace_ops::WorkspaceManager;

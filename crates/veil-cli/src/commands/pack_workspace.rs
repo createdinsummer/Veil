@@ -1,6 +1,6 @@
 //! `veil pack` 子命令：把工作区打包为单文件 `.veil`。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::container_format::ContainerPacker;
@@ -30,7 +30,7 @@ pub fn run_workspace(
 
     // 打包文件整体覆写，因此必须显式拒绝已存在的输出路径。
     if Path::new(&output).exists() {
-        anyhow::bail!("{}", crate::i18n::t1("pack.output_exists", "path", &output));
+        crate::cli_bail!(PackOutputExists, "path" => &output);
     }
 
     println!("{}", crate::i18n::t("pack.in_progress").cyan());

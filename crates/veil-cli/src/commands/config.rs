@@ -1,7 +1,7 @@
 //! `veil config` 子命令：查看或更新用户偏好。
 
 use crate::i18n;
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::config::{GlobalConfig, HintsLevel};
 
@@ -103,8 +103,8 @@ fn show_config() -> Result<()> {
 /// 级别无效、配置加载或保存失败时返回错误。
 fn set_hints_level(level: &str) -> Result<()> {
     // 先验证并规范化输入，再写入全局配置。
-    let valid_level = HintsLevel::parse(level)
-        .ok_or_else(|| anyhow::anyhow!("{}", i18n::t("config.invalid_level")))?;
+    let valid_level =
+        HintsLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
 
     crate::hints::set_hint_level(valid_level.as_str())?;
 

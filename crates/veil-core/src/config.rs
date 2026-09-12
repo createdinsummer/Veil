@@ -13,6 +13,7 @@ use crate::workspace::WorkspaceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// `~/.veil/config.toml` 的根配置。
@@ -138,6 +139,9 @@ pub struct WorkspaceSection {
     pub default: Option<WorkspaceConfig>,
 
     /// 以工作区名称索引的自定义工作区。
+    ///
+    /// CLI 目前没有创建或注册自定义工作区的命令，调用方需在配置文件写入该映射后，
+    /// 才能通过 `--workspace <名称>` 引用。
     #[serde(default)]
     pub custom: HashMap<String, WorkspaceConfig>,
 }
@@ -157,7 +161,9 @@ pub struct ContainerConfig {
     /// 容器在共享工作区根目录下的目录名。
     pub container_dir: Option<String>,
 
-    /// 专属工作区时记录的容器根路径。
+    /// 无法仅靠命名工作区和 `container_dir` 还原时记录的最终容器根路径。
+    ///
+    /// 通过 `--workspace-path` 创建时会自动写入此字段；该路径不会新增到命名工作区表。
     pub workspace_path: Option<PathBuf>,
 
     /// 是否使用由该容器独占的工作区。
@@ -402,10 +408,10 @@ pub struct EncryptionDefaults {
 }
 
 impl Default for EncryptionDefaults {
-    /// 使用 AES-256-GCM 和 Argon2id 作为配置默认值。
+    /// 使用 ChaCha20-Poly1305 和 Argon2id 作为配置默认值。
     fn default() -> Self {
         Self {
-            algorithm: "AES-256-GCM".to_string(),
+            algorithm: "ChaCha20-Poly1305".to_string(),
             key_derivation: "Argon2id".to_string(),
         }
     }
@@ -413,7 +419,7 @@ impl Default for EncryptionDefaults {
 
 /// 返回默认内容加密算法名称。
 fn default_algorithm() -> String {
-    "AES-256-GCM".to_string()
+    "ChaCha20-Poly1305".to_string()
 }
 
 /// 配置文件中的 Argon2id 参数。
@@ -501,7 +507,8 @@ impl GlobalConfig {
     /// 写入先落到同目录的 `config.toml.tmp`，再用重命名替换正式文件。
     ///
     /// # 错误
-    /// 目录创建、序列化、临时文件写入或重命名失败时返回 [`VeilError::ConfigError`]。
+    /// 目录创建、序列化、临时文件写入、同步或原子替换失败时返回
+    /// [`VeilError::ConfigError`]。
     pub fn save(&self) -> Result<(), VeilError> {
         let path = Self::config_path()?;
 
@@ -514,13 +521,20 @@ impl GlobalConfig {
         let content = toml::to_string_pretty(self)
             .map_err(|e| VeilError::ConfigError(format!("序列化配置失败: {}", e)))?;
 
-        // 同目录临时文件加 rename，避免进程中途退出留下半截配置。
-        let temp_path = path.with_extension("toml.tmp");
-        fs::write(&temp_path, content)
+        // 同目录临时文件加原子替换，既避免半截配置，也兼容 Windows 覆盖语义。
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| VeilError::ConfigError(format!("创建临时配置文件失败: {}", e)))?;
+        temp_file
+            .write_all(content.as_bytes())
             .map_err(|e| VeilError::ConfigError(format!("写入临时文件失败: {}", e)))?;
-
-        fs::rename(&temp_path, &path)
-            .map_err(|e| VeilError::ConfigError(format!("重命名配置文件失败: {}", e)))?;
+        temp_file
+            .as_file()
+            .sync_all()
+            .map_err(|e| VeilError::ConfigError(format!("同步临时文件失败: {}", e)))?;
+        temp_file
+            .persist(&path)
+            .map_err(|e| VeilError::ConfigError(format!("替换配置文件失败: {}", e.error)))?;
 
         Ok(())
     }

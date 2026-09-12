@@ -24,6 +24,8 @@ pub mod unpack_workspace;
 use std::path::PathBuf;
 use veil_core::config::{GlobalConfig, ResolvedContainer};
 
+use crate::error::Result;
+
 /// 解析 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。
 ///
 /// 解析到缓存恢复或缺失链接后，会同步注册链接并展示恢复提示；若输入同时匹配
@@ -31,7 +33,7 @@ use veil_core::config::{GlobalConfig, ResolvedContainer};
 ///
 /// # 错误
 /// 全局配置加载或 [`GlobalConfig::resolve_container`] 失败时返回错误。
-pub fn resolve_container(input: &str) -> anyhow::Result<ResolvedContainer> {
+pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
     let mut config = GlobalConfig::load()?;
     let mut resolved = config.resolve_container(input)?;
 
@@ -133,11 +135,11 @@ fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
 ///
 /// # 返回
 /// - `Ok(SecretString)`: 成功获取密码
-/// - `Err(anyhow::Error)`: 失败（TTY 不可用或读取失败）
+/// - `Err(CommandError)`: 失败（TTY 不可用或读取失败）
 ///
 /// # 示例
 /// ```no_run
-/// # fn main() -> anyhow::Result<()> {
+/// # fn main() -> veil_cli::error::Result<()> {
 /// # use veil_cli::commands::prompt_password;
 /// let password = prompt_password("请输入密码: ", Some("mypass".to_string()))?;
 /// let password = prompt_password("请输入密码: ", None)?; // 环境变量或交互式
@@ -147,7 +149,7 @@ fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
 pub fn prompt_password(
     prompt: &str,
     password_arg: Option<String>,
-) -> anyhow::Result<age::secrecy::SecretString> {
+) -> Result<age::secrecy::SecretString> {
     // 显式参数优先级最高，适用于调用方已经获得密码的场景。
     if let Some(pwd) = password_arg {
         return Ok(age::secrecy::SecretString::from(pwd));
@@ -175,28 +177,26 @@ pub fn prompt_password(
 ///
 /// # 返回
 /// - `Ok(SecretString)`: 成功获取密码
-/// - `Err(anyhow::Error)`: 失败（两次输入不一致、TTY 不可用或读取失败）
+/// - `Err(CommandError)`: 失败（密码为空、两次输入不一致、TTY 不可用或读取失败）
 ///
 /// # 示例
 /// ```no_run
-/// # fn main() -> anyhow::Result<()> {
+/// # fn main() -> veil_cli::error::Result<()> {
 /// # use veil_cli::commands::prompt_new_password;
 /// let password = prompt_new_password(Some("mypass".to_string()))?;
 /// let password = prompt_new_password(None)?; // 环境变量或交互式确认
 /// # Ok(())
 /// # }
 /// ```
-pub fn prompt_new_password(
-    password_arg: Option<String>,
-) -> anyhow::Result<age::secrecy::SecretString> {
+pub fn prompt_new_password(password_arg: Option<String>) -> Result<age::secrecy::SecretString> {
     // 显式参数跳过确认，调用方已经负责校验来源。
     if let Some(pwd) = password_arg {
-        return Ok(age::secrecy::SecretString::from(pwd));
+        return validate_new_password(age::secrecy::SecretString::from(pwd));
     }
 
     // 环境变量同样跳过二次输入，便于非交互调用。
     if let Ok(password) = std::env::var("VEIL_PASSWORD") {
-        return Ok(age::secrecy::SecretString::from(password));
+        return validate_new_password(age::secrecy::SecretString::from(password));
     }
 
     // 交互模式必须输入两次，不一致时不会向命令层返回任何密码。
@@ -204,8 +204,24 @@ pub fn prompt_new_password(
     let confirm = prompt_password_adaptive(crate::i18n::t("prompt.confirm_password"))?;
 
     if password != confirm {
-        anyhow::bail!("{}", crate::i18n::t("error.password_mismatch"));
+        crate::cli_bail!(PasswordMismatch);
     }
 
-    Ok(age::secrecy::SecretString::from(password))
+    validate_new_password(age::secrecy::SecretString::from(password))
+}
+
+/// 拒绝可用于新容器的空密码。
+///
+/// 旧容器仍可使用空密码打开，以保持对历史数据的兼容；只有创建或修改密码时
+/// 禁止产生新的无密码容器。
+fn validate_new_password(
+    password: age::secrecy::SecretString,
+) -> Result<age::secrecy::SecretString> {
+    use age::secrecy::ExposeSecret;
+
+    if password.expose_secret().is_empty() {
+        crate::cli_bail!(PasswordEmpty);
+    }
+
+    Ok(password)
 }

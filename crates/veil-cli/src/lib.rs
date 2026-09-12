@@ -4,6 +4,7 @@
 //! 终端参数解析和进程退出仍由 `main.rs` 负责，库层函数统一返回错误值。
 
 pub mod commands;
+pub mod error;
 pub mod i18n;
-pub mod output_encoding;
 pub mod hints;
+pub mod output_encoding;

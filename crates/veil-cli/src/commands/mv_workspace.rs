@@ -1,6 +1,6 @@
 //! `veil mv` 子命令：移动或重命名容器内的文件。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 

@@ -1,6 +1,6 @@
 //! `veil info` 子命令：展示容器身份与内容统计。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 
@@ -14,7 +14,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 ///
 /// # 返回
 /// - `Ok(())`: 成功显示信息
-/// - `Err(anyhow::Error)`: 失败
+/// - `Err(CommandError)`: 失败
 ///
 /// # 示例
 /// ```bash

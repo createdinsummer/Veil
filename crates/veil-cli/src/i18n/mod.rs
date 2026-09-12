@@ -3,7 +3,7 @@
 //! `messages.json` 在编译时嵌入二进制，启动后按 `VEIL_LANG` 选择语言。模块保持一个
 //! 进程级只读消息表和语言代码，翻译查询不执行 I/O，占位符按名称替换。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 /// 单种语言下“消息键 → 文本”的映射。
@@ -101,6 +101,17 @@ pub fn t3(key: &str, n1: &str, v1: &str, n2: &str, v2: &str, n3: &str, v3: &str)
         .replace(&format!("{{{n1}}}"), v1)
         .replace(&format!("{{{n2}}}"), v2)
         .replace(&format!("{{{n3}}}"), v3)
+}
+
+/// 使用命名参数映射渲染消息模板。
+///
+/// 未提供的占位符保持原样，便于开发阶段发现遗漏参数。
+pub fn render(key: &str, params: &BTreeMap<&'static str, String>) -> String {
+    let mut message = raw(key).to_string();
+    for (name, value) in params {
+        message = message.replace(&format!("{{{name}}}"), value);
+    }
+    message
 }
 
 /// 返回 clap 简短说明，并注入当前 crate 版本。

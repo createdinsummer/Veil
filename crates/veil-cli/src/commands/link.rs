@@ -1,7 +1,7 @@
 //! `veil link` 子命令：为容器创建新的便携链接。
 
 use crate::i18n;
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use veil_core::config::GlobalConfig;
@@ -28,14 +28,7 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
         .unwrap_or_else(|| super::default_link_path(&resolved.name));
 
     if output_path.exists() {
-        anyhow::bail!(
-            "{}",
-            i18n::t1(
-                "link.output_exists",
-                "path",
-                &output_path.display().to_string()
-            )
-        );
+        crate::cli_bail!(LinkOutputExists, "path" => output_path.display());
     }
 
     if let Some(existing_link) = resolved.link_path.as_deref() {
@@ -51,7 +44,7 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
         let header = manager.read_meta_header()?;
         let container_name = header.container_name.clone();
         if header.veil_id.is_empty() {
-            anyhow::bail!(".veil-meta 缺少 veil_id");
+            crate::cli_bail!(LinkMissingVeilId);
         }
         let veil_id = header.veil_id.clone();
         let volume = volume::volume_for_path(&resolved.workspace_path)?;

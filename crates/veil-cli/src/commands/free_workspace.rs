@@ -1,6 +1,6 @@
 //! `veil free` 子命令：以简化树状视图展示容器内容。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 

@@ -201,7 +201,7 @@ fn default_version() -> String {
 
 /// 返回链接中默认记录的加密算法名称。
 fn default_algorithm() -> String {
-    "AES-256-GCM".to_string()
+    "ChaCha20-Poly1305".to_string()
 }
 
 /// 返回链接中默认记录的密钥派生函数名称。
@@ -232,5 +232,6 @@ mod tests {
 
         assert_eq!(loaded.workspace.veil_id, "veil-1234");
         assert_eq!(loaded.container_name(), "photos");
+        assert_eq!(loaded.encryption.algorithm, "ChaCha20-Poly1305");
     }
 }

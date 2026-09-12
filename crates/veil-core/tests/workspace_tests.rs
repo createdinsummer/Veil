@@ -3,6 +3,7 @@
 use std::fs;
 use tempfile::TempDir;
 use veil_core::kdf;
+use veil_core::metadata::{AlgorithmId, MetaHeader};
 use veil_core::workspace_ops::WorkspaceManager;
 
 /// 验证工作区初始化、元数据读取和空文件列表。
@@ -22,8 +23,11 @@ fn test_workspace_init_and_operations() {
         .init_container("test-container", "default", password)
         .unwrap();
 
-    // 验证 .veil-meta 文件存在
-    assert!(workspace_path.join(".veil-meta").exists());
+    // 验证 .veil-meta 文件存在，并记录实际的 ChaCha20-Poly1305 算法。
+    let meta_path = workspace_path.join(".veil-meta");
+    assert!(meta_path.exists());
+    let header = MetaHeader::from_bytes(&fs::read(meta_path).unwrap()).unwrap();
+    assert_eq!(header.algorithm, AlgorithmId::ChaCha20Poly1305);
 
     // 读取元数据
     let meta = manager.read_meta(password).unwrap();

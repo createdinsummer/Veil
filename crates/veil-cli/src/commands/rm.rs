@@ -1,6 +1,6 @@
 //! `veil rm` 子命令：删除工作区容器中的文件。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 
@@ -15,7 +15,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 ///
 /// # 返回
 /// - `Ok(())`: 文件已删除
-/// - `Err(anyhow::Error)`: 失败
+/// - `Err(CommandError)`: 失败
 ///
 /// # 示例
 /// ```bash

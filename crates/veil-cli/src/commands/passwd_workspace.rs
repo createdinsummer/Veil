@@ -1,6 +1,6 @@
 //! `veil passwd` 子命令：修改工作区容器密码。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 

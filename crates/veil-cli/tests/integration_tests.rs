@@ -33,6 +33,56 @@ fn version_matches_workspace_release() {
         .stdout(predicate::str::contains("2.0.0"));
 }
 
+/// 验证 `init` 帮助明确区分命名工作区和显式路径。
+#[test]
+fn init_help_describes_workspace_options() {
+    Command::cargo_bin("veil")
+        .unwrap()
+        .args(["init", "-h"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<已注册工作区>"))
+        .stdout(predicate::str::contains("<工作区根路径（自动注册）>"))
+        .stdout(predicate::str::contains("已注册的命名工作区"))
+        .stdout(predicate::str::contains("名称，不是路径"))
+        .stdout(predicate::str::contains("自动注册给当前容器"))
+        .stdout(predicate::str::contains("--dedicated"))
+        .stdout(predicate::str::contains("需配合 --workspace-path"));
+}
+
+/// 验证未知参数使用本地化提示，而不是 clap 的英文建议。
+#[test]
+fn init_rejects_unknown_option_with_localized_error() {
+    let env = TestEnv::new("test-password");
+
+    env.command()
+        .args(["init", "test-bad-option", "--not-exist"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "❌ 错误 [1001]: 未知参数: --not-exist",
+        ))
+        .stderr(predicate::str::contains("tip:").not())
+        .stderr(predicate::str::contains("unexpected argument").not());
+}
+
+/// 验证互斥密码参数使用本地化提示。
+#[test]
+fn init_rejects_password_conflict_with_localized_error() {
+    let env = TestEnv::new("test-password");
+
+    env.command()
+        .args(["init", "photo-conflict", "Test-Pass-A", "-p", "Test-Pass-B"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("❌ 错误 [1002]: 参数冲突"))
+        .stderr(predicate::str::contains("不能与"))
+        .stderr(predicate::str::contains("同时使用"))
+        .stderr(predicate::str::contains("cannot be used with").not());
+}
+
 /// 验证初始化可使用自定义链接路径。
 #[test]
 fn init_accepts_custom_link_path() {
@@ -228,6 +278,9 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
     let link_content = std::fs::read_to_string(link).unwrap();
     assert!(link_content.contains(".veil/workspaces/default/veil-"));
     assert!(!link_content.contains("mount_path = "));
+
+    // 链接不可用时应能仅凭配置中的实际工作区路径按名称恢复。
+    env.command().args(["list", "photos"]).assert().success();
 }
 
 /// 验证文件类型帮助在英文环境下可用。
@@ -241,4 +294,190 @@ fn help_files_is_available_in_english() {
         .success()
         .stdout(predicate::str::contains("Shortcut / bookmark"))
         .stdout(predicate::str::contains("ZIP archive"));
+}
+
+/// 验证互斥的工作区参数不会有一项被静默忽略。
+#[test]
+fn init_rejects_conflicting_workspace_options() {
+    let env = TestEnv::new("test-password");
+
+    env.command()
+        .args([
+            "init",
+            "conflict",
+            "--workspace",
+            "default",
+            "--workspace-path",
+            &env.path(env.work.path().join("workspace")),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("不能同时使用"));
+
+    env.command()
+        .args([
+            "init",
+            "portable-conflict",
+            "--portable",
+            "--workspace-path",
+            &env.path(env.work.path().join("workspace")),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--portable"));
+
+    env.command()
+        .args(["init", "dedicated-without-path", "--dedicated"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--workspace-path"));
+}
+
+/// 验证相对工作区路径会固定为绝对位置，离开原目录后链接仍可解析。
+#[test]
+fn init_resolves_relative_workspace_path_from_another_directory() {
+    let env = TestEnv::new("test-password");
+    let link = env.work.path().join("relative.veil-link");
+
+    env.command()
+        .args([
+            "init",
+            "relative",
+            "--workspace-path",
+            "relative-workspace",
+            "--link",
+            &env.path(&link),
+        ])
+        .assert()
+        .success();
+
+    let link_data = veil_core::link::VeilLink::load(&link).unwrap();
+    assert_ne!(
+        link_data.workspace.path,
+        std::path::PathBuf::from("relative-workspace")
+    );
+    assert!(
+        link_data
+            .workspace
+            .path
+            .to_string_lossy()
+            .contains("relative-workspace")
+    );
+
+    let mut list = env.command();
+    list.current_dir(env.home.path())
+        .args(["list", &env.path(&link)])
+        .assert()
+        .success();
+
+    let mut by_name = env.command();
+    by_name
+        .current_dir(env.home.path())
+        .args(["list", "relative"])
+        .assert()
+        .success();
+}
+
+/// 验证 `--link` 只能生成 CLI 可识别的 `.veil-link` 文件。
+#[test]
+fn init_rejects_link_path_with_unknown_extension() {
+    let env = TestEnv::new("test-password");
+    let output = env.work.path().join("not-a-link");
+
+    env.command()
+        .args(["init", "bad-link", "--link", &env.path(&output)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".veil-link"));
+
+    assert!(!output.exists());
+    assert!(!env.home.path().join(".veil/config.toml").exists());
+}
+
+/// 验证链接写入失败时会清理工作区，且不会留下孤立容器记录。
+#[test]
+fn init_rolls_back_when_link_registration_fails() {
+    let env = TestEnv::new("test-password");
+    let blocker = env.work.path().join("blocker");
+    std::fs::write(&blocker, "not a directory").unwrap();
+    let link = blocker.join("nested.veil-link");
+
+    env.command()
+        .args(["init", "rollback", "--link", &env.path(&link)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("❌ 错误 [5010]"))
+        .stderr(predicate::str::contains("链接注册失败"));
+
+    assert!(!link.exists());
+    assert!(!env.home.path().join(".veil/config.toml").exists());
+
+    let workspace_root = env.home.path().join(".veil/workspaces/default");
+    if workspace_root.exists() {
+        assert_eq!(std::fs::read_dir(workspace_root).unwrap().count(), 0);
+    }
+}
+
+/// 验证专属工作区允许复用空目录，但拒绝覆盖已有内容。
+#[test]
+fn init_dedicated_workspace_requires_empty_directory() {
+    let env = TestEnv::new("test-password");
+    let empty_workspace = env.work.path().join("empty-workspace");
+    std::fs::create_dir_all(&empty_workspace).unwrap();
+    let empty_link = env.work.path().join("empty.veil-link");
+
+    env.command()
+        .args([
+            "init",
+            "empty",
+            "--workspace-path",
+            &env.path(&empty_workspace),
+            "--dedicated",
+            "--link",
+            &env.path(&empty_link),
+        ])
+        .assert()
+        .success();
+    assert!(empty_workspace.join(".veil-meta").exists());
+
+    let non_empty_workspace = env.work.path().join("non-empty-workspace");
+    std::fs::create_dir_all(&non_empty_workspace).unwrap();
+    let existing_file = non_empty_workspace.join("keep.txt");
+    std::fs::write(&existing_file, "keep").unwrap();
+    let non_empty_link = env.work.path().join("non-empty.veil-link");
+
+    env.command()
+        .args([
+            "init",
+            "non-empty",
+            "--workspace-path",
+            &env.path(&non_empty_workspace),
+            "--dedicated",
+            "--link",
+            &env.path(&non_empty_link),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("必须为空目录"));
+
+    assert_eq!(std::fs::read_to_string(existing_file).unwrap(), "keep");
+    assert!(!non_empty_workspace.join(".veil-meta").exists());
+    assert!(!non_empty_link.exists());
+}
+
+/// 验证空密码不会创建无法提供任何口令强度的新容器。
+#[test]
+fn init_rejects_empty_password_without_side_effects() {
+    let env = TestEnv::new("test-password");
+    let link = env.link_path("empty-password");
+
+    env.command_with_password("")
+        .args(["init", "empty-password"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("❌ 错误 [2002]: 新密码不能为空"));
+
+    assert!(!link.exists());
+    assert!(!env.home.path().join(".veil/config.toml").exists());
+    assert!(!env.home.path().join(".veil/workspaces/default").exists());
 }

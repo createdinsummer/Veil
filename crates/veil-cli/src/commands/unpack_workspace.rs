@@ -1,6 +1,6 @@
 //! `veil unpack` 子命令：把 `.veil` 包还原为工作区容器。
 
-use anyhow::Result;
+use crate::error::Result;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use veil_core::config::{ContainerConfig, GlobalConfig};
@@ -30,10 +30,7 @@ pub fn run_workspace(
     password: Option<String>,
 ) -> Result<()> {
     if !Path::new(container_path).exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1("unpack.container_not_found", "path", container_path)
-        );
+        crate::cli_bail!(UnpackContainerNotFound, "path" => container_path);
     }
 
     let name = if let Some(n) = container_name {
@@ -43,7 +40,7 @@ pub fn run_workspace(
         let stem = Path::new(container_path)
             .file_stem()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("{}", crate::i18n::t("unpack.name_extract_failed")))?;
+            .ok_or_else(|| crate::cli_error!(UnpackNameExtractFailed))?;
         stem.strip_suffix(".vault").unwrap_or(stem).to_string()
     };
     let mut config = GlobalConfig::load()?;
@@ -61,10 +58,7 @@ pub fn run_workspace(
                 .custom
                 .get(ws_name)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{}",
-                        crate::i18n::t1("unpack.workspace_not_found", "name", ws_name)
-                    )
+                    crate::cli_error!(UnpackWorkspaceNotFound, "name" => ws_name)
                 })?
                 .path
                 .clone()
@@ -79,7 +73,7 @@ pub fn run_workspace(
     let header = MetaHeader::from_bytes(&encrypted_metadata)?;
     let veil_id = header.veil_id.clone();
     if veil_id.is_empty() {
-        anyhow::bail!(".veil-meta 缺少 veil_id");
+        crate::cli_bail!(UnpackMissingVeilId);
     }
 
     let creation_time = super::creation_timestamp();
@@ -88,27 +82,13 @@ pub fn run_workspace(
         .unwrap_or_else(|| super::default_link_path_for_time(&name, &creation_time));
 
     if link_path.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1(
-                "link.output_exists",
-                "path",
-                &link_path.display().to_string()
-            )
-        );
+        crate::cli_bail!(LinkOutputExists, "path" => link_path.display());
     }
 
     let container_dir = allocate_container_directory(&workspace_root, &veil_id, &creation_time);
 
     if container_dir.exists() {
-        anyhow::bail!(
-            "{}",
-            crate::i18n::t1(
-                "unpack.directory_exists",
-                "path",
-                &container_dir.display().to_string()
-            )
-        );
+        crate::cli_bail!(UnpackDirectoryExists, "path" => container_dir.display());
     }
 
     println!("{}", crate::i18n::t("unpack.in_progress").cyan());
@@ -127,10 +107,7 @@ pub fn run_workspace(
     use zeroize::Zeroizing;
     let mut master_key = Zeroizing::new([0u8; 32]);
     kdf::derive_key(password.as_bytes(), &header.salt, &mut *master_key).map_err(|e| {
-        anyhow::anyhow!(
-            "{}",
-            crate::i18n::t1("unpack.kdf_failed", "error", &format!("{:?}", e))
-        )
+        crate::cli_error!(UnpackKdfFailed, "error" => format!("{:?}", e))
     })?;
 
     // 加密 JSON 紧随明文头部，nonce 来自头部字段。
@@ -147,10 +124,7 @@ pub fn run_workspace(
     let nonce_ga = GenericArray::from_slice(&header.nonce);
 
     let decrypted = cipher.decrypt(nonce_ga, encrypted_data).map_err(|e| {
-        anyhow::anyhow!(
-            "{}",
-            crate::i18n::t1("unpack.decrypt_failed", "error", &e.to_string())
-        )
+        crate::cli_error!(UnpackDecryptFailed, "error" => e.to_string())
     })?;
 
     let metadata = MetaData::from_json(&decrypted)?;

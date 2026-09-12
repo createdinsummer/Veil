@@ -7,6 +7,7 @@
 use clap::{Arg, ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod commands;
+mod error;
 mod hints;
 mod i18n;
 mod output_encoding;
@@ -47,13 +48,13 @@ enum Commands {
         // 自定义 `.veil-link` 输出路径。
         #[arg(long, value_name = "链接文件", help = "自定义 .veil-link 输出路径")]
         link: Option<String>,
-        // 已注册的命名工作区。
+        // 已注册的命名工作区查找键，不是文件系统路径。
         #[arg(short = 'w', long, value_name = "工作区", help = "使用命名工作区")]
         workspace: Option<String>,
-        // 显式指定工作区根路径。
+        // 指定工作区根路径并自动登记到当前容器，不会新增命名工作区。
         #[arg(long, value_name = "路径", help = "使用指定工作区路径")]
         workspace_path: Option<String>,
-        // 让新工作区由当前容器独占。
+        // 让 --workspace-path 指定的目录由当前容器独占。
         #[arg(long, help = "工作区由该容器独占")]
         dedicated: bool,
         // 强制把工作区放在链接文件所在卷。
@@ -710,17 +711,89 @@ fn cmd_usage_opt(cmd_name: &str) -> &str {
 /// 输出本地化错误和两种参数写法后终止进程。
 ///
 /// 该函数用于 clap 解析完成后的必填参数校验；固定以状态码 1 退出。
-fn exit_with_help(error_key: &str, cmd_name: &str) -> ! {
-    eprintln!("{}", i18n::t(error_key));
+fn exit_with_help(code: crate::error::ErrorCode, cmd_name: &str) -> ! {
+    let error = crate::error::CommandError::coded(code);
+    eprintln!("{}", error.render());
     eprintln!("\n{}:", i18n::t("label.usage"));
     eprintln!("  {}", cmd_usage(cmd_name));
     eprintln!("  {}", cmd_usage_opt(cmd_name));
-    std::process::exit(1);
+    std::process::exit(error.exit_code().into());
+}
+
+/// 解析命令行；帮助和版本正常退出，其余错误按 Veil 的交互规则处理。
+fn parse_matches(mut command: clap::Command) -> clap::ArgMatches {
+    match command.clone().try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) => handle_clap_error(error, &mut command),
+    }
+}
+
+/// 将 clap 的解析错误转换为本地化提示。
+fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    /// 读取 clap 上下文字段，并转换为可直接显示的用户文本。
+    fn context_text(value: Option<&ContextValue>) -> Option<String> {
+        value
+            .map(ToString::to_string)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// 输出本地化错误后打印当前命令的用法并退出。
+    fn print_usage_and_exit(command: &mut clap::Command, code: i32) -> ! {
+        eprintln!("\n{}:", i18n::t("label.usage"));
+        let subcommand_name = std::env::args().nth(1).unwrap_or_default();
+        let usage = cmd_usage(&subcommand_name);
+        if usage.is_empty() {
+            let rendered = command.render_usage().to_string();
+            eprintln!("  {}", rendered.trim_start_matches("Usage: "));
+        } else {
+            eprintln!("  {}", usage);
+        }
+
+        std::process::exit(code);
+    }
+
+    match error.kind() {
+        // Help and version are successful control-flow exits, not errors.
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => error.exit(),
+        ErrorKind::UnknownArgument => {
+            let argument = error
+                .get(ContextKind::InvalidArg)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "?".to_string());
+            let error = crate::cli_error!(UnknownArgument, "arg" => argument);
+            eprintln!("{}", error.render());
+            print_usage_and_exit(command, error.exit_code().into());
+        }
+        ErrorKind::ArgumentConflict => {
+            let invalid = context_text(
+                error
+                    .get(ContextKind::InvalidArg)
+                    .or_else(|| error.get(ContextKind::InvalidSubcommand)),
+            );
+            let prior = context_text(error.get(ContextKind::PriorArg));
+            let mapped = match (invalid, prior) {
+                (Some(invalid), Some(prior)) => {
+                    crate::cli_error!(ArgumentConflict, "arg" => invalid, "prior" => prior)
+                }
+                (Some(arg), None) => crate::cli_error!(ArgumentConflictSingle, "arg" => arg),
+                _ => crate::cli_error!(InvalidArguments),
+            };
+            eprintln!("{}", mapped.render());
+            print_usage_and_exit(command, mapped.exit_code().into());
+        }
+        _ => {
+            let error = crate::cli_error!(InvalidArguments);
+            eprintln!("{}", error.render());
+            print_usage_and_exit(command, error.exit_code().into());
+        }
+    }
 }
 
 /// 返回容器参数，缺失时输出对应子命令的帮助并退出。
 fn require_container(container: Option<String>, cmd_name: &str) -> String {
-    container.unwrap_or_else(|| exit_with_help("error.require_container", cmd_name))
+    container.unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingContainer, cmd_name))
 }
 
 /// 显示程序版本，并根据构建模式输出安全提示。
@@ -792,7 +865,7 @@ fn main() {
     show_version_and_security_info();
 
     let cmd = build_localized_command();
-    let matches = cmd.clone().get_matches();
+    let matches = parse_matches(cmd.clone());
     let cli = Cli::from_arg_matches(&matches).expect("参数解析失败");
 
     // clap 已完成类型解析；这里只负责把位置参数和选项参数合并成命令层输入。
@@ -838,7 +911,7 @@ fn main() {
             if let Some(inp) = inp {
                 commands::add::run(&container, &inp, out.as_deref(), pwd)
             } else {
-                exit_with_help("error.require_input_path", "add");
+                exit_with_help(crate::error::ErrorCode::MissingInputPath, "add");
             }
         }
         // rm 至少需要一个容器内路径，缺失时终止前打印两种参数用法。
@@ -853,7 +926,7 @@ fn main() {
             if let Some(path) = path {
                 commands::rm::run(&container, &path, pwd)
             } else {
-                exit_with_help("error.require_delete_path", "rm");
+                exit_with_help(crate::error::ErrorCode::MissingDeletePath, "rm");
             }
         }
         // mv 必须同时获得源路径和目标路径，之后才调用元数据重命名。
@@ -874,7 +947,7 @@ fn main() {
             if let (Some(from), Some(to)) = (from, to) {
                 commands::mv_workspace::run_workspace(&container, &from, &to, pwd)
             } else {
-                exit_with_help("error.require_src_dst", "mv");
+                exit_with_help(crate::error::ErrorCode::MissingSourceDestination, "mv");
             }
         }
         // free 只需要容器和可选密码，适合快速检查容器内容。
@@ -905,7 +978,7 @@ fn main() {
             if let Some(out) = out {
                 commands::ex::run(&container, inp.as_deref(), &out, pwd)
             } else {
-                exit_with_help("error.require_output_path", "ex");
+                exit_with_help(crate::error::ErrorCode::MissingOutputPath, "ex");
             }
         }
         // info 只读取元数据并展示身份与统计信息。
@@ -971,7 +1044,9 @@ fn main() {
             password_pos,
             password,
         } => {
-            let file = file.unwrap_or_else(|| exit_with_help("error.require_container", "unpack"));
+            let file = file.unwrap_or_else(|| {
+                exit_with_help(crate::error::ErrorCode::MissingContainer, "unpack")
+            });
             let pwd = password_pos.or(password);
             commands::unpack_workspace::run_workspace(
                 &file,
@@ -998,22 +1073,19 @@ fn main() {
                 hints::show_files_help();
                 Ok(())
             }
-            Some(other) => Err(anyhow::anyhow!(
-                "{}",
-                i18n::t1("help.files.unknown_topic", "topic", other)
-            )),
+            Some(other) => Err(crate::cli_error!(HelpUnknownTopic, "topic" => other)),
             None => match cmd.clone().print_help() {
                 Ok(()) => {
                     println!();
                     Ok(())
                 }
-                Err(error) => Err(anyhow::Error::from(error)),
+                Err(error) => Err(error.into()),
             },
         },
     };
 
     if let Err(e) = result {
-        eprintln!("{}", i18n::t1("error.prefix", "error", &e.to_string()));
-        std::process::exit(1);
+        eprintln!("{}", e.render());
+        std::process::exit(e.exit_code().into());
     }
 }
