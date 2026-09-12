@@ -158,13 +158,13 @@ fn set_hints_level(level: &str) -> Result<()> {
     );
 
     // 写配置成功后仍提示当前进程是否被环境变量覆盖。
-    if let Ok(value) = std::env::var("VEIL_HINTS") {
-        if let Some(override_level) = HintsLevel::parse(&value) {
-            crate::outln!(
-                "{}",
-                i18n::t1("config.env_override", "level", override_level.as_str()).yellow()
-            );
-        }
+    if let Ok(value) = std::env::var("VEIL_HINTS")
+        && let Some(override_level) = HintsLevel::parse(&value)
+    {
+        crate::outln!(
+            "{}",
+            i18n::t1("config.env_override", "level", override_level.as_str()).yellow()
+        );
     }
 
     Ok(())

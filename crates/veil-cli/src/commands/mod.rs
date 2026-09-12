@@ -30,39 +30,37 @@ use crate::error::Result;
 
 /// 所有需要选择已有容器的命令都必须经过这里。
 ///
-/// 支持 `.veil-link`、容器名或工作区目录，并在链接缺失时自动恢复。无论输入形式
-/// 如何，返回前都会读取 `.veil-meta` 确认真实 `veil_id`。
+/// 普通命令支持显式 `.veil-link` 路径、唯一容器名称和唯一 `veil_id`。工作区目录
+/// 仅由 [`resolve_link_target`] 用于恢复链接。无论输入形式如何，返回前都会读取
+/// `.veil-meta` 确认真实 `veil_id`。
 ///
-/// 解析到缓存恢复或缺失链接后，会同步注册链接并展示恢复提示；若输入同时匹配
-/// 链接和打包文件，则展示歧义提示后继续使用链接。
+/// 从配置缓存恢复链接后会展示恢复提示。
 ///
 /// # 错误
 /// 全局配置加载或 [`GlobalConfig::resolve_container`] 失败时返回错误。
 pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
     let mut config = GlobalConfig::load()?;
-    let mut resolved = config.resolve_container(input)?;
+    let resolved = config.resolve_container(input)?;
 
-    // 已恢复的链接需要提示用户；后续分支会更新 Config 中的原始字节缓存。
-    if resolved.recovered_link {
-        if let Some(link_path) = resolved.link_path.as_deref() {
-            crate::hints::show_link_recovery_hint(link_path);
-        }
+    // 已恢复的链接需要提示用户。
+    if resolved.recovered_link
+        && let Some(link_path) = resolved.link_path.as_deref()
+    {
+        crate::hints::show_link_recovery_hint(link_path);
     }
 
-    if let Some(link_path) = resolved.missing_link_path.clone() {
-        // 缺失链接可由容器记录重新生成，成功后视作已解析链接。
-        config.register_link(&resolved.veil_id, &link_path)?;
-        crate::hints::show_link_recovery_hint(&link_path);
-        resolved.link_path = Some(link_path);
-        resolved.missing_link_path = None;
-    }
+    Ok(resolved)
+}
 
-    if let Some(ambiguity) = resolved.ambiguity.as_ref() {
-        // 链接优先，但必须提示同名 .veil 打包文件仍存在。
-        crate::hints::show_file_type_ambiguity_hint(
-            &ambiguity.link_path,
-            &ambiguity.container_path,
-        );
+/// 解析 `veil link` 的目标，支持容器名、ID、链接路径和工作区目录。
+pub fn resolve_link_target(input: &str) -> Result<ResolvedContainer> {
+    let mut config = GlobalConfig::load()?;
+    let resolved = config.resolve_link_target(input)?;
+
+    if resolved.recovered_link
+        && let Some(link_path) = resolved.link_path.as_deref()
+    {
+        crate::hints::show_link_recovery_hint(link_path);
     }
 
     Ok(resolved)

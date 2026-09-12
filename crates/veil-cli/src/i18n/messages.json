@@ -279,8 +279,8 @@
     "en": "Invalid arguments"
   },
   "error.require_container": {
-    "zh": "请指定容器名称",
-    "en": "Please specify container file path"
+    "zh": "请指定容器名称、veil_id 或 .veil-link 路径",
+    "en": "Please specify a container name, veil_id, or .veil-link path"
   },
   "error.require_input_path": {
     "zh": "请指定输入路径（位置参数或 -i）",
@@ -377,6 +377,10 @@
   "error.core_container_id_conflict": {
     "zh": "容器 ID 冲突: {error}",
     "en": "Container ID conflict: {error}"
+  },
+  "error.core_container_name_ambiguous": {
+    "zh": "容器名称不唯一: {error}",
+    "en": "Container name is ambiguous: {error}"
   },
 
   "init.exists": {
@@ -696,121 +700,121 @@
     "en": "Add files or directories to container"
   },
   "cmd.add.usage": {
-    "zh": "veil add <容器名称或链接> [源路径] [目标路径] [密码]",
-    "en": "veil add <container-or-link> [source] [destination] [password]"
+    "zh": "veil add <容器名称、ID 或链接> [源路径] [目标路径] [密码]",
+    "en": "veil add <container-name, ID, or link> [source] [destination] [password]"
   },
   "cmd.add.usage_opt": {
-    "zh": "veil add <容器名称或链接> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil add <container-or-link> -i <source> -o <destination> [-p <password>]"
+    "zh": "veil add <容器名称、ID 或链接> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil add <container-name, ID, or link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.rm.about": {
     "zh": "从容器删除文件或目录",
     "en": "Delete files or directories from container"
   },
   "cmd.rm.usage": {
-    "zh": "veil rm <容器名称或链接> <路径> [密码]",
-    "en": "veil rm <container-or-link> <path> [password]"
+    "zh": "veil rm <容器名称、ID 或链接> <路径> [密码]",
+    "en": "veil rm <container-name, ID, or link> <path> [password]"
   },
   "cmd.rm.usage_opt": {
-    "zh": "veil rm <容器名称或链接> <路径> [-p <密码>]",
-    "en": "veil rm <container-or-link> <path> [-p <password>]"
+    "zh": "veil rm <容器名称、ID 或链接> <路径> [-p <密码>]",
+    "en": "veil rm <container-name, ID, or link> <path> [-p <password>]"
   },
   "cmd.mv.about": {
     "zh": "移动/重命名容器内的文件",
     "en": "Move/rename files in container"
   },
   "cmd.mv.usage": {
-    "zh": "veil mv <容器名称或链接> <源路径> <目标路径> [密码]",
-    "en": "veil mv <container-or-link> <source> <destination> [password]"
+    "zh": "veil mv <容器名称、ID 或链接> <源路径> <目标路径> [密码]",
+    "en": "veil mv <container-name, ID, or link> <source> <destination> [password]"
   },
   "cmd.mv.usage_opt": {
-    "zh": "veil mv <容器名称或链接> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil mv <container-or-link> -i <source> -o <destination> [-p <password>]"
+    "zh": "veil mv <容器名称、ID 或链接> -i <源路径> -o <目标路径> [-p <密码>]",
+    "en": "veil mv <container-name, ID, or link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.free.about": {
     "zh": "树状显示容器内容",
     "en": "Display container content as tree"
   },
   "cmd.free.usage": {
-    "zh": "veil free <容器名称或链接> [密码]",
-    "en": "veil free <container-or-link> [password]"
+    "zh": "veil free <容器名称、ID 或链接> [密码]",
+    "en": "veil free <container-name, ID, or link> [password]"
   },
   "cmd.free.usage_opt": {
-    "zh": "veil free <容器名称或链接> [-p <密码>]",
-    "en": "veil free <container-or-link> [-p <password>]"
+    "zh": "veil free <容器名称、ID 或链接> [-p <密码>]",
+    "en": "veil free <container-name, ID, or link> [-p <password>]"
   },
   "cmd.ex.about": {
     "zh": "导出文件或目录",
     "en": "Export files or directories"
   },
   "cmd.ex.usage": {
-    "zh": "veil ex <容器名称或链接> [输入路径] [输出路径] [密码]",
-    "en": "veil ex <container-or-link> [input-path] [output-path] [password]"
+    "zh": "veil ex <容器名称、ID 或链接> [输入路径] [输出路径] [密码]",
+    "en": "veil ex <container-name, ID, or link> [input-path] [output-path] [password]"
   },
   "cmd.ex.usage_opt": {
-    "zh": "veil ex <容器名称或链接> -i <输入路径> -o <输出路径> [-p <密码>]",
-    "en": "veil ex <container-or-link> -i <input-path> -o <output-path> [-p <password>]"
+    "zh": "veil ex <容器名称、ID 或链接> -i <输入路径> -o <输出路径> [-p <密码>]",
+    "en": "veil ex <container-name, ID, or link> -i <input-path> -o <output-path> [-p <password>]"
   },
   "cmd.info.about": {
     "zh": "显示容器信息",
     "en": "Display container information"
   },
   "cmd.info.usage": {
-    "zh": "veil info <容器名称或链接> [密码]",
-    "en": "veil info <container-or-link> [password]"
+    "zh": "veil info <容器名称、ID 或链接> [密码]",
+    "en": "veil info <container-name, ID, or link> [password]"
   },
   "cmd.info.usage_opt": {
-    "zh": "veil info <容器名称或链接> [-p <密码>]",
-    "en": "veil info <container-or-link> [-p <password>]"
+    "zh": "veil info <容器名称、ID 或链接> [-p <密码>]",
+    "en": "veil info <container-name, ID, or link> [-p <password>]"
   },
   "cmd.list.about": {
     "zh": "列出容器中的文件",
     "en": "List files in a container"
   },
   "cmd.list.usage": {
-    "zh": "veil list <容器名称或链接> [-p <密码>]",
-    "en": "veil list <container-or-link> [-p <password>]"
+    "zh": "veil list <容器名称、ID 或链接> [-p <密码>]",
+    "en": "veil list <container-name, ID, or link> [-p <password>]"
   },
   "cmd.exists.about": {
     "zh": "判断容器内文件或目录是否存在",
     "en": "Check whether a file or directory exists in a container"
   },
   "cmd.exists.usage": {
-    "zh": "veil exists <容器名称或链接> <容器内路径> [密码]",
-    "en": "veil exists <container-or-link> <container-path> [password]"
+    "zh": "veil exists <容器名称、ID 或链接> <容器内路径> [密码]",
+    "en": "veil exists <container-name, ID, or link> <container-path> [password]"
   },
   "cmd.exists.usage_opt": {
-    "zh": "veil exists <容器名称或链接> <容器内路径> [-p <密码>]",
-    "en": "veil exists <container-or-link> <container-path> [-p <password>]"
+    "zh": "veil exists <容器名称、ID 或链接> <容器内路径> [-p <密码>]",
+    "en": "veil exists <container-name, ID, or link> <container-path> [-p <password>]"
   },
   "cmd.passwd.about": {
     "zh": "修改容器密码",
     "en": "Change container password"
   },
   "cmd.passwd.usage": {
-    "zh": "veil passwd <容器名称或链接> [旧密码] [新密码]",
-    "en": "veil passwd <container-or-link> [old-password] [new-password]"
+    "zh": "veil passwd <容器名称、ID 或链接> [旧密码] [新密码]",
+    "en": "veil passwd <container-name, ID, or link> [old-password] [new-password]"
   },
   "cmd.passwd.usage_opt": {
-    "zh": "veil passwd <容器名称或链接> [-p <旧密码>] [-n <新密码>]",
-    "en": "veil passwd <container-or-link> [-p <old-password>] [-n <new-password>]"
+    "zh": "veil passwd <容器名称、ID 或链接> [-p <旧密码>] [-n <新密码>]",
+    "en": "veil passwd <container-name, ID, or link> [-p <old-password>] [-n <new-password>]"
   },
   "cmd.shell.about": {
     "zh": "交互式 shell 模式（批处理）",
     "en": "Interactive shell mode (batch processing)"
   },
   "cmd.shell.usage": {
-    "zh": "veil shell <容器名称或链接> [密码]",
-    "en": "veil shell <container-or-link> [password]"
+    "zh": "veil shell <容器名称、ID 或链接> [密码]",
+    "en": "veil shell <container-name, ID, or link> [password]"
   },
   "cmd.shell.usage_opt": {
-    "zh": "veil shell <容器名称或链接> [-p <密码>]",
-    "en": "veil shell <container-or-link> [-p <password>]"
+    "zh": "veil shell <容器名称、ID 或链接> [-p <密码>]",
+    "en": "veil shell <container-name, ID, or link> [-p <password>]"
   },
 
   "arg.container": {
-    "zh": "容器名称或链接",
-    "en": "container-or-link"
+    "zh": "容器名称、veil_id 或链接",
+    "en": "container name, ID, or link"
   },
   "arg.password": {
     "zh": "密码",
@@ -857,8 +861,8 @@
     "en": "action"
   },
   "arg.target": {
-    "zh": "容器名或工作区路径",
-    "en": "container-or-workspace"
+    "zh": "容器名、ID、链接或工作区路径",
+    "en": "container name, ID, link, or workspace path"
   },
   "arg.link_file": {
     "zh": "链接文件",
@@ -918,8 +922,8 @@
     "en": "Force the workspace onto the link file's volume (cannot be combined with workspace options)"
   },
   "help.container": {
-    "zh": "容器名称或 .veil-link 路径",
-    "en": "Container name or .veil-link path"
+    "zh": "容器名称、veil_id 或 .veil-link 路径",
+    "en": "Container name, veil_id, or .veil-link path"
   },
   "help.password_pos": {
     "zh": "容器密码（位置参数，可选）",
@@ -1295,14 +1299,6 @@
     "zh": "• 删除链接不会影响工作区数据\n• 已为你重建 {path}",
     "en": "• Deleting the link does not affect workspace data\n• Recreated {path} for you"
   },
-  "hints.file_ambiguity.title": {
-    "zh": "检测到两个同名文件",
-    "en": "Two files share the same base name"
-  },
-  "hints.file_ambiguity.body": {
-    "zh": "1. {link} - 本地快捷方式\n2. {package} - 数据包\n\n默认使用 {link}",
-    "en": "1. {link} - local shortcut\n2. {package} - package\n\nUsing {link} by default"
-  },
   "link.created": {
     "zh": "✓ 已创建链接: {path}",
     "en": "✓ Link created: {path}"
@@ -1320,16 +1316,16 @@
     "en": "Link file must end with .veil-link: {path}"
   },
   "cmd.link.about": {
-    "zh": "根据工作区或容器名重建 .veil-link",
-    "en": "Rebuild a .veil-link from a workspace or container name"
+    "zh": "根据工作区、容器名或 ID 重建 .veil-link",
+    "en": "Rebuild a .veil-link from a workspace, container name, or ID"
   },
   "cmd.link.usage": {
-    "zh": "veil link <容器名或工作区路径> [-o <链接文件>]",
-    "en": "veil link <container-or-workspace> [-o <link-file>]"
+    "zh": "veil link <容器名、ID、链接或工作区路径> [-o <链接文件>]",
+    "en": "veil link <container-name, ID, link, or workspace-path> [-o <link-file>]"
   },
   "help.link.target": {
-    "zh": "容器名称或工作区目录",
-    "en": "Container name or workspace directory"
+    "zh": "容器名称、ID、现有链接或工作区目录",
+    "en": "Container name, ID, existing link, or workspace directory"
   },
   "help.link.output": {
     "zh": "链接文件输出路径",
@@ -1340,8 +1336,8 @@
     "en": "Pack a workspace into a .veil file"
   },
   "cmd.pack.usage": {
-    "zh": "veil pack <容器名称或链接> [-o <输出文件>] [-p <密码>]",
-    "en": "veil pack <container-or-link> [-o <output-file>] [-p <password>]"
+    "zh": "veil pack <容器名称、ID 或链接> [-o <输出文件>] [-p <密码>]",
+    "en": "veil pack <container-name, ID, or link> [-o <output-file>] [-p <password>]"
   },
   "help.pack.output": {
     "zh": "输出文件路径（默认 <名称>.vault.veil）",

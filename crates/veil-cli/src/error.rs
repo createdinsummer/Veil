@@ -79,6 +79,7 @@ pub enum ErrorCode {
     FileAlreadyExists = 9015,
     VolumeUnavailable = 9016,
     ContainerIdConflict = 9017,
+    ContainerNameAmbiguous = 9018,
 }
 
 /// 错误码对应的模板和进程退出码。
@@ -314,6 +315,12 @@ impl ErrorCode {
                 "error.core_container_id_conflict",
                 1,
             ),
+            Self::ContainerNameAmbiguous => Self::define(
+                value,
+                "CONTAINER_NAME_AMBIGUOUS",
+                "error.core_container_name_ambiguous",
+                1,
+            ),
         }
     }
 
@@ -461,6 +468,7 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error),
             VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
             VeilError::ContainerIdConflict(error) => (ErrorCode::ContainerIdConflict, error),
+            VeilError::ContainerNameAmbiguous(error) => (ErrorCode::ContainerNameAmbiguous, error),
         };
 
         Self::coded(code).param("error", detail)

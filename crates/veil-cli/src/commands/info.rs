@@ -10,7 +10,7 @@ use std::path::Path;
 /// 输出容器的元数据和内容统计。
 ///
 /// # 参数
-/// - `container_name`: 容器名称
+/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `password`: 容器密码（`None` 则交互式输入）
 ///
 /// # 返回

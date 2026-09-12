@@ -31,7 +31,7 @@ struct Cli {
 enum Commands {
     /// 创建新的工作区容器和链接文件。
     Init {
-        // 位置参数形式的容器名称或链接目标。
+        // 新容器名称或链接输出目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的密码；实际输入仍由命令层统一处理。
@@ -64,7 +64,7 @@ enum Commands {
 
     /// 加密并添加本地文件。
     Add {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的源文件路径。
@@ -89,7 +89,7 @@ enum Commands {
 
     /// 从容器删除文件。
     Rm {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 要删除的容器内路径。
@@ -105,7 +105,7 @@ enum Commands {
 
     /// 移动或重命名容器内的文件。
     Mv {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的源路径。
@@ -130,7 +130,7 @@ enum Commands {
 
     /// 以树状形式查看容器内容与统计。
     Free {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的密码。
@@ -143,7 +143,7 @@ enum Commands {
 
     /// 从容器解密导出文件。
     Ex {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的容器内输入路径。
@@ -168,7 +168,7 @@ enum Commands {
 
     /// 显示容器身份和内容统计。
     Info {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的密码。
@@ -181,7 +181,7 @@ enum Commands {
 
     /// 列出容器中的文件
     List {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的密码。
@@ -194,7 +194,7 @@ enum Commands {
 
     /// 判断容器内文件或目录是否存在。
     Exists {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 要检查的容器内相对路径。
@@ -210,7 +210,7 @@ enum Commands {
 
     /// 修改容器密码。
     Passwd {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的旧密码。
@@ -234,7 +234,7 @@ enum Commands {
 
     /// 打开交互式容器命令会话。
     Shell {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 位置参数形式的密码。
@@ -247,7 +247,7 @@ enum Commands {
 
     /// 打包工作区到 .veil 文件
     Pack {
-        // 位置参数形式的容器名称或链接目标。
+        // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
         container: Option<String>,
         // 可选的自定义打包文件路径。
@@ -298,8 +298,8 @@ enum Commands {
 
     /// 重建 .veil-link
     Link {
-        // 已注册容器名称、工作区路径或现有链接路径。
-        #[arg(value_name = "容器名或工作区路径")]
+        // 已注册容器名称、ID、现有链接路径或工作区路径。
+        #[arg(value_name = "容器名、ID、链接或工作区路径")]
         target: String,
         // 新链接文件的输出路径。
         #[arg(short, long, value_name = "链接文件")]

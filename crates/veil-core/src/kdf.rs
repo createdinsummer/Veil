@@ -83,34 +83,6 @@ impl Default for Argon2Params {
     }
 }
 
-/// KDF 标志和参数常量的单元测试。
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 验证 KDF 类型编码后能够还原。
-    #[test]
-    fn kdf_type_roundtrip() {
-        let argon2 = KdfType::Argon2id;
-        assert_eq!(KdfType::from_flags(argon2.to_flags()).unwrap(), argon2);
-    }
-
-    /// 验证未知 KDF 标志会被拒绝。
-    #[test]
-    fn unknown_kdf_type() {
-        assert!(KdfType::from_flags(0xFF).is_err());
-    }
-
-    /// 验证标准 Argon2id 参数保持预期常量。
-    #[test]
-    fn argon2_params_constants() {
-        let standard = Argon2Params::STANDARD;
-        assert_eq!(standard.memory_kb, 256 * 1024);
-        assert_eq!(standard.iterations, 3);
-        assert_eq!(standard.parallelism, 4);
-    }
-}
-
 /// 使用当前运行时参数执行 Argon2id 派生。
 ///
 /// # 参数
@@ -170,4 +142,32 @@ pub(crate) fn runtime_params() -> Argon2Params {
 #[doc(hidden)]
 pub fn enable_fast_test_kdf() {
     FAST_TEST_KDF.store(true, Ordering::Relaxed);
+}
+
+/// KDF 标志和参数常量的单元测试。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 KDF 类型编码后能够还原。
+    #[test]
+    fn kdf_type_roundtrip() {
+        let argon2 = KdfType::Argon2id;
+        assert_eq!(KdfType::from_flags(argon2.to_flags()).unwrap(), argon2);
+    }
+
+    /// 验证未知 KDF 标志会被拒绝。
+    #[test]
+    fn unknown_kdf_type() {
+        assert!(KdfType::from_flags(0xFF).is_err());
+    }
+
+    /// 验证标准 Argon2id 参数保持预期常量。
+    #[test]
+    fn argon2_params_constants() {
+        let standard = Argon2Params::STANDARD;
+        assert_eq!(standard.memory_kb, 256 * 1024);
+        assert_eq!(standard.iterations, 3);
+        assert_eq!(standard.parallelism, 4);
+    }
 }

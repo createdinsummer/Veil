@@ -203,7 +203,7 @@ impl Container {
         let blob_offset = file.seek(SeekFrom::End(0))?;
 
         let recipient = self.key_pair.to_public();
-        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
+        let encryptor = age::Encryptor::with_recipients([Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
             .expect("failed to create encryptor");
         let mut writer = encryptor.wrap_output(&mut file)?;
 
@@ -395,7 +395,7 @@ impl Container {
 
         // age 流式加密器
         let recipient = self.key_pair.to_public();
-        let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
+        let encryptor = age::Encryptor::with_recipients([Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
             .expect("failed to create encryptor");
         let mut writer = encryptor.wrap_output(&mut *file)?;
 

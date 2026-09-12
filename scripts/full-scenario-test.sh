@@ -1653,7 +1653,7 @@ run_config_link_section() {
     run_case "LINK-add" 0 "准备链接测试数据" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add linked "$FIXTURES/hello.txt"
     run_case "LINK-01-secondary" 0 "创建第二个链接" \
-        env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link linked --output "$PHASE_WORK/second.veil-link"
+        env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link "$PHASE_WORK/linked.veil-link" --output "$PHASE_WORK/second.veil-link"
     assert_file_equals "LINK-01-bytes" "第二个链接与原链接逐字节一致" \
         "$PHASE_WORK/linked.veil-link" "$PHASE_WORK/second.veil-link"
 
@@ -1692,20 +1692,20 @@ run_config_link_section() {
     run_case "LINK-08-parent" 0 "创建链接父目录" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link linked --output "$RUN_ROOT/link-parent/nested/new.veil-link"
 
-    run_case "RES-06-workspace-path" 0 "直接使用工作区路径访问" \
+    run_case "RES-06-workspace-path" 1 "普通命令拒绝直接使用工作区路径" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$(resolve_workspace_for_link "$PHASE_WORK/linked.veil-link")"
     run_case "RES-07-ordinary-directory" 1 "拒绝普通目录作为容器" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$FIXTURES"
     run_case "RES-08-package-direct" 1 "直接访问包文件时提示先解包" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/custom-package.veil"
 
-    run_case "RES-23-invalid-link" 1 "拒绝格式损坏的链接" \
+    run_case "RES-28-invalid-link" 1 "拒绝格式损坏的链接" \
         sh -c "printf 'not toml\\n' > '$PHASE_WORK/broken.veil-link'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/broken.veil-link'"
 
     cp "$PHASE_WORK/linked.veil-link" "$RUN_ROOT/link-absolute-source.veil-link"
     ws=$(resolve_workspace_for_link "$PHASE_WORK/linked.veil-link")
     sed "s#^path = .*#path = \"$ws\"#" "$RUN_ROOT/link-absolute-source.veil-link" > "$PHASE_WORK/absolute.veil-link"
-    run_case "RES-24-absolute-link-path" 1 "链接中的绝对工作区路径应被拒绝或限制" \
+    run_case "RES-29-absolute-link-path" 1 "链接中的绝对工作区路径应被拒绝或限制" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$PHASE_WORK/absolute.veil-link"
 
     cp "$PHASE_HOME/.veil/config.toml" "$RUN_ROOT/config-good.toml"
@@ -1804,8 +1804,8 @@ run_corruption_section() {
     run_case "DATA-16-missing-cipher" 1 "密文缺失时导出失败" \
         sh -c "cp '$first_enc' '$RUN_ROOT/enc-backup.bin'; rm '$first_enc'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' ex corrupt good.txt '$RUN_ROOT/missing-cipher-export.bin'; rc=\$?; mv '$RUN_ROOT/enc-backup.bin' '$first_enc'; exit \$rc"
 
-    run_case "REC-10-lost-config" 0 "配置丢失后直接访问工作区" \
-        sh -c "mv '$PHASE_HOME/.veil/config.toml' '$RUN_ROOT/config-lost.toml'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$WS'; rc=\$?; mv '$RUN_ROOT/config-lost.toml' '$PHASE_HOME/.veil/config.toml'; exit \$rc"
+    run_case "REC-10-lost-config" 0 "配置丢失后通过显式链接访问" \
+        sh -c "mv '$PHASE_HOME/.veil/config.toml' '$RUN_ROOT/config-lost.toml'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/corrupt.veil-link'; rc=\$?; mv '$RUN_ROOT/config-lost.toml' '$PHASE_HOME/.veil/config.toml'; exit \$rc"
     run_case "REC-11-header-link" 0 "根据工作区元数据头重建链接" \
         sh -c "cp -R '$WS' '$RUN_ROOT/detached-workspace'; mv '$RUN_ROOT/detached-workspace' '$RUN_ROOT/detached-workspace-renamed'; HOME='$REC_11_HOME' VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-workspace-renamed' --output '$RUN_ROOT/detached.veil-link'"
     run_case "REC-11-open" 0 "打开重建的脱离工作区链接" \
@@ -1929,7 +1929,7 @@ run_external_section() {
 
     # 再创建一个位于本地卷的链接副本。卸载外置卷后测试这个本地链接，
     # 避免访问外置卷上的原链接时在 /Volumes 下创建影子目录。
-    run_case "RES-22-local-pointer" 0 "创建本地卷上的外置工作区链接" \
+    run_case "RES-27-local-pointer" 0 "创建本地卷上的外置工作区链接" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link "$EXT/external.veil-link" \
         --output "$RUN_ROOT/external-local-pointer.veil-link"
     EXTERNAL_WS=$(find "$EXT/.veil/workspaces/default" -maxdepth 1 -type d -name 'veil-*' | head -n 1)

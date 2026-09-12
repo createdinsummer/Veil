@@ -14,14 +14,14 @@ use veil_core::volume;
 /// 工作区时会读取明文头部身份并构造新链接。
 ///
 /// # 参数
-/// - `target`：容器名、工作区路径或现有链接路径。
+/// - `target`：容器名、`veil_id`、工作区路径或现有链接路径。
 /// - `output`：输出链接路径；省略时使用当前目录下的默认文件名。
 ///
 /// # 错误
 /// 输出已存在、链接复制、配置读取、元数据读取、链接生成或缓存写入失败时返回错误。
 pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     let mut config = GlobalConfig::load()?;
-    let resolved = super::resolve_container(target)?;
+    let resolved = super::resolve_link_target(target)?;
     if resolved.veil_id.is_empty() {
         crate::cli_bail!(LinkMissingVeilId);
     }

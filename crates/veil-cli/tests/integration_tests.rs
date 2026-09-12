@@ -172,6 +172,76 @@ fn multiple_links_can_target_the_same_workspace() {
         .stdout(predicate::str::contains("shared.txt"));
 }
 
+/// 验证普通命令接受名称、ID 和显式链接，但拒绝直接工作区目录。
+#[test]
+fn container_selector_accepts_name_id_and_link_only() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("selector");
+    let link_content = std::fs::read_to_string(&link).unwrap();
+    let veil_id = link_content
+        .lines()
+        .find_map(|line| line.strip_prefix("veil_id = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap();
+
+    env.command().args(["list", "selector"]).assert().success();
+    env.command().args(["list", veil_id]).assert().success();
+    env.command()
+        .args(["list", &env.path(&link)])
+        .assert()
+        .success();
+
+    let workspace_root = env.home.path().join(".veil/workspaces/default");
+    let workspace = std::fs::read_dir(workspace_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().join(".veil-meta").is_file())
+        .unwrap()
+        .path();
+    env.command()
+        .args(["list", &env.path(&workspace)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("工作区目录不能直接作为容器参数"));
+
+    let rebuilt_link = env.work.path().join("rebuilt.veil-link");
+    env.command()
+        .args([
+            "link",
+            &env.path(&workspace),
+            "-o",
+            &env.path(&rebuilt_link),
+        ])
+        .assert()
+        .success();
+    assert!(rebuilt_link.exists());
+}
+
+/// 验证配置缺失时显式链接仍可用，而名称和 ID 因缺少映射而失败。
+#[test]
+fn explicit_link_works_without_config_but_name_requires_config() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("configless");
+    let link_content = std::fs::read_to_string(&link).unwrap();
+    let veil_id = link_content
+        .lines()
+        .find_map(|line| line.strip_prefix("veil_id = \""))
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap();
+
+    std::fs::remove_file(env.home.path().join(".veil/config.toml")).unwrap();
+
+    env.command()
+        .args(["list", &env.path(&link)])
+        .assert()
+        .success();
+    env.command()
+        .args(["list", "configless"])
+        .assert()
+        .failure();
+    env.command().args(["list", veil_id]).assert().failure();
+}
+
 /// 验证主 CLI 支持创建专属工作区容器。
 #[test]
 fn dedicated_workspace_init_is_available_from_main_cli() {
@@ -251,6 +321,13 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
         .find(|line| line.starts_with("veil_id = "))
         .unwrap();
     assert_ne!(first_id, second_id);
+
+    // 同名时仅输入展示名无法确定目标，必须通过 ID 或链接区分。
+    env.command()
+        .args(["list", "photos"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[9018]"));
 
     let source = env.write_file("note.txt", "content");
     env.command()

@@ -9,7 +9,7 @@ use std::path::Path;
 /// 从容器中解密并导出文件到本地文件系统。
 ///
 /// # 参数
-/// - `container_name`: 容器名称
+/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `file_name`: 要提取的文件名（`None` 则需要指定）
 /// - `output`: 导出到的本地路径
 /// - `password`: 容器密码（`None` 则交互式输入）

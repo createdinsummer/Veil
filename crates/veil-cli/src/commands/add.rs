@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 /// 单文件可使用目标路径覆盖容器内名称；目录会递归添加并保持相对目录结构。
 ///
 /// # 参数
-/// - `container_name`: 容器名称或链接路径。
+/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `source`: 本地源文件或目录。
 /// - `dest`: 可选的容器内目标路径。目录作为目标时表示目标前缀。
 /// - `password`: 容器密码（`None` 则交互式输入）。

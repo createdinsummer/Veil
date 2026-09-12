@@ -106,10 +106,6 @@ pub struct SystemConfig {
     /// 首次解包提示是否已展示。
     #[serde(default)]
     pub unpack_hint_shown: bool,
-
-    /// 预留的文件类型歧义提示标记；当前逻辑不读取该值。
-    #[serde(default)]
-    pub extension_hint_shown: bool,
 }
 
 impl Default for SystemConfig {
@@ -123,7 +119,6 @@ impl Default for SystemConfig {
             init_hint_shown: false,
             pack_hint_shown: false,
             unpack_hint_shown: false,
-            extension_hint_shown: false,
         }
     }
 }
@@ -319,7 +314,7 @@ fn default_log_level() -> String {
 pub enum HintsLevel {
     /// 展示全部提示。
     Full,
-    /// 仅展示解包、链接恢复和文件类型歧义提示。
+    /// 仅展示解包和链接恢复提示。
     Brief,
     /// 关闭提示。
     Off,
@@ -359,21 +354,8 @@ pub struct ResolvedContainer {
     pub workspace_path: PathBuf,
     /// 成功解析到的链接文件路径。
     pub link_path: Option<PathBuf>,
-    /// 输入指定但当前缺失、需要恢复的链接路径。
-    pub missing_link_path: Option<PathBuf>,
-    /// 同名链接和打包文件同时存在时的歧义信息。
-    pub ambiguity: Option<ContainerAmbiguity>,
     /// 本次解析是否从配置缓存恢复了链接。
     pub recovered_link: bool,
-}
-
-/// 同名 `.veil-link` 与 `.veil` 打包文件同时存在时的路径组合。
-#[derive(Debug, Clone)]
-pub struct ContainerAmbiguity {
-    /// 检测到的链接文件路径。
-    pub link_path: PathBuf,
-    /// 检测到的打包文件路径。
-    pub container_path: PathBuf,
 }
 
 /// 新容器的加密默认值配置。
@@ -648,9 +630,10 @@ impl GlobalConfig {
         Ok(())
     }
 
-    /// 按配置键、展示名称、稳定 ID 或目录名查找容器。
+    /// 内部按配置键、展示名称、稳定 ID 或目录名查找容器。
     ///
-    /// 展示名称等非唯一字段只有恰好匹配一个容器时才返回其配置键。
+    /// 展示名称等非唯一字段只有恰好匹配一个容器时才返回其配置键。普通命令的
+    /// 外部输入由 [`GlobalConfig::resolve_container`] 单独限制。
     pub fn find_container_key(&self, name_or_id: &str) -> Option<String> {
         // 配置键是最直接的匹配方式，避免先遍历再判断。
         if self.containers.contains_key(name_or_id) {
@@ -669,6 +652,38 @@ impl GlobalConfig {
             .map(|(key, _)| key.clone())
             .collect();
         (matches.len() == 1).then(|| matches[0].clone())
+    }
+
+    /// 按稳定 ID 或唯一展示名称查找配置键。
+    ///
+    /// 普通命令只允许 `veil_id`、唯一容器名称和 `.veil-link` 路径。
+    fn find_container_key_by_name_or_id(
+        &self,
+        name_or_id: &str,
+    ) -> Result<Option<String>, VeilError> {
+        if let Some((key, _)) = self
+            .containers
+            .iter()
+            .find(|(_, container)| container.veil_id == name_or_id)
+        {
+            return Ok(Some(key.clone()));
+        }
+
+        let matches: Vec<_> = self
+            .containers
+            .iter()
+            .filter(|(_, container)| container.container_name == name_or_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        match matches.as_slice() {
+            [] => Ok(None),
+            [key] => Ok(Some(key.clone())),
+            _ => Err(VeilError::ContainerNameAmbiguous(format!(
+                "容器名称 '{}' 匹配到多个容器，请改用 veil_id 或 .veil-link 路径",
+                name_or_id
+            ))),
+        }
     }
 
     /// 根据容器配置计算工作区根路径。
@@ -746,88 +761,77 @@ impl GlobalConfig {
             veil_id: header.veil_id,
             workspace_path,
             link_path: None,
-            missing_link_path: None,
-            ambiguity: None,
             recovered_link: false,
         })
     }
 
-    /// 将用户输入解析成实际 `veil_id`、容器名、工作区路径和链接文件。
+    /// 将普通命令的容器输入解析成实际 `veil_id` 和工作区路径。
     ///
-    /// 支持 `.veil-link`、配置中的容器名，以及直接指向工作区目录的路径。
-    /// 输入指向 `.veil` 打包文件时不会自动解包，而是返回包含操作建议的错误。
+    /// 只接受显式的 `.veil-link` 路径、稳定 ID 和配置中的唯一容器名称。工作区目录
+    /// 只允许由 [`GlobalConfig::resolve_link_target`] 在重建链接时使用。
     ///
     /// # 错误
-    /// 链接、配置或工作区无法解析，或输入只能识别为打包文件时返回相应错误。
+    /// 链接、配置或工作区无法解析，名称不唯一，或输入类型不受支持时返回错误。
     pub fn resolve_container(&mut self, input: &str) -> Result<ResolvedContainer, VeilError> {
         let input_path = PathBuf::from(input);
         if input_path.exists() {
-            // 已存在的文件只在扩展名匹配时按链接处理。
             if input_path.is_file() && is_link_path(&input_path) {
-                return self.resolve_link_file(&input_path, None);
-            }
-
-            // 目录必须包含 .veil-meta，避免把任意目录误认成容器。
-            if input_path.is_dir() && input_path.join(".veil-meta").exists() {
-                let header = read_workspace_header(&input_path)?;
-                self.ensure_workspace_matches_container(&header.veil_id, &input_path)?;
-                return Ok(ResolvedContainer {
-                    name: header.container_name,
-                    veil_id: header.veil_id,
-                    workspace_path: input_path,
-                    link_path: None,
-                    missing_link_path: None,
-                    ambiguity: None,
-                    recovered_link: false,
-                });
+                return self.resolve_link_file(&input_path);
             }
 
             if input_path.is_file()
                 && input_path.extension().and_then(|ext| ext.to_str()) == Some("veil")
             {
-                // 打包文件不能直接当工作区使用，提示用户先执行解包。
                 return Err(VeilError::InvalidFormat(format!(
                     "{} 是打包文件，请先运行 veil unpack {}",
                     input_path.display(),
                     input_path.display()
                 )));
             }
+
+            if input_path.is_dir() {
+                return Err(VeilError::InvalidFormat(format!(
+                    "工作区目录不能直接作为容器参数: {}；请使用 .veil-link 路径",
+                    input_path.display()
+                )));
+            }
+
+            return Err(VeilError::InvalidFormat(format!(
+                "不支持的容器参数: {}；请使用 .veil-link 路径、容器名称或 veil_id",
+                input
+            )));
         }
 
         if is_link_path(&input_path) {
             return self.resolve_missing_link(&input_path);
         }
 
-        let link_path = with_extension(input, LINK_EXTENSION);
-        let container_path = with_extension(input, "veil");
-        let link_exists = link_path.exists();
-        let container_exists = container_path.exists();
-
-        if link_exists {
-            // 同名 .veil 同时存在时仍优先链接，但把歧义交给上层提示。
-            let ambiguity = container_exists.then_some(ContainerAmbiguity {
-                link_path: link_path.clone(),
-                container_path,
-            });
-            return self.resolve_link_file(&link_path, ambiguity);
-        }
-
-        if container_exists {
-            return Err(VeilError::InvalidFormat(format!(
-                "检测到打包文件 {}，请运行 veil unpack {}",
-                container_path.display(),
-                container_path.display()
-            )));
-        }
-
-        if let Some(key) = self.find_container_key(input) {
+        if let Some(key) = self.find_container_key_by_name_or_id(input)? {
             return self.resolve_registered_container(&key);
         }
 
         Err(VeilError::ContainerNotFound(format!(
-            "找不到容器 '{}' 或链接文件 '{}.veil-link'",
-            input, input
+            "找不到容器名称或 ID '{}'；也可以输入显式的 .veil-link 路径",
+            input
         )))
+    }
+
+    /// 解析 `veil link` 的目标，额外允许直接输入工作区目录进行恢复。
+    pub fn resolve_link_target(&mut self, input: &str) -> Result<ResolvedContainer, VeilError> {
+        let input_path = PathBuf::from(input);
+        if input_path.is_dir() && input_path.join(".veil-meta").exists() {
+            let header = read_workspace_header(&input_path)?;
+            self.ensure_workspace_matches_container(&header.veil_id, &input_path)?;
+            return Ok(ResolvedContainer {
+                name: header.container_name,
+                veil_id: header.veil_id,
+                workspace_path: input_path,
+                link_path: None,
+                recovered_link: false,
+            });
+        }
+
+        self.resolve_container(input)
     }
 
     /// 为已注册容器生成并保存新的 `.veil-link`。
@@ -925,10 +929,10 @@ impl GlobalConfig {
         let raw = fs::read(link_path)?;
         let link = VeilLink::load(link_path)?;
         self.cache_link_content(link_path, &link, &raw);
-        if let Ok(link_volume) = volume::volume_for_path(link_path) {
-            if link.workspace.volume_id == link_volume.volume_id {
-                self.register_volume(&link_volume);
-            }
+        if let Ok(link_volume) = volume::volume_for_path(link_path)
+            && link.workspace.volume_id == link_volume.volume_id
+        {
+            self.register_volume(&link_volume);
         }
         self.save()?;
         Ok(link)
@@ -1026,24 +1030,14 @@ impl GlobalConfig {
 
     /// 读取链接、更新缓存并解析其工作区路径。
     ///
-    /// `ambiguity` 会原样带回，供上层提示同名打包文件的存在。
-    ///
     /// # 错误
     /// 链接读取、解析、卷校验或工作区路径解析失败时返回错误。
-    fn resolve_link_file(
-        &mut self,
-        link_path: &Path,
-        ambiguity: Option<ContainerAmbiguity>,
-    ) -> Result<ResolvedContainer, VeilError> {
+    fn resolve_link_file(&mut self, link_path: &Path) -> Result<ResolvedContainer, VeilError> {
         // 先读取原始字节，随后解析和缓存都使用同一份内容。
         let raw = fs::read(link_path)?;
         let link = VeilLink::load(link_path)?;
-        // 优先使用已缓存且仍存在的挂载路径，否则回退到链接自身的卷校验。
-        let mount_path = self
-            .volumes
-            .get(&link.workspace.volume_id)
-            .map(|volume| volume.mount_path.as_path());
-        let workspace_path = link.resolve_workspace_path_with_mount(link_path, mount_path)?;
+        // 优先使用仍存在的卷挂载缓存，否则回退到链接自身的卷校验。
+        let workspace_path = self.resolve_link_workspace_path(&link, link_path)?;
         let header = read_workspace_header(&workspace_path)?;
         if header.veil_id != link.workspace.veil_id {
             return Err(VeilError::ContainerIdConflict(format!(
@@ -1059,56 +1053,27 @@ impl GlobalConfig {
             veil_id: header.veil_id,
             workspace_path,
             link_path: Some(link_path.to_path_buf()),
-            missing_link_path: None,
-            ambiguity,
             recovered_link: false,
         })
     }
 
-    /// 在链接文件缺失时，通过配置缓存或注册信息恢复容器定位。
-    ///
-    /// 恢复优先级为：字节级缓存副本、容器记录中的链接路径、与文件名同名的容器键。
+    /// 在链接文件缺失时，通过配置中的原始字节缓存恢复。
     ///
     /// # 错误
-    /// 缓存副本损坏，且配置中也没有可用容器映射时返回错误。
+    /// 缓存副本损坏或配置中没有可恢复副本时返回错误。
     fn resolve_missing_link(&mut self, link_path: &Path) -> Result<ResolvedContainer, VeilError> {
         let missing_path = absolute_path(link_path);
-        // 第一优先级是配置保存的原始链接字节，能够完整恢复文件。
+        // 只接受配置保存的原始链接字节，避免仅凭文件名猜测目标容器。
         if self.restore_cached_link(&missing_path)? {
-            let mut resolved = self.resolve_link_file(&missing_path, None)?;
+            let mut resolved = self.resolve_link_file(&missing_path)?;
             resolved.recovered_link = true;
             return Ok(resolved);
         }
 
-        let registered_key = self.containers.iter().find_map(|(key, container)| {
-            container
-                .links
-                .iter()
-                .any(|registered| registered == &missing_path)
-                .then(|| key.clone())
-        });
-        let inferred_key = link_path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("container")
-            .to_string();
-        let key = registered_key
-            // 其次使用容器记录中登记过的链接路径，最后尝试与文件名同名的容器键。
-            .or_else(|| {
-                self.containers
-                    .contains_key(&inferred_key)
-                    .then_some(inferred_key)
-            })
-            .ok_or_else(|| {
-                VeilError::ContainerNotFound(format!(
-                    "链接文件不存在，且配置中找不到对应容器: {}",
-                    link_path.display()
-                ))
-            })?;
-
-        let mut resolved = self.resolve_registered_container(&key)?;
-        resolved.missing_link_path = Some(link_path.to_path_buf());
-        Ok(resolved)
+        Err(VeilError::ContainerNotFound(format!(
+            "找不到容器：链接文件不存在，且配置中没有可恢复的原始字节: {}",
+            link_path.display()
+        )))
     }
 
     /// 从 `config.toml` 中的原始字节副本恢复缺失的 `.veil-link`。
@@ -1160,6 +1125,42 @@ impl GlobalConfig {
         }
         self.save()?;
         Ok(true)
+    }
+}
+
+/// 读取工作区 `.veil-meta` 明文头，用于确认容器稳定身份。
+fn read_workspace_header(workspace_path: &Path) -> Result<MetaHeader, VeilError> {
+    let meta_path = workspace_path.join(".veil-meta");
+    let bytes = fs::read(&meta_path).map_err(|error| {
+        VeilError::ConfigError(format!(
+            "读取容器元数据失败 {}: {}",
+            meta_path.display(),
+            error
+        ))
+    })?;
+    MetaHeader::from_bytes(&bytes)
+}
+
+/// 对工作区路径做可比较的规范化，优先消除符号链接和相对路径差异。
+fn comparable_path(path: &Path) -> PathBuf {
+    let absolute = absolute_path(path);
+    fs::canonicalize(&absolute).unwrap_or(absolute)
+}
+
+/// 判断路径扩展名是否严格等于 `.veil-link`。
+fn is_link_path(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some(LINK_EXTENSION)
+}
+
+/// 将路径转换为绝对形式；当前目录不可用时以 `.` 为基准回退。
+fn absolute_path(path: &Path) -> PathBuf {
+    // 绝对路径原样返回，避免不必要的当前目录依赖。
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 
@@ -1215,7 +1216,7 @@ mod tests {
         assert!(matches!(error, VeilError::ContainerIdConflict(_)));
     }
 
-    /// 直接传入工作区目录时也必须从 `.veil-meta` 得到真实 `veil_id`。
+    /// 普通命令拒绝工作区目录，链接恢复入口仍可读取真实 `veil_id`。
     #[test]
     fn resolve_container_reads_veil_id_from_workspace_metadata() {
         crate::kdf::enable_fast_test_kdf();
@@ -1225,13 +1226,66 @@ mod tests {
             .init_container_with_id("veil-actual", "actual-name", "default", "password")
             .unwrap();
 
-        let resolved = GlobalConfig::default()
+        let mut config = GlobalConfig::default();
+        let error = config
             .resolve_container(workspace_path.to_str().unwrap())
+            .unwrap_err();
+        assert!(matches!(error, VeilError::InvalidFormat(_)));
+
+        let resolved = config
+            .resolve_link_target(workspace_path.to_str().unwrap())
             .unwrap();
 
         assert_eq!(resolved.veil_id, "veil-actual");
         assert_eq!(resolved.name, "actual-name");
         assert_eq!(resolved.workspace_path, workspace_path);
+    }
+
+    /// 配置中的名称和稳定 ID 都可以作为普通命令输入。
+    #[test]
+    fn resolve_container_accepts_unique_name_and_veil_id() {
+        crate::kdf::enable_fast_test_kdf();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let workspace_path = temp_dir.path().join("registered");
+        WorkspaceManager::new(workspace_path.clone())
+            .init_container_with_id("veil-actual", "actual-name", "default", "password")
+            .unwrap();
+
+        let mut config = GlobalConfig::default();
+        config.workspace.default = Some(WorkspaceConfig {
+            path: temp_dir.path().to_path_buf(),
+            workspace_type: crate::workspace::WorkspaceType::Default,
+            description: None,
+            created_at: "2026-09-12T00:00:00Z".to_string(),
+        });
+        let mut record = container("veil-actual", "actual-name");
+        record.container_dir = Some("registered".to_string());
+        config.register_container(record).unwrap();
+
+        assert_eq!(
+            config.resolve_container("actual-name").unwrap().veil_id,
+            "veil-actual"
+        );
+        assert_eq!(
+            config.resolve_container("veil-actual").unwrap().veil_id,
+            "veil-actual"
+        );
+    }
+
+    /// 同名容器不能仅靠展示名选择，必须要求用户改用 ID 或链接。
+    #[test]
+    fn resolve_container_rejects_ambiguous_name() {
+        let mut config = GlobalConfig::default();
+        config
+            .register_container(container("veil-first", "same-name"))
+            .unwrap();
+        config
+            .register_container(container("veil-second", "same-name"))
+            .unwrap();
+
+        let error = config.resolve_container("same-name").unwrap_err();
+
+        assert!(matches!(error, VeilError::ContainerNameAmbiguous(_)));
     }
 
     /// 绑定预期 ID 的管理器不能读取另一身份的工作区。
@@ -1248,52 +1302,5 @@ mod tests {
         let error = manager.read_meta_header().unwrap_err();
 
         assert!(matches!(error, VeilError::ContainerIdConflict(_)));
-    }
-}
-
-/// 读取工作区 `.veil-meta` 明文头，用于确认容器稳定身份。
-fn read_workspace_header(workspace_path: &Path) -> Result<MetaHeader, VeilError> {
-    let meta_path = workspace_path.join(".veil-meta");
-    let bytes = fs::read(&meta_path).map_err(|error| {
-        VeilError::ConfigError(format!(
-            "读取容器元数据失败 {}: {}",
-            meta_path.display(),
-            error
-        ))
-    })?;
-    MetaHeader::from_bytes(&bytes)
-}
-
-/// 对工作区路径做可比较的规范化，优先消除符号链接和相对路径差异。
-fn comparable_path(path: &Path) -> PathBuf {
-    let absolute = absolute_path(path);
-    fs::canonicalize(&absolute).unwrap_or(absolute)
-}
-
-/// 判断路径扩展名是否严格等于 `.veil-link`。
-fn is_link_path(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()) == Some(LINK_EXTENSION)
-}
-
-/// 将输入路径的扩展名替换为目标扩展名；无扩展名时直接追加。
-fn with_extension(input: &str, extension: &str) -> PathBuf {
-    let path = PathBuf::from(input);
-    // 已有扩展名时视为用户显式路径，只替换后缀；否则追加标准后缀。
-    if path.extension().is_some() {
-        path.with_extension(extension)
-    } else {
-        PathBuf::from(format!("{}.{}", input, extension))
-    }
-}
-
-/// 将路径转换为绝对形式；当前目录不可用时以 `.` 为基准回退。
-fn absolute_path(path: &Path) -> PathBuf {
-    // 绝对路径原样返回，避免不必要的当前目录依赖。
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
     }
 }

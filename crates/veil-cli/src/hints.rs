@@ -1,10 +1,10 @@
 //! 一次性操作提示的判定与渲染。
 //!
 //! 提示级别可由 `VEIL_HINTS` 临时覆盖，否则读取全局配置。首次创建、打包和解包提示
-//! 会把“已展示”状态写回配置；链接恢复和文件类型歧义提示属于条件提示，不记录次数。
+//! 会把“已展示”状态写回配置；链接恢复提示属于条件提示，不记录次数。
 
-use crate::i18n;
 use crate::error::Result;
+use crate::i18n;
 use colored::Colorize;
 use std::path::Path;
 use veil_core::config::{GlobalConfig, HintsLevel};
@@ -20,17 +20,15 @@ enum HintType {
     FirstUnpack,
     /// 链接缺失并完成恢复后的说明。
     LinkRecovery,
-    /// 同名链接和打包文件同时存在时的说明。
-    FileTypeAmbiguity,
 }
 
 /// 当前生效的提示级别：`VEIL_HINTS` 环境变量优先，其次读取全局配置。
 pub fn current_level() -> HintsLevel {
     // 环境变量是临时覆盖层，只有合法值才允许覆盖持久化配置。
-    if let Ok(value) = std::env::var("VEIL_HINTS") {
-        if let Some(level) = HintsLevel::parse(&value) {
-            return level;
-        }
+    if let Ok(value) = std::env::var("VEIL_HINTS")
+        && let Some(level) = HintsLevel::parse(&value)
+    {
+        return level;
     }
 
     // 配置读取失败时回退到完整提示，保证新环境仍能获得帮助信息。
@@ -44,8 +42,7 @@ pub fn current_level() -> HintsLevel {
 /// # 错误
 /// 级别无效、全局配置加载失败或保存失败时返回错误。
 pub fn set_hint_level(level: &str) -> Result<()> {
-    let parsed =
-        HintsLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
+    let parsed = HintsLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
     let mut config = GlobalConfig::load()?;
     config.preferences.hints_level = parsed;
     config.save()?;
@@ -57,10 +54,7 @@ fn allowed(hint_type: HintType, level: HintsLevel) -> bool {
     // Brief 只保留解包和异常恢复类关键提示。
     match level {
         HintsLevel::Off => false,
-        HintsLevel::Brief => matches!(
-            hint_type,
-            HintType::FirstUnpack | HintType::LinkRecovery | HintType::FileTypeAmbiguity
-        ),
+        HintsLevel::Brief => matches!(hint_type, HintType::FirstUnpack | HintType::LinkRecovery),
         HintsLevel::Full => true,
     }
 }
@@ -83,7 +77,7 @@ fn should_show_once(hint_type: HintType) -> bool {
         HintType::FirstInit => config.system.init_hint_shown,
         HintType::FirstPack => config.system.pack_hint_shown,
         HintType::FirstUnpack => config.system.unpack_hint_shown,
-        HintType::LinkRecovery | HintType::FileTypeAmbiguity => return true,
+        HintType::LinkRecovery => return true,
     };
 
     if already_shown {
@@ -95,7 +89,7 @@ fn should_show_once(hint_type: HintType) -> bool {
         HintType::FirstInit => config.system.init_hint_shown = true,
         HintType::FirstPack => config.system.pack_hint_shown = true,
         HintType::FirstUnpack => config.system.unpack_hint_shown = true,
-        HintType::LinkRecovery | HintType::FileTypeAmbiguity => {}
+        HintType::LinkRecovery => {}
     }
 
     let _ = config.save();
@@ -215,24 +209,6 @@ pub fn show_link_recovery_hint(link_path: &Path) {
             "hints.link_recovery.body",
             "path",
             &link_path.display().to_string(),
-        )],
-    );
-}
-
-/// 提示同名链接与打包文件同时存在，并说明当前采用链接。
-pub fn show_file_type_ambiguity_hint(link_path: &Path, container_path: &Path) {
-    if !allowed(HintType::FileTypeAmbiguity, current_level()) {
-        return;
-    }
-
-    print_hint_box(
-        i18n::t("hints.file_ambiguity.title"),
-        &[i18n::t2(
-            "hints.file_ambiguity.body",
-            "link",
-            &link_path.display().to_string(),
-            "package",
-            &container_path.display().to_string(),
         )],
     );
 }

@@ -9,7 +9,7 @@ use veil_core::workspace_ops::RemovedPathKind;
 /// 删除容器内的文件和加密数据。
 ///
 /// # 参数
-/// - `container_name`: 容器名称
+/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `file_name`: 要删除的容器内文件或目录路径
 /// - `password`: 容器密码（`None` 则交互式输入）
 ///

@@ -47,8 +47,8 @@ fn container_path_to_history_filename(container_path: &Path) -> String {
     let path_str = abs_path.to_string_lossy();
 
     // 去掉 Unix 根斜杠或 Windows 盘符，避免路径分隔符进入文件名。
-    let cleaned = if path_str.starts_with('/') {
-        &path_str[1..]
+    let cleaned = if let Some(stripped) = path_str.strip_prefix('/') {
+        stripped
     } else if path_str.len() > 2 && path_str.chars().nth(1) == Some(':') {
         &path_str[3..]
     } else {
@@ -56,7 +56,7 @@ fn container_path_to_history_filename(container_path: &Path) -> String {
     };
 
     // 再把剩余目录分隔符统一替换为点号。
-    let filename = cleaned.replace('/', ".").replace('\\', ".");
+    let filename = cleaned.replace(['/', '\\'], ".");
 
     format!("{}.txt", filename)
 }
@@ -98,7 +98,7 @@ fn load_history(container_path: &Path) -> HashSet<String> {
     // 逐行读取并去掉空白；不可读取的行直接跳过，避免历史损坏中断攻击。
     BufReader::new(file)
         .lines()
-        .filter_map(|line| line.ok())
+        .map_while(Result::ok)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
@@ -340,7 +340,7 @@ fn dictionary_attack(cip_pri_key: Arc<Vec<u8>>, wordlist_path: &Path, container_
     // Rayon 需要可随机访问的候选集合，因此词表一次性载入并去历史后参与并行查找。
     let mut passwords: Vec<String> = BufReader::new(file)
         .lines()
-        .filter_map(|line| line.ok())
+        .map_while(Result::ok)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
@@ -679,7 +679,7 @@ fn get_custom_charset() -> Option<(String, usize, usize)> {
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok();
-    let selections: Vec<&str> = input.trim().split_whitespace().collect();
+    let selections: Vec<&str> = input.split_whitespace().collect();
 
     let mut charset = String::new();
 
@@ -1069,7 +1069,6 @@ fn get_word_combination_config() -> Option<(Vec<String>, usize, usize, bool)> {
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok();
     let words: Vec<String> = input
-        .trim()
         .split_whitespace()
         .map(|s| s.to_string())
         .collect();

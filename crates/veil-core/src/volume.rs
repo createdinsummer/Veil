@@ -106,7 +106,7 @@ fn is_external_mount(mount_path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         // macOS 外接卷通常挂载在 /Volumes 下。
-        return mount_path.starts_with("/Volumes");
+        mount_path.starts_with("/Volumes")
     }
 
     #[cfg(not(target_os = "macos"))]

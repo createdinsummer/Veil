@@ -14,7 +14,7 @@ use veil_core::workspace_ops::WorkspaceManager;
 /// 工作区中的每个文件拥有独立密文，容器身份由启动时生成的稳定 ID 表示。
 ///
 /// # 参数
-/// - `target`: 容器名称、链接文件名或工作区目标路径。
+/// - `target`: 容器名称、链接文件名或带目录的目标名称。
 /// - `password`: 用户密码；`None` 时按命令层规则从环境变量或终端读取。
 /// - `link_output`: 自定义 `.veil-link` 输出路径。
 /// - `workspace_name`: 可选的已注册命名工作区名称，不是路径。
