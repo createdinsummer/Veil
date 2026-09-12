@@ -7,6 +7,7 @@
 pub mod add;
 pub mod config;
 pub mod ex;
+pub mod exists_workspace;
 pub mod info;
 pub mod init;
 pub mod link;
@@ -189,13 +190,23 @@ pub fn prompt_password(
 /// # }
 /// ```
 pub fn prompt_new_password(password_arg: Option<String>) -> Result<age::secrecy::SecretString> {
+    prompt_new_password_with_env(password_arg, "VEIL_PASSWORD")
+}
+
+/// 使用指定环境变量获取新密码，并在交互模式下要求输入两次。
+///
+/// 修改密码时传入 `VEIL_NEW_PASSWORD`，避免把旧密码环境变量静默复用为新密码。
+pub fn prompt_new_password_with_env(
+    password_arg: Option<String>,
+    env_name: &str,
+) -> Result<age::secrecy::SecretString> {
     // 显式参数跳过确认，调用方已经负责校验来源。
     if let Some(pwd) = password_arg {
         return validate_new_password(age::secrecy::SecretString::from(pwd));
     }
 
-    // 环境变量同样跳过二次输入，便于非交互调用。
-    if let Ok(password) = std::env::var("VEIL_PASSWORD") {
+    // 指定环境变量同样跳过二次输入，便于非交互调用。
+    if let Ok(password) = std::env::var(env_name) {
         return validate_new_password(age::secrecy::SecretString::from(password));
     }
 

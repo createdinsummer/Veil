@@ -68,24 +68,22 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
             "ls" | "list" => {
                 list_files(&manager, pwd)?;
             }
-            "info" => {
-                match manager.read_meta(pwd) {
-                    Ok(current_metadata) => {
-                        if let Err(e) = show_info(container_name, &current_metadata) {
-                            println!(
-                                "{}",
-                                crate::i18n::t1("shell.info_failed", "error", &e.to_string()).red()
-                            );
-                        }
-                    }
-                    Err(e) => {
+            "info" => match manager.read_meta(pwd) {
+                Ok(current_metadata) => {
+                    if let Err(e) = show_info(container_name, &current_metadata) {
                         println!(
                             "{}",
-                            crate::i18n::t1("shell.metadata_failed", "error", &e.to_string()).red()
+                            crate::i18n::t1("shell.info_failed", "error", &e.to_string()).red()
                         );
                     }
                 }
-            }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        crate::i18n::t1("shell.metadata_failed", "error", &e.to_string()).red()
+                    );
+                }
+            },
             "add" => {
                 if parts.len() < 2 {
                     println!("{}", crate::i18n::t("shell.usage_add").yellow());
@@ -120,8 +118,8 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
                     continue;
                 }
                 let file_name = parts[1];
-                match manager.remove_file(file_name, pwd) {
-                    Ok(()) => {
+                match manager.remove_path(file_name, pwd) {
+                    Ok(_) => {
                         println!(
                             "{}",
                             crate::i18n::t1("shell.deleted", "path", file_name).green()

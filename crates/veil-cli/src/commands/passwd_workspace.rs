@@ -23,7 +23,7 @@ pub fn run_workspace(
     let old_pwd = super::prompt_password(crate::i18n::t("prompt.current_password"), old_password)?;
 
     // 新密码会用于重新派生主密钥，并重新加密元数据和所有文件。
-    let new_pwd = super::prompt_new_password(new_password)?;
+    let new_pwd = super::prompt_new_password_with_env(new_password, "VEIL_NEW_PASSWORD")?;
 
     use age::secrecy::ExposeSecret;
     let old_password_str = old_pwd.expose_secret();

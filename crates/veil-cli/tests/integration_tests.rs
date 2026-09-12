@@ -15,6 +15,7 @@ fn help_lists_workspace_model_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("exists"))
         .stdout(predicate::str::contains("pack"))
         .stdout(predicate::str::contains("unpack"))
         .stdout(predicate::str::contains("link"))
@@ -480,4 +481,90 @@ fn init_rejects_empty_password_without_side_effects() {
     assert!(!link.exists());
     assert!(!env.home.path().join(".veil/config.toml").exists());
     assert!(!env.home.path().join(".veil/workspaces/default").exists());
+}
+
+/// 验证 link 支持自动创建父目录并限制输出扩展名。
+#[test]
+fn link_creates_parent_and_validates_extension() {
+    let env = TestEnv::new("test-password");
+    let primary = env.init("link-source");
+    let output = env.work.path().join("nested/links/copy.veil-link");
+
+    env.command()
+        .args(["link", &env.path(&primary), "-o", &env.path(&output)])
+        .assert()
+        .success();
+    assert!(output.exists());
+    assert_eq!(
+        std::fs::read(&primary).unwrap(),
+        std::fs::read(output).unwrap()
+    );
+
+    let invalid = env.work.path().join("nested/links/invalid.txt");
+    env.command()
+        .args(["link", &env.path(&primary), "-o", &env.path(&invalid)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[6003]"));
+    assert!(!invalid.exists());
+}
+
+/// 验证 help 可以显示指定命令的帮助。
+#[test]
+fn help_accepts_command_topics() {
+    let env = TestEnv::new("test-password");
+
+    env.command()
+        .args(["help", "init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("用法: veil init"))
+        .stdout(predicate::str::contains("--workspace-path"));
+
+    env.command()
+        .args(["help", "not-a-command"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("[8001]"));
+}
+
+/// 验证 help all 和 --all 输出全部命令帮助。
+#[test]
+fn help_all_prints_every_command() {
+    let env = TestEnv::new("test-password");
+
+    env.command()
+        .args(["help", "all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("===== init ====="))
+        .stdout(predicate::str::contains("用法: veil init"))
+        .stdout(predicate::str::contains("===== add ====="))
+        .stdout(predicate::str::contains("用法: veil add"))
+        .stdout(predicate::str::contains("===== exists ====="))
+        .stdout(predicate::str::contains("===== help ====="));
+
+    env.command()
+        .args(["help", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("===== init ====="))
+        .stdout(predicate::str::contains("===== unpack ====="));
+}
+
+/// 验证导出不存在的容器内文件返回文件未找到错误码。
+#[test]
+fn export_missing_file_returns_file_not_found_code() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("missing-export");
+    let output = env.work.path().join("missing-output.bin");
+
+    env.command()
+        .args(["ex", &env.path(&link), "missing.bin", &env.path(&output)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("❌ 错误 [9014]"))
+        .stderr(predicate::str::contains("文件未找到"));
+
+    assert!(!output.exists());
 }

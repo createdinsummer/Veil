@@ -4,12 +4,12 @@ use crate::error::Result;
 use colored::Colorize;
 use veil_core::workspace_ops::WorkspaceManager;
 
-/// 修改文件在容器元数据中的原始路径。
+/// 移动或重命名文件、目录在容器元数据中的原始路径。
 ///
-/// 密文文件本身不移动；目标路径已存在时由 [`WorkspaceManager::rename_file`] 拒绝。
+/// 密文文件本身不移动；目标路径已存在时由 [`WorkspaceManager::move_path`] 拒绝。
 ///
 /// # 错误
-/// 容器解析、密码读取、源文件不存在、目标已存在或元数据写回失败时返回错误。
+/// 容器解析、密码读取、源不存在、目标冲突、目录循环或元数据写回失败时返回错误。
 pub fn run_workspace(
     container_name: &str,
     from: &str,
@@ -32,13 +32,13 @@ pub fn run_workspace(
         crate::i18n::t1("mv.opening_named", "name", container_name).cyan()
     );
 
-    // 重命名失败时原元数据保持不变，成功后再打印结果。
+    // 移动失败时原元数据保持不变，成功后再打印最终目标路径。
     let manager = WorkspaceManager::new(workspace_path);
-    manager.rename_file(from, to, pwd)?;
+    let (_, final_target) = manager.move_path(from, to, pwd)?;
 
     println!(
         "{}",
-        crate::i18n::t2("mv.renamed", "from", from, "to", to).green()
+        crate::i18n::t2("mv.moved", "from", from, "to", &final_target).green()
     );
 
     Ok(())

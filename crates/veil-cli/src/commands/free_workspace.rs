@@ -2,7 +2,16 @@
 
 use crate::error::Result;
 use colored::Colorize;
+use std::collections::BTreeMap;
 use veil_core::workspace_ops::WorkspaceManager;
+
+/// `free` 展示用的文件系统节点。
+enum TreeNode {
+    /// 文件及其明文大小。
+    File(u64),
+    /// 目录及其按名称排序的子节点。
+    Directory(BTreeMap<String, TreeNode>),
+}
 
 /// 按原始相对路径排序并缩进展示文件，同时输出文件和总大小统计。
 ///
@@ -31,29 +40,8 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
             format!("  {}", crate::i18n::t("common.empty")).bright_black()
         );
     } else {
-        // 先按完整虚拟路径排序，让同目录文件在输出中保持相邻。
-        let mut sorted_files = metadata.files.clone();
-        sorted_files.sort_by(|a, b| a.original_name.cmp(&b.original_name));
-
-        for (i, file) in sorted_files.iter().enumerate() {
-            let is_last = i == sorted_files.len() - 1;
-            let connector = if is_last { "└── " } else { "├── " };
-
-            let name = &file.original_name;
-            if name.contains('/') {
-                let parts: Vec<&str> = name.split('/').collect();
-                let indent = "    ".repeat(parts.len().saturating_sub(1));
-                println!(
-                    "{}{}{} ({})",
-                    indent,
-                    connector,
-                    parts.last().unwrap(),
-                    format_size(file.size)
-                );
-            } else {
-                println!("{}{} ({})", connector, name, format_size(file.size));
-            }
-        }
+        let tree = build_tree(&metadata.files);
+        render_tree(&tree, "");
     }
 
     // 统计信息直接基于元数据中的明文大小，不会触发额外解密。
@@ -77,6 +65,59 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     );
 
     Ok(())
+}
+
+/// 从扁平文件清单构造真正的目录树。
+fn build_tree(files: &[veil_core::metadata::FileEntry]) -> BTreeMap<String, TreeNode> {
+    let mut root = BTreeMap::new();
+
+    for file in files {
+        let parts: Vec<_> = file
+            .original_name
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
+        let Some((name, directories)) = parts.split_last() else {
+            continue;
+        };
+
+        let mut current = &mut root;
+        for directory in directories {
+            let entry = current
+                .entry((*directory).to_string())
+                .or_insert_with(|| TreeNode::Directory(BTreeMap::new()));
+            if !matches!(entry, TreeNode::Directory(_)) {
+                *entry = TreeNode::Directory(BTreeMap::new());
+            }
+            let TreeNode::Directory(children) = entry else {
+                unreachable!();
+            };
+            current = children;
+        }
+
+        current.insert((*name).to_string(), TreeNode::File(file.size));
+    }
+
+    root
+}
+
+/// 按标准树状连接线递归渲染节点。
+fn render_tree(nodes: &BTreeMap<String, TreeNode>, prefix: &str) {
+    let count = nodes.len();
+    for (index, (name, node)) in nodes.iter().enumerate() {
+        let is_last = index + 1 == count;
+        let connector = if is_last { "└── " } else { "├── " };
+        match node {
+            TreeNode::File(size) => {
+                println!("{prefix}{connector}{name} ({})", format_size(*size));
+            }
+            TreeNode::Directory(children) => {
+                println!("{prefix}{connector}{name}/");
+                let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+                render_tree(children, &child_prefix);
+            }
+        }
+    }
 }
 
 /// 将字节数格式化为 B、KB、MB 或 GB，并保留两位小数。

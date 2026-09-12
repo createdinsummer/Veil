@@ -43,7 +43,7 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 | --- | --- |
 | 创建 | `veil init` |
 | 文件管理 | `veil add`、`veil rm`、`veil mv`、`veil ex` |
-| 查看 | `veil list`、`veil free`、`veil info` |
+| 查看 | `veil list`、`veil free`、`veil info`、`veil exists` |
 | 会话与维护 | `veil shell`、`veil passwd`、`veil config`、`veil link` |
 | 迁移 | `veil pack`、`veil unpack` |
 | 帮助 | `veil help` |
@@ -66,7 +66,7 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 
 ## 关键边界
 
-- CLI 的 `add` 和 `ex` 当前只处理单文件。
+- CLI 的 `ex` 当前只处理单文件；`add` 支持文件、目录递归导入和目标路径。
 - 同一工作区没有跨进程写锁。
 - `passwd` 会重新加密工作区中的全部文件。
 - `.veil-link` 依赖稳定的卷身份和工作区相对路径。

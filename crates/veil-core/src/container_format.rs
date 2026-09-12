@@ -28,10 +28,17 @@
 //! ```
 
 use crate::error::VeilError;
-use crate::metadata::MetaData;
+use crate::kdf;
+use crate::metadata::{MetaData, MetaHeader};
+use chacha20poly1305::aead::generic_array::GenericArray;
+use chacha20poly1305::{
+    ChaCha20Poly1305,
+    aead::{Aead, KeyInit},
+};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// 容器文件魔数
 pub const CONTAINER_MAGIC: &[u8; 8] = b"VEILPKG\0";
@@ -97,12 +104,26 @@ impl ContainerHeader {
         let metadata_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
         let file_count = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
 
-        Ok(Self {
+        let header = Self {
             version,
             header_size,
             metadata_size,
             file_count,
-        })
+        };
+        if header.version != CONTAINER_VERSION {
+            return Err(VeilError::InvalidFormat(format!(
+                "不支持的打包文件版本: {}",
+                header.version
+            )));
+        }
+        if header.header_size != 22 {
+            return Err(VeilError::InvalidFormat(format!(
+                "不支持的打包文件头部大小: {}",
+                header.header_size
+            )));
+        }
+
+        Ok(header)
     }
 }
 
@@ -119,10 +140,11 @@ impl FileEntryHeader {
     /// 将名称长度、名称和密文长度序列化为一个小端序条目。
     ///
     /// 名称长度使用 `u16`，调用方需保证名称字节长度不超过该字段容量。
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, VeilError> {
         let name_bytes = self.name.as_bytes();
         // 名称长度只占 2 字节，条目名总长度由该字段限制。
-        let name_len = name_bytes.len() as u16;
+        let name_len = u16::try_from(name_bytes.len())
+            .map_err(|_| VeilError::InvalidFormat("打包文件条目名称过长".to_string()))?;
 
         let mut buf = Vec::with_capacity(2 + name_bytes.len() + 8);
 
@@ -130,7 +152,7 @@ impl FileEntryHeader {
         buf.extend_from_slice(name_bytes);
         buf.extend_from_slice(&self.data_size.to_le_bytes());
 
-        buf
+        Ok(buf)
     }
 
     /// 从字节解析文件条目。
@@ -208,7 +230,9 @@ impl ContainerPacker {
         let workspace_path = workspace_path.as_ref();
 
         // 打包文件整体覆写，输出路径冲突由命令层提前拒绝。
-        let mut output = File::create(&self.output_path)?;
+        let parent = self.output_path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut output = tempfile::NamedTempFile::new_in(parent)?;
 
         // 头部包含后续总长度，先写占位值，完成文件遍历后再回填。
         let placeholder_header = ContainerHeader::new(0, 0);
@@ -229,7 +253,7 @@ impl ContainerPacker {
                 name: file_entry.original_name.clone(),
                 data_size: encrypted_data.len() as u64,
             };
-            output.write_all(&entry_header.to_bytes())?;
+            output.write_all(&entry_header.to_bytes()?)?;
 
             output.write_all(&encrypted_data)?;
         }
@@ -238,6 +262,12 @@ impl ContainerPacker {
         output.seek(SeekFrom::Start(0))?;
         let header = ContainerHeader::new(metadata_size, file_count);
         output.write_all(&header.to_bytes())?;
+
+        output.flush()?;
+        output.as_file().sync_all()?;
+        output
+            .persist(&self.output_path)
+            .map_err(|error| VeilError::Io(error.error))?;
 
         Ok(())
     }
@@ -274,6 +304,30 @@ impl ContainerUnpacker {
         Ok(metadata_buf)
     }
 
+    /// 验证密码并返回解密后的元数据及原始元数据字节。
+    ///
+    /// 该入口不创建目录或写入文件，调用方可以先完成身份验证再开始解包。
+    pub fn read_metadata(&self, password: &str) -> Result<(MetaData, Vec<u8>), VeilError> {
+        let encrypted_metadata = self.read_encrypted_metadata()?;
+        let header = MetaHeader::from_bytes(&encrypted_metadata)?;
+
+        let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
+        kdf::derive_key(password.as_bytes(), &header.salt, &mut *master_key)
+            .map_err(|error| VeilError::KeyDerivationError(format!("{:?}", error)))?;
+
+        let header_len = MetaHeader::header_len(&encrypted_metadata)?;
+        let encrypted_data = &encrypted_metadata[header_len..];
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
+        let decrypted = cipher
+            .decrypt(GenericArray::from_slice(&header.nonce), encrypted_data)
+            .map_err(|error| {
+                VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
+            })?;
+        let metadata = MetaData::from_json(&decrypted)?;
+
+        Ok((metadata, encrypted_metadata))
+    }
+
     /// 将打包文件中的加密条目写入工作区。
     ///
     /// 条目以元数据中的原始名称落盘，调用方随后需依据解密后的清单将其重命名为
@@ -283,40 +337,173 @@ impl ContainerUnpacker {
     /// 目录创建、条目解析、内容读取或文件写入失败时返回错误。
     pub fn unpack(&self, workspace_path: impl AsRef<Path>) -> Result<Vec<u8>, VeilError> {
         let workspace_path = workspace_path.as_ref();
-
-        // 所有读取按文件布局顺序前进：头部、元数据、条目头部、条目数据。
         let mut file = File::open(&self.container_path)?;
-
-        let mut header_buf = vec![0u8; 22];
-        file.read_exact(&mut header_buf)?;
-        let header = ContainerHeader::from_bytes(&header_buf)?;
-
-        let mut metadata_buf = vec![0u8; header.metadata_size as usize];
-        file.read_exact(&mut metadata_buf)?;
-
+        let (header, metadata_buf) = read_package_prefix(&mut file)?;
         std::fs::create_dir_all(workspace_path)?;
 
         for _ in 0..header.file_count {
-            // 当前格式使用固定缓冲区读取变长条目头，名称头必须能放入该缓冲区。
-            let mut entry_header_buf = vec![0u8; 1024];
-            file.read_exact(&mut entry_header_buf[..2])?;
-
-            // 名称长度决定条目头剩余部分，数据长度紧随名称之后。
-            let name_len = u16::from_le_bytes([entry_header_buf[0], entry_header_buf[1]]) as usize;
-            file.read_exact(&mut entry_header_buf[2..2 + name_len + 8])?;
-
-            let (entry_header, _) =
-                FileEntryHeader::from_bytes(&entry_header_buf[..2 + name_len + 8])?;
-
-            // 文件内容已加密，解包阶段只负责原样落盘。
-            let mut file_data = vec![0u8; entry_header.data_size as usize];
-            file.read_exact(&mut file_data)?;
-
-            // 先按原始名称落盘，上层再依据解密元数据重命名为加密文件名。
-            let output_path = workspace_path.join(&entry_header.name);
-            std::fs::write(&output_path, &file_data)?;
+            let entry = read_file_entry(&mut file)?;
+            let relative_path = validate_package_path(&entry.name)?;
+            copy_entry_data(
+                &mut file,
+                entry.data_size,
+                &workspace_path.join(relative_path),
+            )?;
         }
 
         Ok(metadata_buf)
+    }
+
+    /// 将包内密文按解密元数据中的加密文件名直接写入工作区。
+    ///
+    /// 该入口避免先使用包内原始路径落盘，能够阻止目录穿越并避免二次重命名。
+    pub fn unpack_encrypted_files(
+        &self,
+        workspace_path: impl AsRef<Path>,
+        metadata: &MetaData,
+    ) -> Result<(), VeilError> {
+        let workspace_path = workspace_path.as_ref();
+        let mut file = File::open(&self.container_path)?;
+        let (header, _) = read_package_prefix(&mut file)?;
+        std::fs::create_dir_all(workspace_path)?;
+
+        let expected: BTreeMap<&str, &str> = metadata
+            .files
+            .iter()
+            .map(|entry| (entry.original_name.as_str(), entry.encrypted_name.as_str()))
+            .collect();
+        if expected.len() != metadata.files.len() {
+            return Err(VeilError::InvalidFormat(
+                "元数据包含重复的原始文件路径".to_string(),
+            ));
+        }
+
+        let mut seen = HashSet::new();
+        for _ in 0..header.file_count {
+            let entry = read_file_entry(&mut file)?;
+            let encrypted_name = expected.get(entry.name.as_str()).ok_or_else(|| {
+                VeilError::InvalidFormat(format!("打包条目不在元数据清单中: {}", entry.name))
+            })?;
+            if !seen.insert(entry.name.clone()) {
+                return Err(VeilError::InvalidFormat(format!(
+                    "打包文件包含重复条目: {}",
+                    entry.name
+                )));
+            }
+
+            let relative_path = validate_package_path(encrypted_name)?;
+            copy_entry_data(
+                &mut file,
+                entry.data_size,
+                &workspace_path.join(relative_path),
+            )?;
+        }
+
+        if seen.len() != expected.len() {
+            return Err(VeilError::InvalidFormat(
+                "打包文件缺少元数据中声明的文件".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// 读取打包文件头部和加密元数据。
+fn read_package_prefix(file: &mut File) -> Result<(ContainerHeader, Vec<u8>), VeilError> {
+    let mut header_buf = [0u8; 22];
+    file.read_exact(&mut header_buf)?;
+    let header = ContainerHeader::from_bytes(&header_buf)?;
+
+    let metadata_size = usize::try_from(header.metadata_size)
+        .map_err(|_| VeilError::InvalidFormat("元数据长度超出平台限制".to_string()))?;
+    let mut metadata = vec![0u8; metadata_size];
+    file.read_exact(&mut metadata)?;
+    Ok((header, metadata))
+}
+
+/// 读取一个变长文件条目头。
+fn read_file_entry(file: &mut File) -> Result<FileEntryHeader, VeilError> {
+    let mut name_len_buf = [0u8; 2];
+    file.read_exact(&mut name_len_buf)?;
+    let name_len = u16::from_le_bytes(name_len_buf) as usize;
+    let mut entry_buf = vec![0u8; 2 + name_len + 8];
+    entry_buf[..2].copy_from_slice(&name_len_buf);
+    file.read_exact(&mut entry_buf[2..])?;
+    let (entry, _) = FileEntryHeader::from_bytes(&entry_buf)?;
+    Ok(entry)
+}
+
+/// 将指定长度的条目数据原样复制到目标路径。
+fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(), VeilError> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_path)?;
+    let copied = std::io::copy(&mut file.take(size), &mut output)?;
+    if copied != size {
+        let _ = std::fs::remove_file(output_path);
+        return Err(VeilError::InvalidFormat(format!(
+            "打包条目数据不完整: {}",
+            output_path.display()
+        )));
+    }
+    output.sync_all()?;
+    Ok(())
+}
+
+/// 校验包内名称是安全的相对路径。
+fn validate_package_path(name: &str) -> Result<PathBuf, VeilError> {
+    if name.is_empty() {
+        return Err(VeilError::InvalidFormat("打包条目路径不能为空".to_string()));
+    }
+
+    let mut output = PathBuf::new();
+    for component in Path::new(name).components() {
+        match component {
+            Component::Normal(part) => output.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(VeilError::InvalidFormat(format!(
+                    "打包条目包含不安全路径: {}",
+                    name
+                )));
+            }
+        }
+    }
+
+    if output.as_os_str().is_empty() {
+        return Err(VeilError::InvalidFormat("打包条目路径不能为空".to_string()));
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证包内路径拒绝绝对路径和目录穿越。
+    #[test]
+    fn rejects_unsafe_package_paths() {
+        assert!(validate_package_path("dir/file.txt").is_ok());
+        assert!(validate_package_path("../escape.txt").is_err());
+        assert!(validate_package_path("/absolute.txt").is_err());
+        assert!(validate_package_path("").is_err());
+    }
+
+    /// 验证未知打包版本和头部大小被拒绝。
+    #[test]
+    fn rejects_unknown_header_layout() {
+        let mut bytes = ContainerHeader::new(10, 1).to_bytes();
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+        assert!(ContainerHeader::from_bytes(&bytes).is_err());
+
+        let mut bytes = ContainerHeader::new(10, 1).to_bytes();
+        bytes[10..14].copy_from_slice(&23u32.to_le_bytes());
+        assert!(ContainerHeader::from_bytes(&bytes).is_err());
     }
 }

@@ -24,12 +24,15 @@ pub enum ErrorCode {
     MissingDeletePath = 1007,
     MissingSourceDestination = 1008,
     MissingOutputPath = 1009,
+    MissingCheckPath = 1010,
 
     PasswordMismatch = 2001,
     PasswordEmpty = 2002,
 
     AddSourceNotFound = 3001,
     AddNotFile = 3002,
+    AddInvalidDestination = 3003,
+    AddDirectoryReadFailed = 3004,
     ConfigInvalidLevel = 4001,
 
     InitConflictingWorkspaceOptions = 5001,
@@ -46,6 +49,7 @@ pub enum ErrorCode {
 
     LinkOutputExists = 6001,
     LinkMissingVeilId = 6002,
+    LinkInvalidExtension = 6003,
 
     ExportPathRequired = 7001,
     PackOutputExists = 7002,
@@ -54,8 +58,7 @@ pub enum ErrorCode {
     UnpackWorkspaceNotFound = 7005,
     UnpackMissingVeilId = 7006,
     UnpackDirectoryExists = 7007,
-    UnpackKdfFailed = 7008,
-    UnpackDecryptFailed = 7009,
+    UnpackInvalidLinkExtension = 7010,
 
     HelpUnknownTopic = 8001,
     Unexpected = 9000,
@@ -127,6 +130,9 @@ impl ErrorCode {
             Self::MissingOutputPath => {
                 Self::define(value, "MISSING_OUTPUT_PATH", "error.require_output_path", 2)
             }
+            Self::MissingCheckPath => {
+                Self::define(value, "MISSING_CHECK_PATH", "error.require_check_path", 2)
+            }
             Self::PasswordMismatch => {
                 Self::define(value, "PASSWORD_MISMATCH", "error.password_mismatch", 1)
             }
@@ -135,6 +141,18 @@ impl ErrorCode {
                 Self::define(value, "ADD_SOURCE_NOT_FOUND", "add.source_not_found", 1)
             }
             Self::AddNotFile => Self::define(value, "ADD_NOT_FILE", "add.not_file", 1),
+            Self::AddInvalidDestination => Self::define(
+                value,
+                "ADD_INVALID_DESTINATION",
+                "add.invalid_destination",
+                1,
+            ),
+            Self::AddDirectoryReadFailed => Self::define(
+                value,
+                "ADD_DIRECTORY_READ_FAILED",
+                "add.directory_read_failed",
+                1,
+            ),
             Self::ConfigInvalidLevel => {
                 Self::define(value, "CONFIG_INVALID_LEVEL", "config.invalid_level", 1)
             }
@@ -204,6 +222,9 @@ impl ErrorCode {
             Self::LinkMissingVeilId => {
                 Self::define(value, "LINK_MISSING_VEIL_ID", "link.missing_veil_id", 1)
             }
+            Self::LinkInvalidExtension => {
+                Self::define(value, "LINK_INVALID_EXTENSION", "link.invalid_extension", 1)
+            }
             Self::ExportPathRequired => {
                 Self::define(value, "EXPORT_PATH_REQUIRED", "ex.specify_path", 1)
             }
@@ -237,12 +258,12 @@ impl ErrorCode {
                 "unpack.directory_exists",
                 1,
             ),
-            Self::UnpackKdfFailed => {
-                Self::define(value, "UNPACK_KDF_FAILED", "unpack.kdf_failed", 1)
-            }
-            Self::UnpackDecryptFailed => {
-                Self::define(value, "UNPACK_DECRYPT_FAILED", "unpack.decrypt_failed", 1)
-            }
+            Self::UnpackInvalidLinkExtension => Self::define(
+                value,
+                "UNPACK_INVALID_LINK_EXTENSION",
+                "init.invalid_link_extension",
+                1,
+            ),
             Self::HelpUnknownTopic => {
                 Self::define(value, "HELP_UNKNOWN_TOPIC", "help.files.unknown_topic", 1)
             }

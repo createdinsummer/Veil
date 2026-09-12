@@ -12,10 +12,55 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit},
 };
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
+
+/// 一次批量添加中的单个源文件和容器内目标路径。
+#[derive(Debug, Clone)]
+pub struct AddFileSpec {
+    /// 本地源文件路径。
+    pub source: PathBuf,
+    /// 容器内的相对目标路径，使用 `/` 分隔。
+    pub target: String,
+}
+
+impl AddFileSpec {
+    /// 创建文件添加请求。
+    pub fn new(source: impl Into<PathBuf>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+        }
+    }
+}
+
+/// 删除操作命中的路径类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovedPathKind {
+    /// 删除的是单个文件。
+    File,
+    /// 删除的是目录及其全部文件。
+    Directory,
+}
+
+/// 移动操作命中的路径类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedPathKind {
+    /// 移动的是单个文件。
+    File,
+    /// 移动的是目录及其全部子文件。
+    Directory,
+}
+
+/// 密码修改阶段中暂存的新密文和原密文备份。
+struct StagedPasswordFile {
+    original: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+}
 
 /// 对单个工作区容器执行初始化和文件操作。
 pub struct WorkspaceManager {
@@ -96,27 +141,28 @@ impl WorkspaceManager {
     /// # 错误
     /// `.veil-meta` 不存在、头部无效、密钥派生失败、密码错误或密文损坏时返回错误。
     pub fn read_meta(&self, password: &str) -> Result<MetaData, VeilError> {
-        let meta_path = self.workspace_path.join(".veil-meta");
+        Ok(self.read_meta_context(password)?.0)
+    }
 
+    /// 读取密码上下文，同时返回解密后的元数据、明文头部和零化主密钥。
+    fn read_meta_context(
+        &self,
+        password: &str,
+    ) -> Result<(MetaData, MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
+        let meta_path = self.workspace_path.join(".veil-meta");
         if !meta_path.exists() {
             return Err(VeilError::InvalidFormat("元数据文件不存在".to_string()));
         }
 
-        let bytes = fs::read(&meta_path).map_err(|e| VeilError::Io(e))?;
-
+        let bytes = fs::read(&meta_path)?;
         let header = MetaHeader::from_bytes(&bytes)?;
-
         let master_key = derive_master_key(password, &header.salt)?;
-
-        // 明文头部之后全部是 ChaCha20-Poly1305 密文。
         let header_len = MetaHeader::header_len(&bytes)?;
         let encrypted_data = &bytes[header_len..];
-
         let decrypted = decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?;
-
         let meta_data = MetaData::from_json(&decrypted)?;
 
-        Ok(meta_data)
+        Ok((meta_data, header, master_key))
     }
 
     /// 不输入密码，只读取恢复所需的明文身份信息。
@@ -183,51 +229,114 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// 加密并添加一个本地文件。
-    ///
-    /// 文件原名仅写入加密元数据；磁盘上使用随机加密名保存内容。方法先写入密文，
-    /// 再通过 [`WorkspaceManager::update_meta`] 登记条目。
-    ///
-    /// # 返回
-    /// 成功时返回新密文文件在工作区中的名称。
-    ///
-    /// # 错误
-    /// 文件名为空、源文件读取、密钥派生、加密、密文写入或元数据更新失败时返回错误。
+    /// 加密并添加一个本地文件，目标名称使用源文件名。
     pub fn add_file(&self, file_path: &Path, password: &str) -> Result<String, VeilError> {
         let file_name = file_path
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(|name| name.to_str())
             .ok_or_else(|| VeilError::WorkspaceError("无效的文件名".to_string()))?;
 
-        let file_data = fs::read(file_path)?;
-        let file_size = file_data.len() as u64;
+        let mut encrypted_names =
+            self.add_files(&[AddFileSpec::new(file_path, file_name)], password)?;
 
-        // 原始文件名只进入加密元数据；磁盘使用随机加密名隔离目录项。
-        let encrypted_name = format!("{}.enc", generate_random_id());
-        let file_nonce = generate_random_bytes::<12>();
+        Ok(encrypted_names.remove(0))
+    }
 
-        let meta_path = self.workspace_path.join(".veil-meta");
-        let meta_bytes = fs::read(&meta_path)?;
-        let header = MetaHeader::from_bytes(&meta_bytes)?;
+    /// 批量加密并添加本地文件。
+    ///
+    /// 方法先验证密码，再把所有新密文写入工作区，最后只提交一次元数据。同一批次
+    /// 或已有元数据中的同名目标会被替换。提交失败时删除本次新增密文；提交成功后
+    /// 删除被替换的旧密文。
+    ///
+    /// # 返回
+    /// 成功时按去重后的输入顺序返回新密文文件名。
+    ///
+    /// # 错误
+    /// 密码错误、目标路径无效、源文件读取、加密、密文写入或元数据提交失败时返回错误。
+    pub fn add_files(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+    ) -> Result<Vec<String>, VeilError> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let master_key = derive_master_key(password, &header.salt)?;
+        // 先验证密码并解密元数据；这一步发生在任何文件写入之前。
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
 
-        let encrypted_data = encrypt_chacha20poly1305(&master_key, &file_data, &file_nonce)?;
+        // 同一批次内相同目标路径采用“后者覆盖前者”，避免重复元数据条目。
+        let mut deduplicated = Vec::with_capacity(files.len());
+        let mut positions = HashMap::new();
+        for file in files {
+            let normalized_target = normalize_container_path(&file.target)?;
+            let spec = AddFileSpec::new(&file.source, normalized_target.clone());
+            if let Some(index) = positions.get(&normalized_target).copied() {
+                deduplicated[index] = spec;
+            } else {
+                positions.insert(normalized_target, deduplicated.len());
+                deduplicated.push(spec);
+            }
+        }
 
-        // 先落盘密文，再发布指向它的元数据条目，避免元数据提前引用缺失文件。
-        let encrypted_path = self.workspace_path.join(&encrypted_name);
-        fs::write(&encrypted_path, encrypted_data)?;
+        let mut written = Vec::new();
+        let mut new_entries = Vec::new();
+        let transaction = (|| -> Result<(), VeilError> {
+            for file in &deduplicated {
+                let file_data = fs::read(&file.source)?;
+                let file_size = file_data.len() as u64;
+                let encrypted_name = format!("{}.enc", generate_random_id());
+                let file_nonce = generate_random_bytes::<12>();
+                let encrypted_data =
+                    encrypt_chacha20poly1305(&master_key, &file_data, &file_nonce)?;
+                let encrypted_path = self.workspace_path.join(&encrypted_name);
 
-        self.update_meta(password, |meta| {
-            meta.add_file(FileEntry::new(
-                encrypted_name.clone(),
-                file_name.to_string(),
-                file_size,
-                file_nonce,
-            ));
-        })?;
+                fs::write(&encrypted_path, encrypted_data)?;
+                written.push(encrypted_name.clone());
+                new_entries.push(FileEntry::new(
+                    encrypted_name,
+                    file.target.clone(),
+                    file_size,
+                    file_nonce,
+                ));
+            }
 
-        Ok(encrypted_name)
+            let mut replaced = Vec::new();
+            for entry in &new_entries {
+                replaced.extend(
+                    meta_data
+                        .files
+                        .iter()
+                        .filter(|existing| existing.original_name == entry.original_name)
+                        .cloned(),
+                );
+                meta_data
+                    .files
+                    .retain(|existing| existing.original_name != entry.original_name);
+                meta_data.add_file(entry.clone());
+            }
+
+            self.write_meta(&header, &meta_data, &master_key)?;
+
+            // 元数据提交成功后旧密文才失去引用，删除失败不会影响新内容可用性。
+            for entry in replaced {
+                let _ = fs::remove_file(self.workspace_path.join(entry.encrypted_name));
+            }
+
+            Ok(())
+        })();
+
+        if let Err(error) = transaction {
+            for encrypted_name in written {
+                let _ = fs::remove_file(self.workspace_path.join(encrypted_name));
+            }
+            return Err(error);
+        }
+
+        Ok(new_entries
+            .into_iter()
+            .map(|entry| entry.encrypted_name)
+            .collect())
     }
 
     /// 解密指定原始路径的文件并写入输出位置。
@@ -242,9 +351,9 @@ impl WorkspaceManager {
     ) -> Result<(), VeilError> {
         let meta_data = self.read_meta(password)?;
 
-        let entry = meta_data.find_file(original_name).ok_or_else(|| {
-            VeilError::ContainerNotFound(format!("文件 '{}' 不存在", original_name))
-        })?;
+        let entry = meta_data
+            .find_file(original_name)
+            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?;
 
         // 元数据只暴露原始名称，实际读取必须通过条目保存的加密文件名。
         let encrypted_path = self.workspace_path.join(&entry.encrypted_name);
@@ -263,30 +372,76 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// 删除指定原始路径对应的密文文件，并从元数据中移除条目。
+    /// 删除指定文件。
     ///
-    /// 先删除磁盘密文，再更新元数据；任一步失败都会向上返回错误。
+    /// 这是 [`WorkspaceManager::remove_path`] 的兼容入口，调用方可通过额外参数
+    /// 获得文件或目录类型。
+    pub fn remove_file(
+        &self,
+        original_name: &str,
+        password: &str,
+    ) -> Result<RemovedPathKind, VeilError> {
+        self.remove_path(original_name, password)
+    }
+
+    /// 删除文件，或递归删除目录及其全部文件。
+    ///
+    /// 方法先验证密码并提交更新后的元数据，再删除已失去引用的密文。这样提交失败
+    /// 不会破坏原容器；密文清理失败只会留下不可达的孤立文件。
     ///
     /// # 错误
-    /// 元数据读取、文件查找、密文删除或元数据更新失败时返回错误。
-    pub fn remove_file(&self, original_name: &str, password: &str) -> Result<(), VeilError> {
-        let meta_data = self.read_meta(password)?;
+    /// 密码错误、路径无效、目标不存在或元数据提交失败时返回错误。
+    pub fn remove_path(
+        &self,
+        original_name: &str,
+        password: &str,
+    ) -> Result<RemovedPathKind, VeilError> {
+        if matches!(original_name, "." | "/") {
+            return Err(VeilError::WorkspaceError("不能删除容器根目录".to_string()));
+        }
 
-        let entry = meta_data.find_file(original_name).ok_or_else(|| {
-            VeilError::ContainerNotFound(format!("文件 '{}' 不存在", original_name))
-        })?;
+        let normalized = normalize_container_path(original_name)?;
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
+        let exact_file = meta_data.find_file(&normalized).cloned();
+        let directory_prefix = format!("{normalized}/");
+        let has_children = meta_data
+            .files
+            .iter()
+            .any(|entry| entry.original_name.starts_with(&directory_prefix));
 
-        let encrypted_name = entry.encrypted_name.clone();
+        if exact_file.is_none() && !has_children {
+            return Err(VeilError::FileNotFound(format!(
+                "文件或目录 '{}' 不存在",
+                normalized
+            )));
+        }
 
-        // 先移除磁盘密文，再从元数据删除引用。
-        let encrypted_path = self.workspace_path.join(&encrypted_name);
-        fs::remove_file(&encrypted_path)?;
+        let kind = if has_children {
+            RemovedPathKind::Directory
+        } else {
+            RemovedPathKind::File
+        };
 
-        self.update_meta(password, |meta| {
-            meta.remove_file(&encrypted_name);
-        })?;
+        let removed: Vec<_> = meta_data
+            .files
+            .iter()
+            .filter(|entry| {
+                entry.original_name == normalized
+                    || entry.original_name.starts_with(&directory_prefix)
+            })
+            .cloned()
+            .collect();
 
-        Ok(())
+        meta_data.files.retain(|entry| {
+            entry.original_name != normalized && !entry.original_name.starts_with(&directory_prefix)
+        });
+        self.write_meta(&header, &meta_data, &master_key)?;
+
+        for entry in removed {
+            let _ = fs::remove_file(self.workspace_path.join(entry.encrypted_name));
+        }
+
+        Ok(kind)
     }
 
     /// 使用密码读取并返回元数据中的所有文件条目。
@@ -300,32 +455,22 @@ impl WorkspaceManager {
 
     /// 使用新密码重新保护元数据和所有文件内容。
     ///
-    /// 方法先验证旧密码并解密清单，再用新盐和新 nonce 重写 `.veil-meta`，最后逐个
-    /// 解密并重加密文件。文件自身已有的 nonce 保持不变。
+    /// 方法先验证旧密码、解密全部文件并生成新密文，再替换文件，最后提交新元数据。
+    /// 运行期任一步失败都会尝试恢复原文件；新密码不能为空。
     ///
     /// # 错误
     /// 旧密码错误、元数据或文件解密失败，以及新元数据或文件写入失败时返回错误。
     pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), VeilError> {
-        let meta_path = self.workspace_path.join(".veil-meta");
-        let meta_bytes = fs::read(&meta_path)?;
+        if new_password.is_empty() {
+            return Err(VeilError::WorkspaceError("新密码不能为空".to_string()));
+        }
 
-        let old_header = MetaHeader::from_bytes(&meta_bytes)?;
-        let old_master_key = derive_master_key(old_password, &old_header.salt)?;
-
-        let header_len = MetaHeader::header_len(&meta_bytes)?;
-        let encrypted_data = &meta_bytes[header_len..];
-        let decrypted =
-            decrypt_chacha20poly1305(&old_master_key, encrypted_data, &old_header.nonce)?;
-        let meta_data = MetaData::from_json(&decrypted)?;
+        let (meta_data, old_header, old_master_key) = self.read_meta_context(old_password)?;
 
         let new_salt = generate_random_bytes::<32>();
         let new_nonce = generate_random_bytes::<12>();
 
         let new_master_key = derive_master_key(new_password, &new_salt)?;
-
-        let json_bytes = meta_data.to_json()?;
-        let new_encrypted_data =
-            encrypt_chacha20poly1305(&new_master_key, &json_bytes, &new_nonce)?;
 
         let new_header = MetaHeader::new(
             new_salt,
@@ -336,75 +481,254 @@ impl WorkspaceManager {
             old_header.workspace_type.clone(),
         );
 
-        // 新头部携带新 salt/nonce，后接使用新主密钥加密的 JSON。
-        // 元数据先切换到新密钥，随后按清单逐个转换文件密文。
-        let mut new_meta_bytes = new_header.to_bytes()?;
-        new_meta_bytes.extend_from_slice(&new_encrypted_data);
-        atomic_write(&meta_path, &new_meta_bytes)?;
-
-        // 每个文件保留自身 nonce，仅替换由新密码派生的主密钥。
+        // 第一阶段只生成新密文，不触碰原文件；任一文件失败时原容器保持完整。
+        let mut staged = Vec::with_capacity(meta_data.files.len());
         for file_entry in &meta_data.files {
-            let encrypted_path = self.workspace_path.join(&file_entry.encrypted_name);
+            let prepared = (|| -> Result<StagedPasswordFile, VeilError> {
+                let encrypted_path = self.workspace_path.join(&file_entry.encrypted_name);
+                let encrypted_file_data = fs::read(&encrypted_path)?;
+                let plaintext = decrypt_chacha20poly1305(
+                    &old_master_key,
+                    &encrypted_file_data,
+                    &file_entry.nonce,
+                )?;
+                let new_encrypted =
+                    encrypt_chacha20poly1305(&new_master_key, &plaintext, &file_entry.nonce)?;
 
-            let encrypted_file_data = fs::read(&encrypted_path)?;
-            let plaintext =
-                decrypt_chacha20poly1305(&old_master_key, &encrypted_file_data, &file_entry.nonce)?;
+                let staged_path = self.unique_password_temp_path("new")?;
+                fs::write(&staged_path, new_encrypted)?;
+                let backup = match self.unique_password_temp_path("bak") {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let _ = fs::remove_file(&staged_path);
+                        return Err(error);
+                    }
+                };
 
-            let new_encrypted =
-                encrypt_chacha20poly1305(&new_master_key, &plaintext, &file_entry.nonce)?;
+                Ok(StagedPasswordFile {
+                    original: encrypted_path,
+                    staged: staged_path,
+                    backup,
+                })
+            })();
 
-            atomic_write(&encrypted_path, &new_encrypted)?;
+            match prepared {
+                Ok(file) => staged.push(file),
+                Err(error) => {
+                    remove_staged_password_files(&staged);
+                    return Err(error);
+                }
+            }
+        }
+
+        // 第二阶段用 rename 替换文件，并保留旧密文备份以便回滚。
+        let mut replaced = Vec::with_capacity(staged.len());
+        for file in &staged {
+            if let Err(error) = fs::rename(&file.original, &file.backup) {
+                restore_password_backups(&replaced);
+                remove_staged_password_files(&staged);
+                return Err(VeilError::Io(error));
+            }
+
+            if let Err(error) = fs::rename(&file.staged, &file.original) {
+                let _ = fs::rename(&file.backup, &file.original);
+                restore_password_backups(&replaced);
+                remove_staged_password_files(&staged);
+                return Err(VeilError::Io(error));
+            }
+
+            replaced.push((file.original.clone(), file.backup.clone()));
+        }
+
+        // 第三阶段提交元数据；失败时恢复全部旧密文。
+        if let Err(error) = self.write_meta(&new_header, &meta_data, &new_master_key) {
+            let rollback_errors = restore_password_backups(&replaced);
+            if !rollback_errors.is_empty() {
+                return Err(VeilError::WorkspaceError(format!(
+                    "密码修改失败，且部分文件回滚失败: {} ({})",
+                    error,
+                    rollback_errors.join("; ")
+                )));
+            }
+            return Err(error);
+        }
+
+        // 元数据和新密文均已持久化，旧密文备份可以安全删除。
+        for file in &staged {
+            let _ = fs::remove_file(&file.backup);
         }
 
         Ok(())
     }
 
-    /// 修改文件在元数据中的原始路径，不移动或重加密其密文。
+    /// 为密码修改临时文件生成工作区内唯一路径。
+    fn unique_password_temp_path(&self, label: &str) -> Result<PathBuf, VeilError> {
+        for _ in 0..16 {
+            let candidate = self
+                .workspace_path
+                .join(format!(".veil-pw-{label}-{}.tmp", generate_random_id()));
+            if !candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+
+        Err(VeilError::WorkspaceError(
+            "无法分配密码修改临时文件".to_string(),
+        ))
+    }
+
+    /// 修改文件路径的兼容入口。
+    pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<(), VeilError> {
+        self.move_path(from, to, password).map(|_| ())
+    }
+
+    /// 移动或重命名文件与目录，并返回最终目标路径。
     ///
-    /// 目标路径已存在时拒绝覆盖，并保留原条目的密文名称、nonce、时间和哈希字段。
+    /// 如果目标已经表示一个目录，源会被移动到目标目录下并保留最后一级名称。
+    /// 目录移动会同步更新全部子文件路径，但不会移动或重新加密任何密文。
     ///
     /// # 错误
-    /// 源文件不存在、目标已存在、密码错误或元数据写回失败时返回错误。
-    pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<(), VeilError> {
-        let meta_path = self.workspace_path.join(".veil-meta");
-        let meta_bytes = fs::read(&meta_path)?;
-
-        let header = MetaHeader::from_bytes(&meta_bytes)?;
-        let master_key = derive_master_key(password, &header.salt)?;
-
-        let header_len = MetaHeader::header_len(&meta_bytes)?;
-        let encrypted_data = &meta_bytes[header_len..];
-        let decrypted = decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?;
-        let mut meta_data = MetaData::from_json(&decrypted)?;
-
-        let file_entry = meta_data
-            .find_file(from)
-            .ok_or_else(|| VeilError::FileNotFound(from.to_string()))?
-            .clone();
-
-        // 目标已存在时拒绝覆盖，保持 rename 语义可预测。
-        if meta_data.find_file(to).is_some() {
-            return Err(VeilError::FileAlreadyExists(to.to_string()));
+    /// 源不存在、目标冲突、目标位于源目录内部、路径无效、密码错误或元数据写回失败时返回错误。
+    pub fn move_path(
+        &self,
+        from: &str,
+        to: &str,
+        password: &str,
+    ) -> Result<(MovedPathKind, String), VeilError> {
+        if matches!(from, "." | "/") || matches!(to, "." | "/") {
+            return Err(VeilError::WorkspaceError(
+                "源路径和目标路径都不能是容器根目录".to_string(),
+            ));
         }
 
-        // 新条目复用原加密文件和 nonce，只替换对外原始路径。
-        meta_data.remove_file(&file_entry.encrypted_name);
+        let source = normalize_container_path(from)?;
+        let destination = normalize_container_path(to)?;
+        let destination_ends_with_separator = to.ends_with('/') || to.ends_with('\\');
 
-        let new_entry = FileEntry {
-            encrypted_name: file_entry.encrypted_name,
-            original_name: to.to_string(),
-            size: file_entry.size,
-            nonce: file_entry.nonce,
-            encrypted_at: file_entry.encrypted_at,
-            hash: file_entry.hash,
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
+        let source_prefix = format!("{source}/");
+        let source_file = meta_data.find_file(&source).cloned();
+        let source_children: Vec<_> = meta_data
+            .files
+            .iter()
+            .filter(|entry| entry.original_name.starts_with(&source_prefix))
+            .cloned()
+            .collect();
+
+        if source_file.is_some() && !source_children.is_empty() {
+            return Err(VeilError::WorkspaceError(format!(
+                "源路径同时匹配文件和目录: {source}"
+            )));
+        }
+
+        let source_kind = if source_file.is_some() {
+            MovedPathKind::File
+        } else if source_children.is_empty() {
+            return Err(VeilError::FileNotFound(format!(
+                "源路径 '{}' 不存在",
+                source
+            )));
+        } else {
+            MovedPathKind::Directory
         };
 
-        meta_data.add_file(new_entry);
+        let destination_prefix = format!("{destination}/");
+        let destination_children_exist = meta_data
+            .files
+            .iter()
+            .any(|entry| entry.original_name.starts_with(&destination_prefix));
+        let destination_is_directory =
+            destination_ends_with_separator || destination_children_exist;
+
+        let final_target = if destination_is_directory {
+            let source_name = source
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| VeilError::WorkspaceError("源路径缺少名称".to_string()))?;
+            if destination.is_empty() {
+                source_name.to_string()
+            } else {
+                format!("{destination}/{source_name}")
+            }
+        } else {
+            destination.clone()
+        };
+
+        if final_target == source {
+            return Err(VeilError::WorkspaceError(
+                "源路径和目标路径相同".to_string(),
+            ));
+        }
+
+        let final_prefix = format!("{final_target}/");
+        if source_kind == MovedPathKind::Directory
+            && (final_target.starts_with(&source_prefix) || final_target == source)
+        {
+            return Err(VeilError::WorkspaceError(
+                "不能把目录移动到自身或子目录".to_string(),
+            ));
+        }
+
+        if meta_data.find_file(&final_target).is_some()
+            || meta_data
+                .files
+                .iter()
+                .any(|entry| entry.original_name.starts_with(&final_prefix))
+        {
+            return Err(VeilError::FileAlreadyExists(final_target));
+        }
+
+        match source_kind {
+            MovedPathKind::File => {
+                let encrypted_name = source_file
+                    .ok_or_else(|| VeilError::FileNotFound(source.clone()))?
+                    .encrypted_name;
+                if let Some(entry) = meta_data
+                    .files
+                    .iter_mut()
+                    .find(|entry| entry.encrypted_name == encrypted_name)
+                {
+                    entry.original_name = final_target.clone();
+                }
+            }
+            MovedPathKind::Directory => {
+                for entry in &mut meta_data.files {
+                    if entry.original_name == source {
+                        entry.original_name = final_target.clone();
+                    } else if let Some(suffix) = entry.original_name.strip_prefix(&source_prefix) {
+                        entry.original_name = format!("{final_target}/{suffix}");
+                    }
+                }
+            }
+        }
 
         self.write_meta(&header, &meta_data, &master_key)?;
-
-        Ok(())
+        Ok((source_kind, final_target))
     }
+}
+
+/// 删除尚未替换的密码修改暂存密文。
+fn remove_staged_password_files(files: &[StagedPasswordFile]) {
+    for file in files {
+        let _ = fs::remove_file(&file.staged);
+    }
+}
+
+/// 用旧密文备份恢复已经替换的文件，返回无法恢复的路径。
+fn restore_password_backups(replaced: &[(PathBuf, PathBuf)]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (original, backup) in replaced.iter().rev() {
+        if let Err(error) = fs::remove_file(original)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            errors.push(format!("{}: {}", original.display(), error));
+            continue;
+        }
+        if let Err(error) = fs::rename(backup, original) {
+            errors.push(format!("{}: {}", original.display(), error));
+        }
+    }
+    errors
 }
 
 /// 使用 Argon2id 从用户密码和容器盐值派生零化主密钥。
@@ -473,6 +797,42 @@ fn generate_random_bytes<const N: usize>() -> [u8; N] {
 fn generate_random_id() -> String {
     let bytes = generate_random_bytes::<8>();
     hex::encode(bytes)
+}
+
+/// 校验并规范化容器内相对路径，统一使用 `/` 分隔。
+pub fn normalize_container_path(path: &str) -> Result<String, VeilError> {
+    if path.is_empty() {
+        return Err(VeilError::WorkspaceError(
+            "容器内目标路径不能为空".to_string(),
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_str().ok_or_else(|| {
+                    VeilError::WorkspaceError("目标路径不是有效 UTF-8".to_string())
+                })?;
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(VeilError::WorkspaceError(format!(
+                    "目标路径必须是容器内相对路径: {}",
+                    path
+                )));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(VeilError::WorkspaceError(
+            "容器内目标路径不能为空".to_string(),
+        ));
+    }
+
+    Ok(parts.join("/"))
 }
 
 /// 先写同目录临时文件，再通过原子替换更新目标文件。

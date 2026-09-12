@@ -28,6 +28,18 @@
     "zh": "不是文件: {path}",
     "en": "Not a file: {path}"
   },
+  "add.invalid_destination": {
+    "zh": "容器内目标路径无效: {path}",
+    "en": "Invalid destination path: {path}"
+  },
+  "add.directory_read_failed": {
+    "zh": "读取源目录失败: {path} ({error})",
+    "en": "Failed to read source directory: {path} ({error})"
+  },
+  "add.files_added": {
+    "zh": "✓ 已添加 {count} 个文件",
+    "en": "✓ Added {count} files"
+  },
   "extract.in_progress": {
     "zh": "正在解密文件...",
     "en": "Decrypting file..."
@@ -147,6 +159,10 @@
   "info.container_name": {
     "zh": "  容器名称: {name}",
     "en": "  Container name: {name}"
+  },
+  "info.veil_id": {
+    "zh": "  容器 ID: {id}",
+    "en": "  Container ID: {id}"
   },
   "info.workspace_path": {
     "zh": "  工作区路径: {path}",
@@ -281,6 +297,10 @@
   "error.require_output_path": {
     "zh": "请指定输出路径（位置参数或 -o）",
     "en": "Please specify output path (positional argument or -o)"
+  },
+  "error.require_check_path": {
+    "zh": "请指定要检查的容器内路径",
+    "en": "Please specify the path to check inside the container"
   },
   "error.display": {
     "zh": "❌ 错误 [{code}]: {message}",
@@ -494,6 +514,10 @@
     "zh": "✓ 已删除: {path}",
     "en": "✓ Deleted: {path}"
   },
+  "rm.deleted_directory": {
+    "zh": "✓ 已删除目录: {path}",
+    "en": "✓ Deleted directory: {path}"
+  },
 
   "mv.moving": {
     "zh": "→ 正在移动: {from} -> {to}",
@@ -552,6 +576,23 @@
   "info.mime_dist_title": {
     "zh": "文件类型分布:",
     "en": "File type distribution:"
+  },
+  "info.mime_item": {
+    "zh": "  {type}: {count}",
+    "en": "  {type}: {count}"
+  },
+
+  "exists.file": {
+    "zh": "存在: 文件: {path}",
+    "en": "Exists: file: {path}"
+  },
+  "exists.directory": {
+    "zh": "存在: 目录: {path}",
+    "en": "Exists: directory: {path}"
+  },
+  "exists.missing": {
+    "zh": "不存在: {path}",
+    "en": "Not found: {path}"
   },
 
   "passwd.verifying": {
@@ -726,6 +767,18 @@
     "zh": "veil list <容器名称或链接> [-p <密码>]",
     "en": "veil list <container-or-link> [-p <password>]"
   },
+  "cmd.exists.about": {
+    "zh": "判断容器内文件或目录是否存在",
+    "en": "Check whether a file or directory exists in a container"
+  },
+  "cmd.exists.usage": {
+    "zh": "veil exists <容器名称或链接> <容器内路径> [密码]",
+    "en": "veil exists <container-or-link> <container-path> [password]"
+  },
+  "cmd.exists.usage_opt": {
+    "zh": "veil exists <容器名称或链接> <容器内路径> [-p <密码>]",
+    "en": "veil exists <container-or-link> <container-path> [-p <password>]"
+  },
   "cmd.passwd.about": {
     "zh": "修改容器密码",
     "en": "Change container password"
@@ -891,6 +944,10 @@
   "help.rm.path": {
     "zh": "要删除的虚拟路径",
     "en": "Virtual path to delete"
+  },
+  "help.exists.path": {
+    "zh": "要检查的容器内文件或目录路径",
+    "en": "File or directory path to check inside the container"
   },
   "help.mv.from_pos": {
     "zh": "源路径（位置参数或 -i，容器内）",
@@ -1086,6 +1143,10 @@
     "zh": "当前配置:",
     "en": "Current configuration:"
   },
+  "config.path": {
+    "zh": "配置路径: {path}",
+    "en": "Config path: {path}"
+  },
   "config.hints_level": {
     "zh": "提示级别: {level}",
     "en": "Hint level: {level}"
@@ -1105,6 +1166,14 @@
   "config.default_workspace": {
     "zh": "默认工作区: {path}",
     "en": "Default workspace: {path}"
+  },
+  "config.custom_workspace_count": {
+    "zh": "自定义工作区数量: {count}",
+    "en": "Custom workspace count: {count}"
+  },
+  "config.custom_workspace": {
+    "zh": "  {name}: {path}",
+    "en": "  {name}: {path}"
   },
   "config.container_count": {
     "zh": "容器数量: {count}",
@@ -1242,6 +1311,10 @@
     "zh": "链接文件缺少容器身份",
     "en": "Link file is missing the container identity"
   },
+  "link.invalid_extension": {
+    "zh": "链接文件必须以 .veil-link 结尾: {path}",
+    "en": "Link file must end with .veil-link: {path}"
+  },
   "cmd.link.about": {
     "zh": "根据工作区或容器名重建 .veil-link",
     "en": "Rebuild a .veil-link from a workspace or container name"
@@ -1315,12 +1388,16 @@
     "en": "Show command or file type help"
   },
   "cmd.help.usage": {
-    "zh": "veil help [files]",
-    "en": "veil help [files]"
+    "zh": "veil help [命令|files|all] [--all]",
+    "en": "veil help [command|files|all] [--all]"
   },
   "help.help.topic": {
-    "zh": "帮助主题，目前支持 files",
-    "en": "Help topic; currently supports files"
+    "zh": "命令名称、files 或 all",
+    "en": "Command name, files, or all"
+  },
+  "help.help.all": {
+    "zh": "显示全部命令帮助",
+    "en": "Show help for all commands"
   },
   "help.files.content": {
     "zh": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n大小      < 1KB              与数据量相同\n作用      指向本地工作区      完整数据包\n用途      日常操作            分享/备份/传输\n删除后    数据不丢失          数据丢失（除非工作区还在）\n可分享    否                  是\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n类比：\n  .veil-link  ←→  快捷方式 / 书签\n  .veil       ←→  ZIP 压缩包",

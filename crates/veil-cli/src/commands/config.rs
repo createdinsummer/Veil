@@ -1,7 +1,7 @@
 //! `veil config` 子命令：查看或更新用户偏好。
 
-use crate::i18n;
 use crate::error::Result;
+use crate::i18n;
 use colored::Colorize;
 use veil_core::config::{GlobalConfig, HintsLevel};
 
@@ -34,6 +34,13 @@ fn show_config() -> Result<()> {
     println!("\n{}", i18n::t("config.title").cyan().bold());
     println!();
 
+    if let Ok(path) = GlobalConfig::config_path() {
+        println!(
+            "  {}",
+            i18n::t1("config.path", "path", &path.display().to_string()).bright_black()
+        );
+    }
+
     let level = match effective_level {
         HintsLevel::Full => i18n::t("config.hints_full"),
         HintsLevel::Brief => i18n::t("config.hints_brief"),
@@ -63,6 +70,30 @@ fn show_config() -> Result<()> {
                 "config.default_workspace",
                 "path",
                 &default_ws.path.display().to_string()
+            )
+            .bright_black()
+        );
+    }
+
+    println!(
+        "  {}",
+        i18n::t1(
+            "config.custom_workspace_count",
+            "count",
+            &config.workspace.custom.len().to_string()
+        )
+    );
+    let mut custom_workspaces: Vec<_> = config.workspace.custom.iter().collect();
+    custom_workspaces.sort_by(|left, right| left.0.cmp(right.0));
+    for (name, workspace) in custom_workspaces {
+        println!(
+            "{}",
+            i18n::t2(
+                "config.custom_workspace",
+                "name",
+                name,
+                "path",
+                &workspace.path.display().to_string()
             )
             .bright_black()
         );

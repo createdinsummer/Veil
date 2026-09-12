@@ -1,7 +1,7 @@
 //! `veil link` 子命令：为容器创建新的便携链接。
 
-use crate::i18n;
 use crate::error::Result;
+use crate::i18n;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use veil_core::config::GlobalConfig;
@@ -27,41 +27,60 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| super::default_link_path(&resolved.name));
 
+    if output_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("veil-link")
+    {
+        crate::cli_bail!(LinkInvalidExtension, "path" => output_path.display());
+    }
     if output_path.exists() {
         crate::cli_bail!(LinkOutputExists, "path" => output_path.display());
     }
 
-    if let Some(existing_link) = resolved.link_path.as_deref() {
-        // 已有链接直接逐字节复制，避免重新序列化改变内容。
-        std::fs::copy(existing_link, &output_path)?;
-        config.cache_link(&output_path)?;
-    } else if config.find_container_key(&resolved.name).is_some() {
-        // 容器已注册但没有现有链接时，由配置模型生成新链接。
-        config.register_link(&resolved.name, &output_path)?;
-    } else {
-        // 仅能定位工作区时，从明文头部读取身份并现场构造链接。
-        let manager = WorkspaceManager::new(resolved.workspace_path.clone());
-        let header = manager.read_meta_header()?;
-        let container_name = header.container_name.clone();
-        if header.veil_id.is_empty() {
-            crate::cli_bail!(LinkMissingVeilId);
+    let creation = (|| -> Result<()> {
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        let veil_id = header.veil_id.clone();
-        let volume = volume::volume_for_path(&resolved.workspace_path)?;
-        let relative_path = resolved
-            .workspace_path
-            .strip_prefix(&volume.mount_path)
-            .unwrap_or(&resolved.workspace_path)
-            .to_path_buf();
-        VeilLink::new(
-            veil_id,
-            container_name,
-            relative_path,
-            volume.volume_id,
-            volume.volume_label,
-        )
-        .save(Path::new(&output_path))?;
-        config.cache_link(&output_path)?;
+
+        if let Some(existing_link) = resolved.link_path.as_deref() {
+            // 已有链接直接逐字节复制，避免重新序列化改变内容。
+            std::fs::copy(existing_link, &output_path)?;
+            config.cache_link(&output_path)?;
+        } else if config.find_container_key(&resolved.name).is_some() {
+            // 容器已注册但没有现有链接时，由配置模型生成新链接。
+            config.register_link(&resolved.name, &output_path)?;
+        } else {
+            // 仅能定位工作区时，从明文头部读取身份并现场构造链接。
+            let manager = WorkspaceManager::new(resolved.workspace_path.clone());
+            let header = manager.read_meta_header()?;
+            let container_name = header.container_name.clone();
+            if header.veil_id.is_empty() {
+                crate::cli_bail!(LinkMissingVeilId);
+            }
+            let veil_id = header.veil_id.clone();
+            let volume = volume::volume_for_path(&resolved.workspace_path)?;
+            let relative_path = resolved
+                .workspace_path
+                .strip_prefix(&volume.mount_path)
+                .unwrap_or(&resolved.workspace_path)
+                .to_path_buf();
+            VeilLink::new(
+                veil_id,
+                container_name,
+                relative_path,
+                volume.volume_id,
+                volume.volume_label,
+            )
+            .save(Path::new(&output_path))?;
+            config.cache_link(&output_path)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = creation {
+        let _ = std::fs::remove_file(&output_path);
+        return Err(error);
     }
 
     println!(

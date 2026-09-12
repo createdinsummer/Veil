@@ -192,6 +192,22 @@ enum Commands {
         password: Option<String>,
     },
 
+    /// 判断容器内文件或目录是否存在。
+    Exists {
+        // 位置参数形式的容器名称或链接目标。
+        #[arg(value_name = "容器名称")]
+        container: Option<String>,
+        // 要检查的容器内相对路径。
+        #[arg(value_name = "路径")]
+        path: Option<String>,
+        // 位置参数形式的密码。
+        #[arg(value_name = "密码")]
+        password_pos: Option<String>,
+        // 选项形式的密码。
+        #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
+        password: Option<String>,
+    },
+
     /// 修改容器密码。
     Passwd {
         // 位置参数形式的容器名称或链接目标。
@@ -295,6 +311,9 @@ enum Commands {
         // 可选的帮助主题，例如 `files`。
         #[arg(value_name = "主题")]
         topic: Option<String>,
+        // 输出全部子命令帮助。
+        #[arg(long, help = "显示所有命令帮助")]
+        all: bool,
     },
 }
 
@@ -506,6 +525,25 @@ fn build_localized_command() -> clap::Command {
             })
     });
 
+    // --- exists ---
+    cmd = cmd.mut_subcommand("exists", |sub| {
+        sub.about(i18n::t("cmd.exists.about"))
+            .override_usage(i18n::t("cmd.exists.usage"))
+            .help_template(sub_template)
+            .mut_arg("container", |a| {
+                a.value_name(v_container).help(i18n::t("help.container"))
+            })
+            .mut_arg("path", |a| {
+                a.value_name(v_path).help(i18n::t("help.exists.path"))
+            })
+            .mut_arg("password_pos", |a| {
+                a.value_name(v_password).help(i18n::t("help.password_pos"))
+            })
+            .mut_arg("password", |a| {
+                a.value_name(v_password).help(i18n::t("help.password_opt"))
+            })
+    });
+
     // --- passwd ---
     cmd = cmd.mut_subcommand("passwd", |sub| {
         sub.about(i18n::t("cmd.passwd.about"))
@@ -636,12 +674,13 @@ fn build_localized_command() -> clap::Command {
                 a.value_name(i18n::t("arg.topic"))
                     .help(i18n::t("help.help.topic"))
             })
+            .mut_arg("all", |a| a.help(i18n::t("help.help.all")))
     });
 
     // clap 的内置 help 参数无法本地化；先禁用，再为每个子命令注入当前语言版本。
     for command in [
-        "init", "add", "rm", "mv", "free", "ex", "info", "list", "passwd", "shell", "pack",
-        "unpack", "config", "link", "help",
+        "init", "add", "rm", "mv", "free", "ex", "info", "list", "exists", "passwd", "shell",
+        "pack", "unpack", "config", "link", "help",
     ] {
         cmd = cmd.mut_subcommand(command, |sub| {
             sub.disable_help_flag(true).arg(localized_help_arg())
@@ -682,6 +721,7 @@ fn cmd_usage(cmd_name: &str) -> &str {
         "ex" => i18n::t("cmd.ex.usage"),
         "info" => i18n::t("cmd.info.usage"),
         "list" => i18n::t("cmd.list.usage"),
+        "exists" => i18n::t("cmd.exists.usage"),
         "passwd" => i18n::t("cmd.passwd.usage"),
         "shell" => i18n::t("cmd.shell.usage"),
         "pack" => i18n::t("cmd.pack.usage"),
@@ -702,10 +742,32 @@ fn cmd_usage_opt(cmd_name: &str) -> &str {
         "free" => i18n::t("cmd.free.usage_opt"),
         "ex" => i18n::t("cmd.ex.usage_opt"),
         "info" => i18n::t("cmd.info.usage_opt"),
+        "exists" => i18n::t("cmd.exists.usage_opt"),
         "passwd" => i18n::t("cmd.passwd.usage_opt"),
         "shell" => i18n::t("cmd.shell.usage_opt"),
         _ => "",
     }
+}
+
+/// 输出顶层帮助和全部子命令帮助。
+fn print_all_help(command: &clap::Command) -> crate::error::Result<()> {
+    let mut root = command.clone();
+    root.print_help()?;
+    println!();
+
+    let names: Vec<_> = command
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name().to_string())
+        .collect();
+    for name in names {
+        if let Some(mut subcommand) = command.find_subcommand(&name).cloned() {
+            println!("\n===== {name} =====\n");
+            subcommand.print_help()?;
+            println!();
+        }
+    }
+
+    Ok(())
 }
 
 /// 输出本地化错误和两种参数写法后终止进程。
@@ -1001,6 +1063,24 @@ fn main() {
             let pwd = password_pos.or(password);
             commands::list_workspace::run_workspace(&container, pwd)
         }
+        // exists 只判断元数据中的文件或隐式目录是否存在。
+        Commands::Exists {
+            container,
+            path,
+            password_pos,
+            password,
+        } => {
+            let container = require_container(container, "exists");
+            let path = path.unwrap_or_else(|| {
+                exit_with_help(crate::error::ErrorCode::MissingCheckPath, "exists")
+            });
+            let pwd = password_pos.or(password);
+            match commands::exists_workspace::run_workspace(&container, &path, pwd) {
+                Ok(true) => Ok(()),
+                Ok(false) => std::process::exit(1),
+                Err(error) => Err(error),
+            }
+        }
         // passwd 同时接受旧、新密码的位置参数和选项参数。
         Commands::Passwd {
             container,
@@ -1068,20 +1148,39 @@ fn main() {
         Commands::Link { target, output } => commands::link::run(&target, output.as_deref()),
 
         // help 支持专门的文件类型主题，未给主题则打印顶层帮助。
-        Commands::Help { topic } => match topic.as_deref() {
-            Some("files") => {
-                hints::show_files_help();
-                Ok(())
-            }
-            Some(other) => Err(crate::cli_error!(HelpUnknownTopic, "topic" => other)),
-            None => match cmd.clone().print_help() {
-                Ok(()) => {
-                    println!();
-                    Ok(())
+        Commands::Help { topic, all } => {
+            if all {
+                print_all_help(&cmd)
+            } else {
+                match topic.as_deref() {
+                    Some("all") => print_all_help(&cmd),
+                    Some("files") => {
+                        hints::show_files_help();
+                        Ok(())
+                    }
+                    Some(other) => {
+                        if let Some(mut subcommand) = cmd.find_subcommand(other).cloned() {
+                            match subcommand.print_help() {
+                                Ok(()) => {
+                                    println!();
+                                    Ok(())
+                                }
+                                Err(error) => Err(error.into()),
+                            }
+                        } else {
+                            Err(crate::cli_error!(HelpUnknownTopic, "topic" => other))
+                        }
+                    }
+                    None => match cmd.clone().print_help() {
+                        Ok(()) => {
+                            println!();
+                            Ok(())
+                        }
+                        Err(error) => Err(error.into()),
+                    },
                 }
-                Err(error) => Err(error.into()),
-            },
-        },
+            }
+        }
     };
 
     if let Err(e) = result {

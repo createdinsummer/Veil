@@ -11,35 +11,39 @@ use veil_core::workspace_ops::WorkspaceManager;
 pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
     // list 只读取容器元数据，不需要打开每个文件 blob。
     let resolved = super::resolve_container(container_name)?;
+    let display_name = resolved.name;
     let workspace_path = resolved.workspace_path;
 
-    let password_str = super::prompt_password("请输入容器密码: ", password)?;
+    let password_str =
+        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 读取清单成功即表示密码正确，随后即可安全展示文件信息。
     let manager = WorkspaceManager::new(workspace_path);
-    let files = manager.list_files(password)?;
-
-    // 空容器提前返回，避免打印只有标题和总大小 0 的表格。
-    if files.is_empty() {
-        println!("{}", crate::i18n::t("common.empty").yellow());
-        return Ok(());
-    }
+    let mut files = manager.list_files(password)?;
+    files.sort_by(|left, right| left.original_name.cmp(&right.original_name));
 
     println!(
         "\n{}",
         crate::i18n::t2(
             "list.workspace_title",
             "name",
-            container_name,
+            &display_name,
             "count",
             &files.len().to_string()
         )
         .cyan()
         .bold()
     );
+
+    // 空容器保留标题和空状态，不打印总大小表格。
+    if files.is_empty() {
+        println!("\n{}", crate::i18n::t("common.empty").yellow());
+        return Ok(());
+    }
+
     println!();
 
     // 文件条目保存明文大小，可直接求和给用户展示。

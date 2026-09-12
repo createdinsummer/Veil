@@ -15,7 +15,9 @@ fn config_show_matches_documented_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("当前配置"))
-        .stdout(predicate::str::contains("提示级别: off"));
+        .stdout(predicate::str::contains("提示级别: off"))
+        .stdout(predicate::str::contains("配置路径:"))
+        .stdout(predicate::str::contains("自定义工作区数量: 0"));
 
     env.command()
         .args(["config", "show"])
