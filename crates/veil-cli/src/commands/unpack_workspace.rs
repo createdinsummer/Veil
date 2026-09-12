@@ -86,7 +86,7 @@ pub fn run_workspace(
         crate::cli_bail!(UnpackDirectoryExists, "path" => container_dir.display());
     }
 
-    println!("{}", crate::i18n::t("unpack.in_progress").cyan());
+    crate::outln!("{}", crate::i18n::t("unpack.in_progress").cyan());
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
@@ -107,7 +107,7 @@ pub fn run_workspace(
         unpacker.unpack_encrypted_files(&container_dir, &metadata)?;
 
         let meta_path = container_dir.join(".veil-meta");
-        fs::write(&meta_path, &encrypted_metadata)?;
+        veil_core::temp::write_private_file(&meta_path, &encrypted_metadata)?;
 
         let container_config = ContainerConfig {
             veil_id: metadata.veil_id.clone(),
@@ -142,11 +142,11 @@ pub fn run_workspace(
         return Err(error);
     }
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("unpack.created", "name", &name).green()
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2(
             "unpack.stats",

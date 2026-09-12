@@ -2222,6 +2222,7 @@ dependencies = [
  "clap",
  "colored",
  "indicatif",
+ "libc",
  "predicates",
  "rpassword",
  "serde_json",

@@ -36,7 +36,7 @@ pub fn run(
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;
 
-    println!("{}", crate::i18n::t("opening_container").cyan());
+    crate::outln!("{}", crate::i18n::t("opening_container").cyan());
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
@@ -49,7 +49,7 @@ pub fn run(
 
     manager.extract_file(file_name, output_path, password)?;
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("ex.file_exported", "path", output).green()
     );

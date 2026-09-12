@@ -83,7 +83,7 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
         return Err(error);
     }
 
-    println!(
+    crate::outln!(
         "{}",
         i18n::t1("link.created", "path", &output_path.display().to_string()).green()
     );

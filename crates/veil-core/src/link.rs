@@ -9,7 +9,7 @@ use crate::volume;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// `.veil-link` 文件扩展名。
 pub const LINK_EXTENSION: &str = "veil-link";
@@ -120,9 +120,11 @@ impl VeilLink {
             VeilError::ConfigError(format!("读取链接文件失败 {}: {}", path.display(), error))
         })?;
 
-        toml::from_str(&content).map_err(|error| {
+        let link: Self = toml::from_str(&content).map_err(|error| {
             VeilError::InvalidFormat(format!("链接文件格式错误 {}: {}", path.display(), error))
-        })
+        })?;
+        link.validate()?;
+        Ok(link)
     }
 
     /// 将链接序列化为 TOML 并写入指定路径，缺少父目录时会自动创建。
@@ -130,6 +132,8 @@ impl VeilLink {
     /// # 错误
     /// 父目录创建、序列化或文件写入失败时返回相应错误。
     pub fn save(&self, path: &Path) -> Result<(), VeilError> {
+        self.validate()?;
+
         // 链接允许写入尚不存在的子目录，父目录按需创建。
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -139,8 +143,8 @@ impl VeilLink {
             VeilError::SerializationError(format!("序列化链接文件失败: {}", error))
         })?;
 
-        // 目标文件已存在时 fs::write 会覆盖；冲突检查由上层命令负责。
-        fs::write(path, content)?;
+        // 链接可能包含路径元数据，Unix 下强制仅当前用户可读写。
+        crate::temp::write_private_file(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -176,7 +180,16 @@ impl VeilLink {
     ) -> Result<PathBuf, VeilError> {
         // 配置缓存提供挂载点时可跳过卷探测，适用于卷 ID 已注册的场景。
         if let Some(mount_path) = mount_path {
-            return Ok(mount_path.join(&self.workspace.path));
+            let mounted_volume = volume::volume_for_path(mount_path)?;
+            if mounted_volume.volume_id != self.workspace.volume_id {
+                return Err(VeilError::VolumeUnavailable(format!(
+                    "卷 {} ({}) 当前不可用；缓存挂载点属于卷 {}",
+                    self.workspace.volume_id,
+                    self.workspace.volume_label,
+                    mounted_volume.volume_label
+                )));
+            }
+            return Ok(mounted_volume.mount_path.join(&self.workspace.path));
         }
 
         // 没有缓存挂载点时必须回到链接自身的卷身份校验。
@@ -186,6 +199,39 @@ impl VeilLink {
     /// 返回工作区记录的容器展示名称。
     pub fn container_name(&self) -> String {
         self.workspace.container_name.clone()
+    }
+
+    /// 校验链接身份和相对工作区路径。
+    fn validate(&self) -> Result<(), VeilError> {
+        if self.workspace.veil_id.trim().is_empty() {
+            return Err(VeilError::InvalidFormat("链接缺少 veil_id".to_string()));
+        }
+        if self.workspace.container_name.trim().is_empty() {
+            return Err(VeilError::InvalidFormat("链接缺少容器名称".to_string()));
+        }
+        if self.workspace.volume_id.trim().is_empty() {
+            return Err(VeilError::InvalidFormat("链接缺少 volume_id".to_string()));
+        }
+
+        let mut has_normal_component = false;
+        for component in self.workspace.path.components() {
+            match component {
+                Component::Normal(_) => has_normal_component = true,
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(VeilError::InvalidFormat(format!(
+                        "链接工作区路径必须是安全的相对路径: {}",
+                        self.workspace.path.display()
+                    )));
+                }
+            }
+        }
+        if !has_normal_component {
+            return Err(VeilError::InvalidFormat(
+                "链接工作区路径不能为空".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -233,5 +279,91 @@ mod tests {
         assert_eq!(loaded.workspace.veil_id, "veil-1234");
         assert_eq!(loaded.container_name(), "photos");
         assert_eq!(loaded.encryption.algorithm, "ChaCha20-Poly1305");
+    }
+
+    /// 验证绝对路径、父目录穿越和空路径在保存与加载时都会被拒绝。
+    #[test]
+    fn rejects_unsafe_workspace_paths() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        for invalid_path in [
+            PathBuf::from("/absolute/workspace"),
+            PathBuf::from("../outside"),
+            PathBuf::from("safe/../../outside"),
+            PathBuf::new(),
+        ] {
+            let link = VeilLink::new("veil-1234", "photos", invalid_path, "fs:abcd", "MyUSB");
+            assert!(link.save(&dir.path().join("unsafe.veil-link")).is_err());
+        }
+    }
+
+    /// 验证加载被手工改写的绝对路径链接时也会拒绝。
+    #[test]
+    fn load_rejects_absolute_workspace_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("unsafe.veil-link");
+        fs::write(
+            &link_path,
+            r#"version = "1.0"
+created_at = "2026-01-01T00:00:00+00:00"
+
+[workspace]
+veil_id = "veil-1234"
+container_name = "photos"
+path = "/absolute/workspace"
+volume_id = "fs:abcd"
+volume_label = "MyUSB"
+created_at = "2026-01-01T00:00:00+00:00"
+
+[encryption]
+algorithm = "ChaCha20-Poly1305"
+key_derivation = "Argon2id"
+
+[metadata]
+"#,
+        )
+        .unwrap();
+
+        assert!(VeilLink::load(&link_path).is_err());
+    }
+
+    /// 验证缓存挂载点属于其他卷时不会继续拼接工作区路径。
+    #[test]
+    fn rejects_cached_mount_from_other_volume() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("photos.veil-link");
+        let link = VeilLink::new(
+            "veil-1234",
+            "photos",
+            PathBuf::from(".veil/workspaces/default/photos"),
+            "fs:definitely-wrong",
+            "MissingDisk",
+        );
+
+        assert!(matches!(
+            link.resolve_workspace_path_with_mount(&link_path, Some(dir.path())),
+            Err(VeilError::VolumeUnavailable(_))
+        ));
+    }
+
+    /// 验证 Unix 下链接文件权限不会向同组或其他用户开放。
+    #[cfg(unix)]
+    #[test]
+    fn link_file_is_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("private.veil-link");
+        let link = VeilLink::new(
+            "veil-1234",
+            "photos",
+            PathBuf::from(".veil/workspaces/default/photos"),
+            "fs:abcd",
+            "MyUSB",
+        );
+        link.save(&link_path).unwrap();
+
+        let mode = fs::metadata(&link_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

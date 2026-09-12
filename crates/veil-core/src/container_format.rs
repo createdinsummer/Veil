@@ -440,10 +440,7 @@ fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(),
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)?;
+    let mut output = crate::temp::create_private_file(output_path)?;
     let copied = std::io::copy(&mut file.take(size), &mut output)?;
     if copied != size {
         let _ = std::fs::remove_file(output_path);

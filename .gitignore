@@ -13,3 +13,6 @@
 
 # 测试文件（可能包含隐私路径）
 test_integrity_*
+
+# 全功能脚本生成的本地测试报告
+/test-reports

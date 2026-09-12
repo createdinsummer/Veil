@@ -37,16 +37,16 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     let manager = WorkspaceManager::new(workspace_path.clone());
     let metadata = manager.read_meta(password)?;
 
-    println!("\n{}", crate::i18n::t("info.title").cyan().bold());
-    println!(
+    crate::outln!("\n{}", crate::i18n::t("info.title").cyan().bold());
+    crate::outln!(
         "{}",
         crate::i18n::t1("info.container_name", "name", &metadata.container_name)
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("info.veil_id", "id", &metadata.veil_id)
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1(
             "info.workspace_path",
@@ -54,7 +54,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
             &workspace_path.display().to_string()
         )
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1(
             "info.workspace_type",
@@ -62,7 +62,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
             &metadata.workspace_type
         )
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("info.created_at", "time", &metadata.created_at)
     );
@@ -72,12 +72,12 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
     let container_size = directory_size(&workspace_path)?;
 
-    println!("\n{}", crate::i18n::t("info.content_title").cyan());
-    println!(
+    crate::outln!("\n{}", crate::i18n::t("info.content_title").cyan());
+    crate::outln!(
         "{}",
         crate::i18n::t1("info.content_count", "count", &file_count.to_string())
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2(
             "info.content_size",
@@ -87,7 +87,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
             &format!("{:.2}", total_size as f64 / 1_048_576.0)
         )
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2(
             "info.container_size",
@@ -99,9 +99,9 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     );
 
     if metadata.files.is_empty() {
-        println!("\n{}", crate::i18n::t("common.empty").bright_black());
+        crate::outln!("\n{}", crate::i18n::t("common.empty").bright_black());
     } else {
-        println!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
+        crate::outln!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
         let mut distribution = BTreeMap::new();
         for file in &metadata.files {
             let mime = veil_core::mime::guess_mime(&file.original_name)
@@ -109,7 +109,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
             *distribution.entry(mime).or_insert(0usize) += 1;
         }
         for (mime, count) in distribution {
-            println!(
+            crate::outln!(
                 "{}",
                 crate::i18n::t2("info.mime_item", "type", &mime, "count", &count.to_string())
             );
@@ -118,9 +118,9 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
         // 文件列表按虚拟路径排序，保证输出稳定且便于比较。
         let mut files = metadata.files.clone();
         files.sort_by(|left, right| left.original_name.cmp(&right.original_name));
-        println!("\n{}", crate::i18n::t("common.file_list_title"));
+        crate::outln!("\n{}", crate::i18n::t("common.file_list_title"));
         for (idx, file) in files.iter().enumerate() {
-            println!(
+            crate::outln!(
                 "{}",
                 crate::i18n::t3(
                     "common.file_list_item",
@@ -135,7 +135,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
         }
     }
 
-    println!();
+    crate::outln!();
     Ok(())
 }
 

@@ -20,7 +20,7 @@ pub fn run_workspace(container_name: &str, path: &str, password: Option<String>)
 
     // 根路径代表容器本身，始终是存在的目录。
     if path == "." || path == "/" {
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1("exists.directory", "path", path).green()
         );
@@ -29,7 +29,7 @@ pub fn run_workspace(container_name: &str, path: &str, password: Option<String>)
 
     let normalized = normalize_container_path(path)?;
     if metadata.find_file(&normalized).is_some() {
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1("exists.file", "path", &normalized).green()
         );
@@ -42,14 +42,14 @@ pub fn run_workspace(container_name: &str, path: &str, password: Option<String>)
         .iter()
         .any(|entry| entry.original_name.starts_with(&directory_prefix))
     {
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1("exists.directory", "path", &normalized).green()
         );
         return Ok(true);
     }
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("exists.missing", "path", &normalized).yellow()
     );

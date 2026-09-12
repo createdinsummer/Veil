@@ -44,11 +44,11 @@ pub fn run(
 
     let files = collect_add_specs(source_path, dest)?;
     if files.is_empty() {
-        println!("{}", crate::i18n::t("add.empty_dir").yellow());
+        crate::outln!("{}", crate::i18n::t("add.empty_dir").yellow());
         return Ok(());
     }
 
-    println!("{}", crate::i18n::t("opening_container").cyan());
+    crate::outln!("{}", crate::i18n::t("opening_container").cyan());
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
@@ -60,16 +60,16 @@ pub fn run(
 
     if files.len() == 1 {
         let target = &files[0].target;
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1("add.file_added", "path", target).green()
         );
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1("common.encrypted_name", "name", &encrypted_names[0]).bright_black()
         );
     } else {
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1(
                 "add.files_added",

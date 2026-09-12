@@ -753,7 +753,7 @@ fn cmd_usage_opt(cmd_name: &str) -> &str {
 fn print_all_help(command: &clap::Command) -> crate::error::Result<()> {
     let mut root = command.clone();
     root.print_help()?;
-    println!();
+    crate::outln!();
 
     let names: Vec<_> = command
         .get_subcommands()
@@ -761,9 +761,9 @@ fn print_all_help(command: &clap::Command) -> crate::error::Result<()> {
         .collect();
     for name in names {
         if let Some(mut subcommand) = command.find_subcommand(&name).cloned() {
-            println!("\n===== {name} =====\n");
+            crate::outln!("\n===== {name} =====\n");
             subcommand.print_help()?;
-            println!();
+            crate::outln!();
         }
     }
 
@@ -818,7 +818,15 @@ fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
 
     match error.kind() {
         // Help and version are successful control-flow exits, not errors.
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => error.exit(),
+        // 通过统一写入层输出，确保管道提前关闭时返回稳定 I/O 错误。
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+            let rendered = error.render().to_string();
+            let rendered = rendered.trim_end_matches('\n');
+            if let Err(error) = output_encoding::write_stdout(format_args!("{rendered}"), true) {
+                output_encoding::exit_for_output_error(error);
+            }
+            std::process::exit(0);
+        }
         ErrorKind::UnknownArgument => {
             let argument = error
                 .get(ContextKind::InvalidArg)
@@ -875,31 +883,31 @@ fn show_version_and_security_info() {
     // 检测版本类型
     let is_dev = VERSION.contains("dev") || VERSION.contains("alpha") || VERSION.contains("beta");
 
-    println!(
+    crate::outln!(
         "\n{} {}",
         "Veil".cyan().bold(),
         format!("v{}", VERSION).cyan()
     );
 
     if is_dev {
-        println!("{}", i18n::t("version.dev_warning").yellow().bold());
+        crate::outln!("{}", i18n::t("version.dev_warning").yellow().bold());
     }
 
     if is_debug {
-        println!();
-        println!("{}", i18n::t("version.debug_warning").yellow().bold());
-        println!("{}", i18n::t("version.debug_key_strength").yellow());
-        println!("{}", i18n::t("version.debug_crack_speed").yellow());
-        println!();
-        println!("{}", i18n::t("version.debug_recommend").bright_yellow());
-        println!("{}", i18n::t("version.debug_command"));
-        println!("{}", i18n::t("version.debug_release_strength").green());
-        println!();
+        crate::outln!();
+        crate::outln!("{}", i18n::t("version.debug_warning").yellow().bold());
+        crate::outln!("{}", i18n::t("version.debug_key_strength").yellow());
+        crate::outln!("{}", i18n::t("version.debug_crack_speed").yellow());
+        crate::outln!();
+        crate::outln!("{}", i18n::t("version.debug_recommend").bright_yellow());
+        crate::outln!("{}", i18n::t("version.debug_command"));
+        crate::outln!("{}", i18n::t("version.debug_release_strength").green());
+        crate::outln!();
     } else {
-        println!("{}", i18n::t("version.release_status").green());
+        crate::outln!("{}", i18n::t("version.release_status").green());
     }
 
-    println!();
+    crate::outln!();
 }
 
 /// 初始化终端和国际化环境，解析参数并分派子命令。
@@ -1162,7 +1170,7 @@ fn main() {
                         if let Some(mut subcommand) = cmd.find_subcommand(other).cloned() {
                             match subcommand.print_help() {
                                 Ok(()) => {
-                                    println!();
+                                    crate::outln!();
                                     Ok(())
                                 }
                                 Err(error) => Err(error.into()),
@@ -1173,7 +1181,7 @@ fn main() {
                     }
                     None => match cmd.clone().print_help() {
                         Ok(()) => {
-                            println!();
+                            crate::outln!();
                             Ok(())
                         }
                         Err(error) => Err(error.into()),

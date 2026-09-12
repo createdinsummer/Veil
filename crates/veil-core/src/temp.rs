@@ -6,8 +6,8 @@
 //!
 //! 设计上只暴露文件路径，不暴露内部清理策略，避免调用方绕过生命周期管理。
 
-use std::fs::File;
-use std::io::{self, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -72,12 +72,12 @@ fn preferred_temp_dir() -> PathBuf {
 ///
 /// # 错误
 /// 文件已存在、权限设置或创建失败时返回 [`io::Error`]。
-fn create_private_file(path: &Path) -> io::Result<File> {
+pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         // Unix 使用 create_new 与 0600，避免复用旧文件和放宽权限。
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
@@ -86,11 +86,22 @@ fn create_private_file(path: &Path) -> io::Result<File> {
     #[cfg(not(unix))]
     {
         // 其他平台至少保证只创建新文件，权限控制依赖系统临时目录默认值。
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .write(true) // 只写，不读
             .create_new(true)
             .open(path)
     }
+}
+
+/// 以仅当前用户可读写的方式创建新文件并写入完整内容。
+///
+/// Unix 上使用 `create_new` 和 `0600`，避免覆盖既有文件或继承过宽权限。
+/// 其他平台依赖系统临时目录和默认权限语义。
+pub fn write_private_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut file = create_private_file(path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// 生成进程内唯一的临时文件名，并在可行时保留原扩展名。

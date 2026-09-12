@@ -291,7 +291,7 @@ impl WorkspaceManager {
                     encrypt_chacha20poly1305(&master_key, &file_data, &file_nonce)?;
                 let encrypted_path = self.workspace_path.join(&encrypted_name);
 
-                fs::write(&encrypted_path, encrypted_data)?;
+                crate::temp::write_private_file(&encrypted_path, &encrypted_data)?;
                 written.push(encrypted_name.clone());
                 new_entries.push(FileEntry::new(
                     encrypted_name,
@@ -496,7 +496,7 @@ impl WorkspaceManager {
                     encrypt_chacha20poly1305(&new_master_key, &plaintext, &file_entry.nonce)?;
 
                 let staged_path = self.unique_password_temp_path("new")?;
-                fs::write(&staged_path, new_encrypted)?;
+                crate::temp::write_private_file(&staged_path, &new_encrypted)?;
                 let backup = match self.unique_password_temp_path("bak") {
                     Ok(path) => path,
                     Err(error) => {

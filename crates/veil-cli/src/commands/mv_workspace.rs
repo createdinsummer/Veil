@@ -27,7 +27,7 @@ pub fn run_workspace(
     let pwd = password_str.expose_secret();
 
     // 尽早显示目标容器，方便用户确认链接解析结果。
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("mv.opening_named", "name", container_name).cyan()
     );
@@ -36,7 +36,7 @@ pub fn run_workspace(
     let manager = WorkspaceManager::new(workspace_path);
     let (_, final_target) = manager.move_path(from, to, pwd)?;
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2("mv.moved", "from", from, "to", &final_target).green()
     );

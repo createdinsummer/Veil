@@ -1017,7 +1017,7 @@ impl GlobalConfig {
             fs::create_dir_all(parent)?;
         }
         // 恢复的是捕获时的原始字节，避免 TOML 重新序列化造成内容漂移。
-        fs::write(&link_path, raw)?;
+        crate::temp::write_private_file(&link_path, &raw)?;
 
         if let Some(existing) = self
             .links

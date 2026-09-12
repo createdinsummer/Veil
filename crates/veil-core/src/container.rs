@@ -81,7 +81,7 @@ impl Container {
 
         // 先建立仅含 Header 的文件，再由 commit 追加空目录树。
         {
-            let file = File::create(path.as_ref())?;
+            let file = crate::temp::create_private_file(path.as_ref())?;
             let mut writer = BufWriter::new(file);
             format::write_header(&mut writer, cli_version, &cip_pri_key, crate::kdf::KdfType::Argon2id)?;
             writer.flush()?;

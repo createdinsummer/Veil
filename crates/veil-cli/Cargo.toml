@@ -46,6 +46,9 @@ zeroize = "1.9"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["consoleapi", "winnls", "processenv", "stringapiset"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # 测试框架
 assert_cmd = "2.0"

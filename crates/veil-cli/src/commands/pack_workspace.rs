@@ -33,7 +33,7 @@ pub fn run_workspace(
         crate::cli_bail!(PackOutputExists, "path" => &output);
     }
 
-    println!("{}", crate::i18n::t("pack.in_progress").cyan());
+    crate::outln!("{}", crate::i18n::t("pack.in_progress").cyan());
     let password_str =
         super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
 
@@ -53,11 +53,11 @@ pub fn run_workspace(
 
     let output_size = std::fs::metadata(&output)?.len();
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("pack.created", "path", &output).green()
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2(
             "pack.stats",

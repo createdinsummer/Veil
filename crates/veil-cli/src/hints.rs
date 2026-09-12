@@ -115,24 +115,24 @@ pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_pa
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("{}.veil-link", container_name));
 
-    println!();
-    println!("{}", i18n::t1("hints.init.title", "name", &link_name));
-    println!();
-    println!("  {}", i18n::t("hints.init.storage_line"));
-    println!("    {}", workspace_path.display());
-    println!();
-    println!("  {}", i18n::t("hints.init.pack_title"));
-    println!(
+    crate::outln!();
+    crate::outln!("{}", i18n::t1("hints.init.title", "name", &link_name));
+    crate::outln!();
+    crate::outln!("  {}", i18n::t("hints.init.storage_line"));
+    crate::outln!("    {}", workspace_path.display());
+    crate::outln!();
+    crate::outln!("  {}", i18n::t("hints.init.pack_title"));
+    crate::outln!(
         "    {}",
         i18n::t1("hints.init.pack_command", "container", &link_name)
     );
-    println!();
-    println!("  {}", i18n::t("hints.init.unpack_title"));
-    println!("    {}", i18n::t("hints.init.unpack_command"));
-    println!();
-    println!("  {}", i18n::t("hints.init.close_title"));
-    println!("    {}", i18n::t("hints.init.close_command"));
-    println!();
+    crate::outln!();
+    crate::outln!("  {}", i18n::t("hints.init.unpack_title"));
+    crate::outln!("    {}", i18n::t("hints.init.unpack_command"));
+    crate::outln!();
+    crate::outln!("  {}", i18n::t("hints.init.close_title"));
+    crate::outln!("    {}", i18n::t("hints.init.close_command"));
+    crate::outln!();
 }
 
 /// 展示首次打包结果中链接与 `.veil` 文件的关系。
@@ -239,20 +239,20 @@ pub fn show_file_type_ambiguity_hint(link_path: &Path, container_path: &Path) {
 
 /// 输出文件类型帮助主题的正文。
 pub fn show_files_help() {
-    println!("\n{}", i18n::t("help.files.content"));
+    crate::outln!("\n{}", i18n::t("help.files.content"));
 }
 
 /// 使用统一边框输出标题和多行提示，并在末尾显示关闭提示的方法。
 pub fn print_hint_box(title: &str, lines: &[String]) {
-    println!();
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black());
-    println!("{}", title.cyan().bold());
-    println!();
+    crate::outln!();
+    crate::outln!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black());
+    crate::outln!("{}", title.cyan().bold());
+    crate::outln!();
     for line in lines {
-        println!("{}", line);
+        crate::outln!("{}", line);
     }
-    println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black());
-    println!();
-    println!("{}", i18n::t("hints.dismiss").bright_black());
-    println!();
+    crate::outln!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black());
+    crate::outln!();
+    crate::outln!("{}", i18n::t("hints.dismiss").bright_black());
+    crate::outln!();
 }

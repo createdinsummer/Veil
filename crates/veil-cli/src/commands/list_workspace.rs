@@ -25,7 +25,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let mut files = manager.list_files(password)?;
     files.sort_by(|left, right| left.original_name.cmp(&right.original_name));
 
-    println!(
+    crate::outln!(
         "\n{}",
         crate::i18n::t2(
             "list.workspace_title",
@@ -40,34 +40,34 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
 
     // 空容器保留标题和空状态，不打印总大小表格。
     if files.is_empty() {
-        println!("\n{}", crate::i18n::t("common.empty").yellow());
+        crate::outln!("\n{}", crate::i18n::t("common.empty").yellow());
         return Ok(());
     }
 
-    println!();
+    crate::outln!();
 
     // 文件条目保存明文大小，可直接求和给用户展示。
     let total_size: u64 = files.iter().map(|f| f.size).sum();
 
     for (idx, file) in files.iter().enumerate() {
-        println!(
+        crate::outln!(
             "  {} {}",
             format!("{}.", idx + 1).bright_black(),
             file.original_name.bright_white()
         );
-        println!(
+        crate::outln!(
             "     大小: {}  加密时间: {}",
             format_size(file.size),
             format_time(&file.encrypted_at)
         );
     }
 
-    println!();
-    println!(
+    crate::outln!();
+    crate::outln!(
         "{}",
         crate::i18n::t1("list.total_size", "size", &format_size(total_size)).bright_black()
     );
-    println!();
+    crate::outln!();
 
     Ok(())
 }

@@ -34,6 +34,36 @@ fn version_matches_workspace_release() {
         .stdout(predicate::str::contains("2.0.0"));
 }
 
+/// 验证输出管道提前关闭时返回稳定 I/O 错误，而不是 panic。
+#[cfg(unix)]
+#[test]
+fn broken_stdout_pipe_is_reported_without_panic() {
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: `pipe` 初始化两个 owned fd；随后立即关闭读端，只把写端交给子进程。
+    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+    // SAFETY: `pipe_fds[0]` 由 `pipe` 返回且尚未关闭。
+    unsafe { libc::close(pipe_fds[0]) };
+    // SAFETY: 写端所有权转交给 `OwnedFd`，之后只使用该 owned 值。
+    let writer = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe_fds[1]) };
+
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("veil"))
+        .env("VEIL_HINTS", "off")
+        .arg("--help")
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[9001]"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
 /// 验证 `init` 帮助明确区分命名工作区和显式路径。
 #[test]
 fn init_help_describes_workspace_options() {
@@ -393,6 +423,40 @@ fn init_rejects_link_path_with_unknown_extension() {
 
     assert!(!output.exists());
     assert!(!env.home.path().join(".veil/config.toml").exists());
+}
+
+/// 验证被手工改成绝对工作区路径的链接会被拒绝。
+#[test]
+fn link_rejects_absolute_workspace_path() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("absolute-link");
+    let workspace = env.home.path().join(".veil/workspaces/default");
+    let container_dir = std::fs::read_dir(&workspace)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().join(".veil-meta").is_file())
+        .unwrap()
+        .path();
+
+    let content = std::fs::read_to_string(&link).unwrap();
+    let rewritten = content
+        .lines()
+        .map(|line| {
+            if line.starts_with("path = ") {
+                format!("path = \"{}\"", container_dir.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&link, format!("{rewritten}\n")).unwrap();
+
+    env.command()
+        .args(["list", &env.path(&link)])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("相对路径"));
 }
 
 /// 验证链接写入失败时会清理工作区，且不会留下孤立容器记录。

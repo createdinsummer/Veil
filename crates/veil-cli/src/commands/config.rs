@@ -31,11 +31,11 @@ fn show_config() -> Result<()> {
     let config = GlobalConfig::load()?;
     let effective_level = crate::hints::current_level();
 
-    println!("\n{}", i18n::t("config.title").cyan().bold());
-    println!();
+    crate::outln!("\n{}", i18n::t("config.title").cyan().bold());
+    crate::outln!();
 
     if let Ok(path) = GlobalConfig::config_path() {
-        println!(
+        crate::outln!(
             "  {}",
             i18n::t1("config.path", "path", &path.display().to_string()).bright_black()
         );
@@ -46,7 +46,7 @@ fn show_config() -> Result<()> {
         HintsLevel::Brief => i18n::t("config.hints_brief"),
         HintsLevel::Off => i18n::t("config.hints_off"),
     };
-    println!(
+    crate::outln!(
         "  {}",
         i18n::t1("config.hints_level", "level", level).bright_white()
     );
@@ -57,14 +57,14 @@ fn show_config() -> Result<()> {
         .and_then(|value| HintsLevel::parse(&value))
         .is_some()
     {
-        println!(
+        crate::outln!(
             "  {}",
             i18n::t1("config.env_override", "level", effective_level.as_str()).yellow()
         );
     }
 
     if let Some(ref default_ws) = config.workspace.default {
-        println!(
+        crate::outln!(
             "  {}",
             i18n::t1(
                 "config.default_workspace",
@@ -75,7 +75,7 @@ fn show_config() -> Result<()> {
         );
     }
 
-    println!(
+    crate::outln!(
         "  {}",
         i18n::t1(
             "config.custom_workspace_count",
@@ -86,7 +86,7 @@ fn show_config() -> Result<()> {
     let mut custom_workspaces: Vec<_> = config.workspace.custom.iter().collect();
     custom_workspaces.sort_by(|left, right| left.0.cmp(right.0));
     for (name, workspace) in custom_workspaces {
-        println!(
+        crate::outln!(
             "{}",
             i18n::t2(
                 "config.custom_workspace",
@@ -99,7 +99,7 @@ fn show_config() -> Result<()> {
         );
     }
 
-    println!(
+    crate::outln!(
         "  {}",
         i18n::t1(
             "config.container_count",
@@ -107,7 +107,7 @@ fn show_config() -> Result<()> {
             &config.containers.len().to_string()
         )
     );
-    println!(
+    crate::outln!(
         "  {}",
         i18n::t1(
             "config.volume_count",
@@ -115,7 +115,7 @@ fn show_config() -> Result<()> {
             &config.volumes.len().to_string()
         )
     );
-    println!(
+    crate::outln!(
         "  {}",
         i18n::t1(
             "config.link_count",
@@ -123,7 +123,7 @@ fn show_config() -> Result<()> {
             &config.links.len().to_string()
         )
     );
-    println!();
+    crate::outln!();
 
     Ok(())
 }
@@ -145,7 +145,7 @@ fn set_hints_level(level: &str) -> Result<()> {
         HintsLevel::Off => i18n::t("config.description_off"),
     };
 
-    println!(
+    crate::outln!(
         "{}",
         i18n::t2(
             "config.set_success",
@@ -160,7 +160,7 @@ fn set_hints_level(level: &str) -> Result<()> {
     // 写配置成功后仍提示当前进程是否被环境变量覆盖。
     if let Ok(value) = std::env::var("VEIL_HINTS") {
         if let Some(override_level) = HintsLevel::parse(&value) {
-            println!(
+            crate::outln!(
                 "{}",
                 i18n::t1("config.env_override", "level", override_level.as_str()).yellow()
             );

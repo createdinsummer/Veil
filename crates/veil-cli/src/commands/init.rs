@@ -160,14 +160,14 @@ pub fn run(
         return Err(error);
     }
 
-    println!("{}", crate::i18n::t("init.creating").cyan());
+    crate::outln!("{}", crate::i18n::t("init.creating").cyan());
     if portable_mode {
         let message_key = if portable {
             "init.portable_workspace"
         } else {
             "init.external_workspace"
         };
-        println!(
+        crate::outln!(
             "{}",
             crate::i18n::t1(message_key, "path", &container_path.display().to_string()).cyan()
         );
@@ -260,7 +260,7 @@ pub fn run(
         return Err(error);
     }
 
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("init.created", "path", &container_name).green()
     );

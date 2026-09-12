@@ -214,10 +214,17 @@ pub fn prompt_new_password_with_env(
     let password = prompt_password_adaptive(crate::i18n::t("prompt.new_password"))?;
     let confirm = prompt_password_adaptive(crate::i18n::t("prompt.confirm_password"))?;
 
-    if password != confirm {
+    validate_password_confirmation(password, &confirm)
+}
+
+/// 校验交互输入的新密码和确认密码完全一致。
+fn validate_password_confirmation(
+    password: String,
+    confirmation: &str,
+) -> Result<age::secrecy::SecretString> {
+    if password != confirmation {
         crate::cli_bail!(PasswordMismatch);
     }
-
     validate_new_password(age::secrecy::SecretString::from(password))
 }
 
@@ -235,4 +242,21 @@ fn validate_new_password(
     }
 
     Ok(password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_password_confirmation;
+
+    /// 验证两次交互密码不一致时稳定返回密码错误。
+    #[test]
+    fn mismatched_password_confirmation_is_rejected() {
+        use age::secrecy::ExposeSecret;
+
+        let error = validate_password_confirmation("first".to_string(), "second").unwrap_err();
+        assert_eq!(error.code(), crate::error::ErrorCode::PasswordMismatch);
+
+        let password = validate_password_confirmation("same".to_string(), "same").unwrap();
+        assert_eq!(password.expose_secret(), "same");
+    }
 }

@@ -17,7 +17,7 @@ pub fn run_workspace(
     let resolved = super::resolve_container(container_name)?;
     let workspace_path = resolved.workspace_path;
 
-    println!("{}", crate::i18n::t("passwd.changing").cyan());
+    crate::outln!("{}", crate::i18n::t("passwd.changing").cyan());
 
     // 旧密码用于验证身份并解密现有元数据。
     let old_pwd = super::prompt_password(crate::i18n::t("prompt.current_password"), old_password)?;
@@ -33,7 +33,7 @@ pub fn run_workspace(
     let manager = WorkspaceManager::new(workspace_path);
     manager.change_password(old_password_str, new_password_str)?;
 
-    println!("{}", crate::i18n::t("passwd.changed").green());
+    crate::outln!("{}", crate::i18n::t("passwd.changed").green());
 
     Ok(())
 }

@@ -3,8 +3,78 @@
 //! 程序内部统一使用 UTF-8；本模块只在向当前终端显示文本时转换编码。Windows 下根据
 //! 控制台输出代码页转换，Unix 平台直接返回 UTF-8 字节。模块不负责写出，也不转换
 //! 文件内容。
-#[cfg(target_os = "windows")]
-use std::io;
+use std::fmt;
+use std::io::{self, Write};
+
+/// 向标准输出写入格式化内容，并返回真实 I/O 错误。
+pub fn write_stdout(args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
+    ensure_stdout_fd_open()?;
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    output.write_fmt(args)?;
+    if newline {
+        output.write_all(b"\n")?;
+    }
+    output.flush()
+}
+
+/// Unix 上显式检查标准输出描述符，避免 Rust 标准库在无效 fd 上静默写入。
+#[cfg(unix)]
+fn ensure_stdout_fd_open() -> io::Result<()> {
+    // SAFETY: `fcntl` 只查询 fd 标志，不访问内存；`STDOUT_FILENO` 是稳定的进程 fd。
+    let result = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFD) };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// 非 Unix 平台先沿用标准库写入结果检测输出错误。
+#[cfg(not(unix))]
+fn ensure_stdout_fd_open() -> io::Result<()> {
+    Ok(())
+}
+
+/// 输出失败时报告稳定 I/O 错误并以非零状态退出。
+pub fn exit_for_output_error(error: io::Error) -> ! {
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    let _ = writeln!(output, "❌ 错误 [9001]: I/O 错误: {error}");
+    std::process::exit(1);
+}
+
+/// 可失败的 `crate::outln!` 替代宏。
+///
+/// 任一标准输出写入失败都会转换为稳定 I/O 错误并退出，不会 panic 或静默成功。
+#[macro_export]
+macro_rules! outln {
+    () => {{
+        if let Err(error) = $crate::output_encoding::write_stdout(format_args!(""), true) {
+            $crate::output_encoding::exit_for_output_error(error);
+        }
+    }};
+    ($($arg:tt)*) => {{
+        if let Err(error) = $crate::output_encoding::write_stdout(format_args!($($arg)*), true) {
+            $crate::output_encoding::exit_for_output_error(error);
+        }
+    }};
+}
+
+/// 可失败的 `crate::out!` 替代宏。
+#[macro_export]
+macro_rules! out {
+    () => {{
+        if let Err(error) = $crate::output_encoding::write_stdout(format_args!(""), false) {
+            $crate::output_encoding::exit_for_output_error(error);
+        }
+    }};
+    ($($arg:tt)*) => {{
+        if let Err(error) = $crate::output_encoding::write_stdout(format_args!($($arg)*), false) {
+            $crate::output_encoding::exit_for_output_error(error);
+        }
+    }};
+}
 
 /// 当前显示环境可识别的文本编码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +268,7 @@ mod tests {
     #[test]
     fn test_encoding_detection() {
         let encoding = get_display_encoding();
-        println!("当前显示编码: {:?}", encoding);
+        crate::outln!("当前显示编码: {:?}", encoding);
         #[cfg(target_os = "windows")]
         assert!(matches!(
             encoding,

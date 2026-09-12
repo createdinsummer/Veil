@@ -27,7 +27,7 @@ pub fn run(container_name: &str, file_name: &str, password: Option<String>) -> R
     let workspace_path = resolved.workspace_path;
 
     // 删除前先输出目标；真正删除仍需要密码和元数据查找成功。
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1("rm.deleting", "path", file_name).yellow()
     );
@@ -45,7 +45,7 @@ pub fn run(container_name: &str, file_name: &str, password: Option<String>) -> R
         RemovedPathKind::File => "rm.deleted",
         RemovedPathKind::Directory => "rm.deleted_directory",
     };
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t1(message_key, "path", file_name).green()
     );

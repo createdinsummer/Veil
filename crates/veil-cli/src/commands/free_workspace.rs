@@ -32,10 +32,10 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let manager = WorkspaceManager::new(workspace_path);
     let metadata = manager.read_meta(password)?;
 
-    println!("\n{}", crate::i18n::t("free.title").cyan().bold());
+    crate::outln!("\n{}", crate::i18n::t("free.title").cyan().bold());
 
     if metadata.files.is_empty() {
-        println!(
+        crate::outln!(
             "{}",
             format!("  {}", crate::i18n::t("common.empty")).bright_black()
         );
@@ -48,12 +48,12 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     let file_count = metadata.files.len();
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
 
-    println!("\n{}", crate::i18n::t("free.stats_title").cyan());
-    println!(
+    crate::outln!("\n{}", crate::i18n::t("free.stats_title").cyan());
+    crate::outln!(
         "{}",
         crate::i18n::t1("free.file_count", "count", &file_count.to_string())
     );
-    println!(
+    crate::outln!(
         "{}",
         crate::i18n::t2(
             "free.total_size",
@@ -109,10 +109,10 @@ fn render_tree(nodes: &BTreeMap<String, TreeNode>, prefix: &str) {
         let connector = if is_last { "└── " } else { "├── " };
         match node {
             TreeNode::File(size) => {
-                println!("{prefix}{connector}{name} ({})", format_size(*size));
+                crate::outln!("{prefix}{connector}{name} ({})", format_size(*size));
             }
             TreeNode::Directory(children) => {
-                println!("{prefix}{connector}{name}/");
+                crate::outln!("{prefix}{connector}{name}/");
                 let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
                 render_tree(children, &child_prefix);
             }

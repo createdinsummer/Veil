@@ -81,6 +81,33 @@ fn test_add_and_extract_file() {
     println!("✓ 文件添加和提取成功");
 }
 
+/// 验证 Unix 下新密文仅当前用户可读写。
+#[cfg(unix)]
+#[test]
+fn test_added_ciphertext_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let password = "test-password";
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
+
+    let source = temp_dir.path().join("private.txt");
+    fs::write(&source, b"private").unwrap();
+    let encrypted_name = manager.add_file(&source, password).unwrap();
+
+    let mode = fs::metadata(workspace_path.join(encrypted_name))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
 /// 验证错误密码无法读取工作区元数据。
 #[test]
 fn test_wrong_password() {
