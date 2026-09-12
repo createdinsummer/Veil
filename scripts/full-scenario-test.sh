@@ -605,9 +605,9 @@ ask_yes_no() {
     fi
 
     if [ "$default" = "y" ]; then
-        printf '%s [Y/n]: ' "$prompt"
+        printf '%s [y/n，默认 y]: ' "$prompt"
     else
-        printf '%s [y/N]: ' "$prompt"
+        printf '%s [y/n，默认 n]: ' "$prompt"
     fi
     IFS= read -r answer || answer=
     [ -z "$answer" ] && answer=$default
