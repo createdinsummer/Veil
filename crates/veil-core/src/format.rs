@@ -33,6 +33,10 @@ pub const FOOTER_LEN: u64 = 8 + 8 + 8;
 /// 前缀后依次为固定 4 字节的 `cli_version_len`、变长 `cli_version`、固定 4 字节的
 /// `cip_pri_key_len` 和变长 `cip_pri_key`。
 pub const HEADER_FIXED_LEN: u64 = 8 + 2 + 2;
+/// CLI 版本字段允许的最大长度，用于拒绝损坏头部诱导的巨额分配。
+const MAX_CLI_VERSION_LEN: usize = 16 * 1024;
+/// 受保护私钥字段允许的最大长度；当前实际长度远小于该值。
+const MAX_CIP_PRI_KEY_LEN: usize = 1024 * 1024;
 
 /// 按当前格式写入容器 Header。
 ///
@@ -54,15 +58,25 @@ pub fn write_header<W: Write>(
     kdf_type: KdfType,
 ) -> Result<u64> {
     let cli_version_bytes = cli_version.as_bytes();
+    if cli_version_bytes.len() > MAX_CLI_VERSION_LEN {
+        return Err(VeilError::Format("CLI 版本字段过长".into()));
+    }
+    if cip_pri_key.len() > MAX_CIP_PRI_KEY_LEN {
+        return Err(VeilError::Format("私钥字段过长".into()));
+    }
+    let cli_version_len = u32::try_from(cli_version_bytes.len())
+        .map_err(|_| VeilError::Format("CLI 版本字段过长".into()))?;
+    let cip_pri_key_len =
+        u32::try_from(cip_pri_key.len()).map_err(|_| VeilError::Format("私钥字段过长".into()))?;
 
     // 固定前缀定义容器身份和格式版本，读取端据此选择解析规则。
     writer.write_all(MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
     writer.write_all(&kdf_type.to_flags().to_le_bytes())?;
     // 两个变长字段都采用“u32 长度 + 原始字节”的形式，便于顺序解析。
-    writer.write_all(&(cli_version_bytes.len() as u32).to_le_bytes())?;
+    writer.write_all(&cli_version_len.to_le_bytes())?;
     writer.write_all(cli_version_bytes)?;
-    writer.write_all(&(cip_pri_key.len() as u32).to_le_bytes())?;
+    writer.write_all(&cip_pri_key_len.to_le_bytes())?;
     writer.write_all(cip_pri_key)?;
 
     Ok(8 + 2 + 2 + 4 + cli_version_bytes.len() as u64 + 4 + cip_pri_key.len() as u64)
@@ -97,6 +111,9 @@ pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
     // 密文私钥紧跟在 CLI 版本之后，读取时保持原始字节不做解释。
     reader.read_exact(&mut u32buf)?;
     let cli_version_len = u32::from_le_bytes(u32buf) as usize;
+    if cli_version_len > MAX_CLI_VERSION_LEN {
+        return Err(VeilError::Format("CLI 版本字段长度异常".into()));
+    }
     let mut cli_version_bytes = vec![0u8; cli_version_len];
     reader.read_exact(&mut cli_version_bytes)?;
     let cli_version = String::from_utf8(cli_version_bytes)
@@ -104,6 +121,9 @@ pub fn read_header<R: Read>(reader: &mut R) -> Result<Header> {
 
     reader.read_exact(&mut u32buf)?;
     let cip_pri_key_len = u32::from_le_bytes(u32buf) as usize;
+    if cip_pri_key_len > MAX_CIP_PRI_KEY_LEN {
+        return Err(VeilError::Format("密文私钥字段长度异常".into()));
+    }
     let mut cip_pri_key = vec![0u8; cip_pri_key_len];
     reader.read_exact(&mut cip_pri_key)?;
 
@@ -188,5 +208,18 @@ mod tests {
         let header = read_header(&mut buf).unwrap();
         assert_eq!(header.kdf_type, KdfType::Argon2id);
         assert_eq!(header.cip_pri_key, fake_cip_pri_key);
+    }
+
+    /// 验证损坏的长度字段不会触发巨额内存分配。
+    #[test]
+    fn oversized_header_field_is_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(&KdfType::Argon2id.to_flags().to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let mut cursor = Cursor::new(bytes);
+        assert!(read_header(&mut cursor).is_err());
     }
 }

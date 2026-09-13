@@ -230,8 +230,12 @@ impl ContainerPacker {
         let workspace_path = workspace_path.as_ref();
 
         // 打包文件整体覆写，输出路径冲突由命令层提前拒绝。
-        let parent = self.output_path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
+        let parent = self
+            .output_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::fsutil::create_dir_all_durable(parent)?;
         let mut output = tempfile::NamedTempFile::new_in(parent)?;
 
         // 头部包含后续总长度，先写占位值，完成文件遍历后再回填。
@@ -239,10 +243,12 @@ impl ContainerPacker {
         output.write_all(&placeholder_header.to_bytes())?;
 
         // 元数据直接复用工作区中的加密字节，不在打包阶段重复加密。
-        let metadata_size = encrypted_metadata.len() as u32;
+        let metadata_size = u32::try_from(encrypted_metadata.len())
+            .map_err(|_| VeilError::InvalidFormat("打包元数据过长".to_string()))?;
         output.write_all(encrypted_metadata)?;
 
-        let file_count = metadata.files.len() as u32;
+        let file_count = u32::try_from(metadata.files.len())
+            .map_err(|_| VeilError::InvalidFormat("打包文件数量过多".to_string()))?;
 
         for file_entry in &metadata.files {
             // 每个条目由头部和一段已加密文件字节组成，顺序与元数据清单一致。
@@ -268,6 +274,7 @@ impl ContainerPacker {
         output
             .persist(&self.output_path)
             .map_err(|error| VeilError::Io(error.error))?;
+        let _ = crate::fsutil::sync_directory(parent);
 
         Ok(())
     }
@@ -299,6 +306,7 @@ impl ContainerUnpacker {
         file.read_exact(&mut header_buf)?;
         let header = ContainerHeader::from_bytes(&header_buf)?;
 
+        ensure_remaining_length(&mut file, u64::from(header.metadata_size))?;
         let mut metadata_buf = vec![0u8; header.metadata_size as usize];
         file.read_exact(&mut metadata_buf)?;
         Ok(metadata_buf)
@@ -318,12 +326,17 @@ impl ContainerUnpacker {
         let header_len = MetaHeader::header_len(&encrypted_metadata)?;
         let encrypted_data = &encrypted_metadata[header_len..];
         let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
-        let decrypted = cipher
-            .decrypt(GenericArray::from_slice(&header.nonce), encrypted_data)
-            .map_err(|error| {
-                VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
-            })?;
-        let metadata = MetaData::from_json(&decrypted)?;
+        let decrypted = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(GenericArray::from_slice(&header.nonce), encrypted_data)
+                .map_err(|error| {
+                    VeilError::DecryptionError(format!(
+                        "解密失败（密码错误或数据损坏）: {}",
+                        error
+                    ))
+                })?,
+        );
+        let metadata = MetaData::from_json(decrypted.as_slice())?;
 
         Ok((metadata, encrypted_metadata))
     }
@@ -339,7 +352,7 @@ impl ContainerUnpacker {
         let workspace_path = workspace_path.as_ref();
         let mut file = File::open(&self.container_path)?;
         let (header, metadata_buf) = read_package_prefix(&mut file)?;
-        std::fs::create_dir_all(workspace_path)?;
+        crate::fsutil::create_dir_all_durable(workspace_path)?;
 
         for _ in 0..header.file_count {
             let entry = read_file_entry(&mut file)?;
@@ -365,7 +378,7 @@ impl ContainerUnpacker {
         let workspace_path = workspace_path.as_ref();
         let mut file = File::open(&self.container_path)?;
         let (header, _) = read_package_prefix(&mut file)?;
-        std::fs::create_dir_all(workspace_path)?;
+        crate::fsutil::create_dir_all_durable(workspace_path)?;
 
         let expected: BTreeMap<&str, &str> = metadata
             .files
@@ -417,9 +430,24 @@ fn read_package_prefix(file: &mut File) -> Result<(ContainerHeader, Vec<u8>), Ve
 
     let metadata_size = usize::try_from(header.metadata_size)
         .map_err(|_| VeilError::InvalidFormat("元数据长度超出平台限制".to_string()))?;
+    ensure_remaining_length(file, header.metadata_size as u64)?;
     let mut metadata = vec![0u8; metadata_size];
     file.read_exact(&mut metadata)?;
     Ok((header, metadata))
+}
+
+/// 在按声明长度分配缓冲区前，确认文件中确实还有足够字节。
+fn ensure_remaining_length(file: &mut File, required: u64) -> Result<(), VeilError> {
+    let current = file.stream_position()?;
+    let total = file.metadata()?.len();
+    let remaining = total.saturating_sub(current);
+    if required > remaining {
+        return Err(VeilError::InvalidFormat(format!(
+            "声明长度超过剩余文件大小: 需要 {} 字节，实际只有 {} 字节",
+            required, remaining
+        )));
+    }
+    Ok(())
 }
 
 /// 读取一个变长文件条目头。
@@ -436,9 +464,11 @@ fn read_file_entry(file: &mut File) -> Result<FileEntryHeader, VeilError> {
 
 /// 将指定长度的条目数据原样复制到目标路径。
 fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(), VeilError> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    crate::fsutil::create_dir_all_durable(parent)?;
 
     let mut output = crate::temp::create_private_file(output_path)?;
     let copied = std::io::copy(&mut file.take(size), &mut output)?;
@@ -450,6 +480,7 @@ fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(),
         )));
     }
     output.sync_all()?;
+    crate::fsutil::sync_directory(parent)?;
     Ok(())
 }
 

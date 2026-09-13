@@ -534,9 +534,9 @@ fn wrong_password_is_rejected() {
         .stderr(predicate::str::contains("解密失败").or(predicate::str::contains("密码错误")));
 }
 
-/// 验证修改密码后旧密码失效、新密码可以访问原文件。
+/// 验证默认修改密码只重保护元数据，旧密码失效且新密码可以访问原文件。
 #[test]
-fn change_password_rekeys_workspace() {
+fn change_password_default_updates_metadata_only() {
     let env = TestEnv::new("old-password");
     let link = env.init("rotate");
     let source = env.write_file("secret.txt", "secret");
@@ -551,6 +551,41 @@ fn change_password_rekeys_workspace() {
         .assert()
         .success()
         .stdout(predicate::str::contains("密码修改成功"));
+
+    env.command_with_password("old-password")
+        .args(["free", &env.path(&link)])
+        .assert()
+        .failure();
+
+    env.command_with_password("new-password")
+        .args(["free", &env.path(&link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("secret.txt"));
+}
+
+/// 验证 `--full` 会轮换数据密钥并保持文件可读。
+#[test]
+fn passwd_full_reencrypts_workspace() {
+    let env = TestEnv::new("old-password");
+    let link = env.init("full-rekey");
+    let source = env.write_file("secret.txt", "secret");
+
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+
+    env.command()
+        .args([
+            "passwd",
+            &env.path(&link),
+            "--full",
+            "old-password",
+            "new-password",
+        ])
+        .assert()
+        .success();
 
     env.command_with_password("old-password")
         .args(["free", &env.path(&link)])

@@ -108,7 +108,7 @@ pub fn run_workspace(
         unpacker.unpack_encrypted_files(&container_dir, &metadata)?;
 
         let meta_path = container_dir.join(".veil-meta");
-        veil_core::temp::write_private_file(&meta_path, &encrypted_metadata)?;
+        veil_core::temp::write_private_file_atomic(&meta_path, &encrypted_metadata)?;
 
         let container_config = ContainerConfig {
             veil_id: metadata.veil_id.clone(),

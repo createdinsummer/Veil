@@ -788,16 +788,16 @@
     "en": "veil exists <container-name, ID, or link> <container-path> [-p <password>]"
   },
   "cmd.passwd.about": {
-    "zh": "修改容器密码",
-    "en": "Change container password"
+    "zh": "修改容器密码（默认只重保护元数据）",
+    "en": "Change container password (metadata-only by default)"
   },
   "cmd.passwd.usage": {
-    "zh": "veil passwd <容器名称、ID 或链接> [旧密码] [新密码]",
-    "en": "veil passwd <container-name, ID, or link> [old-password] [new-password]"
+    "zh": "veil passwd <容器名称、ID 或链接> [旧密码] [新密码] [--full]",
+    "en": "veil passwd <container-name, ID, or link> [old-password] [new-password] [--full]"
   },
   "cmd.passwd.usage_opt": {
-    "zh": "veil passwd <容器名称、ID 或链接> [-p <旧密码>] [-n <新密码>]",
-    "en": "veil passwd <container-name, ID, or link> [-p <old-password>] [-n <new-password>]"
+    "zh": "veil passwd <容器名称、ID 或链接> [-p <旧密码>] [-n <新密码>] [--full]",
+    "en": "veil passwd <container-name, ID, or link> [-p <old-password>] [-n <new-password>] [--full]"
   },
   "cmd.shell.about": {
     "zh": "交互式 shell 模式（批处理）",
@@ -1005,6 +1005,10 @@
     "zh": "新密码（选项方式）",
     "en": "New password (via option)"
   },
+  "help.passwd.full": {
+    "zh": "轮换数据主密钥并重新加密全部文件",
+    "en": "Rotate the data key and re-encrypt all files"
+  },
 
   "label.usage": {
     "zh": "用法",
@@ -1044,8 +1048,8 @@
     "en": "\nExamples:\n  veil info photos.veil-link\n  veil info photos.veil-link -p mypass"
   },
   "example.passwd": {
-    "zh": "\n示例:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass",
-    "en": "\nExamples:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass"
+    "zh": "\n示例:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass\n  veil passwd photos.veil-link --full -p oldpass -n newpass",
+    "en": "\nExamples:\n  veil passwd photos.veil-link\n  veil passwd photos.veil-link oldpass newpass\n  veil passwd photos.veil-link -p oldpass -n newpass\n  veil passwd photos.veil-link --full -p oldpass -n newpass"
   },
   "example.shell": {
     "zh": "\n示例:\n  veil shell photos.veil-link\n  veil shell photos.veil-link -p mypass",

@@ -2,16 +2,26 @@
 //!
 //! .veil-meta 文件格式：
 //! - 明文头部（TLV 格式）：magic, header_len, salt, nonce, algorithm 等
-//! - 加密数据：JSON 格式的元数据（文件列表、容器信息等）
+//! - 加密数据：JSON 格式的元数据（文件列表、容器信息、数据主密钥等）
 //!
 //! `.veil-meta` 是容器身份和内容清单的权威来源，不保存任何绝对路径。明文头部
 //! 仅保留恢复和识别所需字段，文件清单与业务元数据统一加密。
 
 use crate::error::VeilError;
+pub use crate::file_ops::DATA_KEY_LEN;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use zeroize::Zeroize;
 
 /// 元数据文件固定魔数。
 pub const MAGIC: &[u8; 8] = b"VEILMETA";
+/// 当前支持的元数据格式版本。
+pub const VERSION: u16 = 3;
+
+/// 元数据中最多保存的数据主密钥数量。
+///
+/// 第一个是当前主密钥，第二个只用于完整改密过程中兼容尚未迁移的文件。
+pub const MAX_DATA_KEYS: usize = 2;
 
 /// `.veil-meta` 明文 TLV 头部使用的字段标签。
 #[repr(u8)]
@@ -19,7 +29,7 @@ pub const MAGIC: &[u8; 8] = b"VEILMETA";
 pub enum MetaTag {
     /// 元数据格式版本。
     Version = 0x01,
-    /// 主密钥派生使用的盐值。
+    /// 密码保护密钥派生使用的盐值。
     Salt = 0x02,
     /// 元数据加密算法 ID。
     Algorithm = 0x03,
@@ -115,7 +125,7 @@ pub struct MetaHeader {
 }
 
 impl MetaHeader {
-    /// 使用版本 1 构造元数据头部。
+    /// 使用当前格式版本构造元数据头部。
     ///
     /// `veil_id`、`container_name` 和 `workspace_type` 必须非空，具体约束在
     /// [`MetaHeader::to_bytes`] 中统一校验。
@@ -131,7 +141,7 @@ impl MetaHeader {
             salt,
             nonce,
             algorithm,
-            version: 1,
+            version: VERSION,
             veil_id,
             container_name,
             workspace_type,
@@ -178,7 +188,8 @@ impl MetaHeader {
         )?;
 
         // header_len 只统计 TLV 区域，不包含 magic 和长度字段本身。
-        let header_len = (buf.len() - 10) as u16;
+        let header_len = u16::try_from(buf.len() - 10)
+            .map_err(|_| VeilError::InvalidFormat("元数据头部过长".to_string()))?;
         buf[header_len_pos..header_len_pos + 2].copy_from_slice(&header_len.to_le_bytes());
 
         Ok(buf)
@@ -218,9 +229,26 @@ impl MetaHeader {
 
         // TLV 区域按 tag、u16 长度、value 的固定布局连续解析。
         while pos < header_end {
+            let tag_end = pos
+                .checked_add(3)
+                .ok_or_else(|| VeilError::InvalidFormat("元数据头部长度溢出".to_string()))?;
+            if tag_end > header_end {
+                return Err(VeilError::InvalidFormat(
+                    "元数据头部包含不完整的 TLV 字段".to_string(),
+                ));
+            }
+
             let tag = bytes[pos];
             let len = u16::from_le_bytes([bytes[pos + 1], bytes[pos + 2]]) as usize;
-            let value = &bytes[pos + 3..pos + 3 + len];
+            let value_end = tag_end
+                .checked_add(len)
+                .ok_or_else(|| VeilError::InvalidFormat("元数据字段长度溢出".to_string()))?;
+            if value_end > header_end {
+                return Err(VeilError::InvalidFormat(
+                    "元数据字段长度超出头部范围".to_string(),
+                ));
+            }
+            let value = &bytes[tag_end..value_end];
 
             match MetaTag::from_u8(tag) {
                 Some(MetaTag::Version) if len == 2 => {
@@ -259,7 +287,15 @@ impl MetaHeader {
             }
 
             // 无论是否识别该字段，都按声明的长度推进到下一个 TLV。
-            pos += 3 + len;
+            pos = value_end;
+        }
+
+        let version = version.ok_or_else(|| VeilError::InvalidFormat("缺少版本号".to_string()))?;
+        if version != VERSION {
+            return Err(VeilError::InvalidFormat(format!(
+                "不支持的元数据版本: {}",
+                version
+            )));
         }
 
         Ok(Self {
@@ -267,7 +303,7 @@ impl MetaHeader {
             nonce: nonce.ok_or_else(|| VeilError::InvalidFormat("缺少 nonce".to_string()))?,
             algorithm: algorithm
                 .ok_or_else(|| VeilError::InvalidFormat("缺少算法 ID".to_string()))?,
-            version: version.ok_or_else(|| VeilError::InvalidFormat("缺少版本号".to_string()))?,
+            version,
             veil_id: (!veil_id.is_empty())
                 .then_some(veil_id)
                 .ok_or_else(|| VeilError::InvalidFormat("缺少 veil_id".to_string()))?,
@@ -283,15 +319,28 @@ impl MetaHeader {
     /// 读取头部声明的总长度，用于定位加密数据起点。
     ///
     /// # 错误
-    /// 输入不足 10 字节时返回 [`VeilError::InvalidFormat`]；函数不会检查该长度是否
-    /// 超出实际输入。
+    /// 输入不足 10 字节、魔数不匹配，或声明长度超出实际输入时返回
+    /// [`VeilError::InvalidFormat`]。
     pub fn header_len(bytes: &[u8]) -> Result<usize, VeilError> {
         if bytes.len() < 10 {
             return Err(VeilError::InvalidFormat("元数据文件过小".to_string()));
         }
+        if &bytes[0..8] != MAGIC {
+            return Err(VeilError::InvalidFormat("无效的元数据文件魔数".to_string()));
+        }
+
         // 长度字段只覆盖 TLV 区域，总偏移需再加 magic 与长度字段自身。
         let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-        Ok(10 + header_len)
+        let total_len = 10usize
+            .checked_add(header_len)
+            .ok_or_else(|| VeilError::InvalidFormat("元数据头部长度溢出".to_string()))?;
+        if total_len > bytes.len() {
+            return Err(VeilError::InvalidFormat(
+                "元数据头部长度超出文件范围".to_string(),
+            ));
+        }
+
+        Ok(total_len)
     }
 }
 
@@ -299,7 +348,7 @@ impl MetaHeader {
 ///
 /// 这是容器的权威身份与内容清单：身份字段用于恢复和去重，`files` 记录逻辑
 /// 目录树中的全部文件，但所有路径都相对于容器根目录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MetaData {
     /// 不随容器名称变化的稳定身份。
     pub veil_id: String,
@@ -319,6 +368,30 @@ pub struct MetaData {
     /// 分段表达，支持多级目录和文件；物理上使用扁平列表，便于逐文件加密、
     /// 随机访问和增量增删。不得保存绝对路径。
     pub files: Vec<FileEntry>,
+
+    /// 按优先级排列的数据主密钥。
+    ///
+    /// 索引 0 是当前写入密钥；索引 1 是完整改密时的旧密钥回退槽位。数据主密钥
+    /// 本身由密码派生密钥保护的元数据包住，不会以明文落盘。
+    pub data_keys: Vec<[u8; DATA_KEY_LEN]>,
+}
+
+impl fmt::Debug for MetaData {
+    /// 输出元数据摘要，始终隐藏数据主密钥内容。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MetaData")
+            .field("veil_id", &self.veil_id)
+            .field("container_name", &self.container_name)
+            .field("workspace_type", &self.workspace_type)
+            .field("created_at", &self.created_at)
+            .field("files", &self.files)
+            .field(
+                "data_keys",
+                &format_args!("[REDACTED; {}]", self.data_keys.len()),
+            )
+            .finish()
+    }
 }
 
 impl MetaData {
@@ -334,6 +407,9 @@ impl MetaData {
     ///
     /// `veil_id` 应来自已分配的身份，以保证链接和配置在路径变化后仍能定位容器。
     pub fn with_veil_id(veil_id: String, container_name: String, workspace_type: String) -> Self {
+        let mut data_key = [0u8; DATA_KEY_LEN];
+        getrandom::getrandom(&mut data_key).expect("无法生成数据主密钥");
+
         Self {
             veil_id,
             container_name,
@@ -341,7 +417,35 @@ impl MetaData {
             // 初始清单为空，文件条目由后续 add_file 逐步追加。
             created_at: chrono::Utc::now().to_rfc3339(),
             files: Vec::new(),
+            data_keys: vec![data_key],
         }
+    }
+
+    /// 返回当前使用的主数据密钥。
+    pub fn primary_data_key(&self) -> Result<&[u8; DATA_KEY_LEN], VeilError> {
+        self.validate()?;
+        self.data_keys
+            .first()
+            .ok_or_else(|| VeilError::InvalidFormat("缺少数据主密钥".to_string()))
+    }
+
+    /// 校验数据主密钥槽位。
+    fn validate(&self) -> Result<(), VeilError> {
+        if self.data_keys.is_empty() {
+            return Err(VeilError::InvalidFormat("缺少数据主密钥".to_string()));
+        }
+        if self.data_keys.len() > MAX_DATA_KEYS {
+            return Err(VeilError::InvalidFormat(format!(
+                "数据主密钥数量超过上限: {}",
+                self.data_keys.len()
+            )));
+        }
+        for (index, key) in self.data_keys.iter().enumerate() {
+            if self.data_keys[..index].contains(key) {
+                return Err(VeilError::InvalidFormat("数据主密钥重复".to_string()));
+            }
+        }
+        Ok(())
     }
 
     /// 将元数据序列化为 UTF-8 JSON。
@@ -360,8 +464,10 @@ impl MetaData {
     /// JSON 无效、字段缺失或类型不匹配时返回 [`VeilError::SerializationError`]。
     pub fn from_json(bytes: &[u8]) -> Result<Self, VeilError> {
         // 反序列化要求字段完整；这是解密后内容损坏与版本不兼容的统一入口。
-        serde_json::from_slice(bytes)
-            .map_err(|e| VeilError::SerializationError(format!("反序列化元数据失败: {}", e)))
+        let metadata: Self = serde_json::from_slice(bytes)
+            .map_err(|e| VeilError::SerializationError(format!("反序列化元数据失败: {}", e)))?;
+        metadata.validate()?;
+        Ok(metadata)
     }
 
     /// 将文件条目追加到内容清单。
@@ -405,6 +511,15 @@ impl MetaData {
     }
 }
 
+impl Drop for MetaData {
+    /// 清除内存中的数据主密钥副本。
+    fn drop(&mut self) {
+        for key in &mut self.data_keys {
+            key.zeroize();
+        }
+    }
+}
+
 /// 生成 `veil-` 前缀的随机容器身份。
 ///
 /// # Panics
@@ -428,7 +543,7 @@ pub struct FileEntry {
     /// 明文文件大小，单位为字节。
     pub size: u64,
 
-    /// 加密该文件时使用的 12 字节 nonce。
+    /// 文件分块流加密使用的 12 字节 base nonce，块 nonce 由它和块序号派生。
     pub nonce: [u8; 12],
 
     /// RFC 3339 格式的加密时间。
@@ -458,8 +573,56 @@ impl FileEntry {
 /// 字段长度使用 `u16` 编码，调用方需保证 `value` 不超过该上限。
 fn write_tlv(buf: &mut Vec<u8>, tag: MetaTag, value: &[u8]) -> Result<(), VeilError> {
     // TLV 顺序固定为 tag、u16 长度、value 原文。
+    let value_len = u16::try_from(value.len())
+        .map_err(|_| VeilError::InvalidFormat("元数据字段过长".to_string()))?;
     buf.push(tag as u8);
-    buf.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    buf.extend_from_slice(&value_len.to_le_bytes());
     buf.extend_from_slice(value);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个头部长度合法、但末尾 TLV 被截断的元数据文件。
+    fn truncated_tlv_header() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        bytes.extend_from_slice(&[MetaTag::Version as u8, 2, 0]);
+        bytes
+    }
+
+    /// 验证截断 TLV 返回格式错误而不是 panic。
+    #[test]
+    fn truncated_tlv_is_rejected() {
+        let bytes = truncated_tlv_header();
+        assert!(MetaHeader::from_bytes(&bytes).is_err());
+    }
+
+    /// 验证声明长度超出实际文件时会被拒绝。
+    #[test]
+    fn header_length_beyond_file_is_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        assert!(MetaHeader::header_len(&bytes).is_err());
+    }
+
+    /// 验证旧元数据版本不会被静默接受。
+    #[test]
+    fn old_metadata_version_is_rejected() {
+        let header = MetaHeader::new(
+            [8u8; 32],
+            [9u8; 12],
+            AlgorithmId::ChaCha20Poly1305,
+            "veil-test".to_string(),
+            "test".to_string(),
+            "default".to_string(),
+        );
+        let mut bytes = header.to_bytes().unwrap();
+        bytes[13..15].copy_from_slice(&2u16.to_le_bytes());
+        assert!(MetaHeader::from_bytes(&bytes).is_err());
+    }
 }

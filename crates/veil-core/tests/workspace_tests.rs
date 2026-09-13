@@ -34,6 +34,7 @@ fn test_workspace_init_and_operations() {
     assert_eq!(meta.container_name, "test-container");
     assert_eq!(meta.workspace_type, "default");
     assert_eq!(meta.files.len(), 0);
+    assert_eq!(meta.data_keys.len(), 1);
 
     println!("✓ 容器初始化成功");
 }
@@ -368,9 +369,9 @@ fn test_move_directory_recursively() {
     );
 }
 
-/// 验证密码修改在中途失败时保留旧密码可读状态。
+/// 验证完整改密中途失败时保留旧密码和双密钥状态。
 #[test]
-fn test_change_password_failure_rolls_back() {
+fn test_change_password_full_failure_keeps_old_password() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path().join("test-container");
@@ -402,7 +403,7 @@ fn test_change_password_failure_rolls_back() {
         .unwrap();
     fs::remove_file(workspace_path.join(missing.encrypted_name)).unwrap();
 
-    let result = manager.change_password(old_password, "new-password");
+    let result = manager.change_password_full(old_password, "new-password");
     assert!(result.is_err());
     assert!(manager.read_meta(old_password).is_ok());
     assert!(manager.read_meta("new-password").is_err());
@@ -415,6 +416,266 @@ fn test_change_password_failure_rolls_back() {
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().starts_with(".veil-pw-"))
     );
+}
+
+/// 验证完整改密中断后可以继续使用旧密码恢复迁移。
+#[test]
+fn test_change_password_full_can_resume_after_partial_migration() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let old_password = "old-password";
+    let new_password = "new-password";
+
+    manager
+        .init_container("test-container", "default", old_password)
+        .unwrap();
+    let first = temp_dir.path().join("first.txt");
+    let second = temp_dir.path().join("second.txt");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+    manager
+        .add_files(
+            &[
+                AddFileSpec::new(&first, "first.txt"),
+                AddFileSpec::new(&second, "second.txt"),
+            ],
+            old_password,
+        )
+        .unwrap();
+
+    let second_entry = manager
+        .list_files(old_password)
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.original_name == "second.txt")
+        .unwrap();
+    let second_path = workspace_path.join(&second_entry.encrypted_name);
+    let second_ciphertext = fs::read(&second_path).unwrap();
+    fs::remove_file(&second_path).unwrap();
+
+    assert!(
+        manager
+            .change_password_full(old_password, new_password)
+            .is_err()
+    );
+    assert!(manager.read_meta(old_password).is_ok());
+    assert!(manager.read_meta(new_password).is_err());
+
+    fs::write(&second_path, second_ciphertext).unwrap();
+    manager
+        .change_password_full(old_password, new_password)
+        .unwrap();
+
+    let first_output = temp_dir.path().join("first-out.txt");
+    let second_output = temp_dir.path().join("second-out.txt");
+    manager
+        .extract_file("first.txt", &first_output, new_password)
+        .unwrap();
+    manager
+        .extract_file("second.txt", &second_output, new_password)
+        .unwrap();
+    assert_eq!(fs::read(first_output).unwrap(), b"first");
+    assert_eq!(fs::read(second_output).unwrap(), b"second");
+}
+
+/// 验证每次元数据提交都会生成新的 nonce，避免同一主密钥重复使用 AEAD nonce。
+#[test]
+fn test_metadata_nonce_rotates_on_commit() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let password = "test-password";
+
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
+    let first = MetaHeader::from_bytes(&fs::read(workspace_path.join(".veil-meta")).unwrap())
+        .unwrap()
+        .nonce;
+
+    manager.update_meta(password, |_| {}).unwrap();
+    let second = MetaHeader::from_bytes(&fs::read(workspace_path.join(".veil-meta")).unwrap())
+        .unwrap()
+        .nonce;
+
+    assert_ne!(first, second);
+}
+
+/// 验证崩溃遗留的临时文件和孤立密文会在下次成功读取时清理。
+#[test]
+fn test_crash_orphans_are_cleaned_after_successful_read() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let password = "test-password";
+
+    manager
+        .init_container("test-container", "default", password)
+        .unwrap();
+    let source = temp_dir.path().join("keep.txt");
+    fs::write(&source, b"keep").unwrap();
+    let encrypted_name = manager.add_file(&source, password).unwrap();
+
+    let orphan = workspace_path.join(format!("{}.enc", "a".repeat(32)));
+    let temp = workspace_path.join(".veil-tmp-crashed");
+    fs::write(&orphan, b"orphan").unwrap();
+    fs::write(&temp, b"partial").unwrap();
+
+    manager.read_meta(password).unwrap();
+
+    assert!(workspace_path.join(encrypted_name).exists());
+    assert!(!orphan.exists());
+    assert!(!temp.exists());
+}
+
+/// 验证默认改密只重新保护元数据，不修改现有密文文件。
+#[test]
+fn test_change_password_metadata_only_keeps_ciphertext() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let old_password = "old-password";
+    let new_password = "new-password";
+
+    manager
+        .init_container("test-container", "default", old_password)
+        .unwrap();
+    let source = temp_dir.path().join("data.txt");
+    fs::write(&source, b"secret").unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&source, "data.txt")], old_password)
+        .unwrap();
+
+    let old_names: std::collections::HashSet<_> = manager
+        .list_files(old_password)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.encrypted_name)
+        .collect();
+    let old_ciphertexts: Vec<_> = old_names
+        .iter()
+        .map(|name| fs::read(workspace_path.join(name)).unwrap())
+        .collect();
+
+    manager
+        .change_password(old_password, new_password)
+        .unwrap();
+
+    let new_names: std::collections::HashSet<_> = manager
+        .list_files(new_password)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.encrypted_name)
+        .collect();
+    assert_eq!(old_names, new_names);
+    assert_eq!(
+        old_ciphertexts,
+        new_names
+            .iter()
+            .map(|name| fs::read(workspace_path.join(name)).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert!(new_names.iter().all(|name| workspace_path.join(name).exists()));
+    assert!(manager.read_meta(old_password).is_err());
+
+    let output = temp_dir.path().join("output.txt");
+    manager
+        .extract_file("data.txt", &output, new_password)
+        .unwrap();
+    assert_eq!(fs::read(output).unwrap(), b"secret");
+}
+
+/// 验证完整改密会轮换数据主密钥并替换全部文件密文。
+#[test]
+fn test_change_password_full_reencrypts_ciphertext() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path.clone());
+    let old_password = "old-password";
+    let new_password = "new-password";
+
+    manager
+        .init_container("test-container", "default", old_password)
+        .unwrap();
+    let first = temp_dir.path().join("first.txt");
+    let second = temp_dir.path().join("second.txt");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+    manager
+        .add_files(
+            &[
+                AddFileSpec::new(&first, "first.txt"),
+                AddFileSpec::new(&second, "second.txt"),
+            ],
+            old_password,
+        )
+        .unwrap();
+
+    let old_names: std::collections::HashSet<_> = manager
+        .list_files(old_password)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.encrypted_name)
+        .collect();
+
+    manager
+        .change_password_full(old_password, new_password)
+        .unwrap();
+
+    let new_names: std::collections::HashSet<_> = manager
+        .list_files(new_password)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.encrypted_name)
+        .collect();
+    assert!(old_names.is_disjoint(&new_names));
+    assert!(old_names.iter().all(|name| !workspace_path.join(name).exists()));
+    assert!(manager.read_meta(old_password).is_err());
+
+    let output = temp_dir.path().join("first-out.txt");
+    manager
+        .extract_file("first.txt", &output, new_password)
+        .unwrap();
+    assert_eq!(fs::read(output).unwrap(), b"first");
+}
+
+/// 验证工作区对跨多个分块的大文件执行添加、完整改密和导出。
+#[test]
+fn test_workspace_streaming_multichunk_full_rekey() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let workspace_path = temp_dir.path().join("test-container");
+    let manager = WorkspaceManager::new(workspace_path);
+    let old_password = "old-password";
+    let new_password = "new-password";
+    let plaintext: Vec<u8> = (0..veil_core::file_ops::CHUNK_SIZE * 2 + 123)
+        .map(|index| (index % 251) as u8)
+        .collect();
+
+    manager
+        .init_container("test-container", "default", old_password)
+        .unwrap();
+    let source = temp_dir.path().join("large.bin");
+    fs::write(&source, &plaintext).unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&source, "large.bin")], old_password)
+        .unwrap();
+
+    manager
+        .change_password_full(old_password, new_password)
+        .unwrap();
+
+    let output = temp_dir.path().join("large-out.bin");
+    manager
+        .extract_file("large.bin", &output, new_password)
+        .unwrap();
+    assert_eq!(fs::read(output).unwrap(), plaintext);
 }
 
 /// 统计工作区根目录下的密文文件数量。

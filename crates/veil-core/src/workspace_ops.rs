@@ -1,20 +1,21 @@
 //! 工作区容器的高层读写操作。
 //!
 //! [`WorkspaceManager`] 把 `.veil-meta` 与同目录下的独立加密文件组合成完整容器。
-//! 元数据和文件内容均由 Argon2id 派生出的主密钥保护；当前实现使用
-//! ChaCha20-Poly1305，并为每个文件生成独立 nonce。`.veil-meta` 中记录对应的
+//! 密码和 salt 经 Argon2id 派生出密码保护密钥，只用于加密元数据 JSON；文件内容
+//! 使用元数据中的随机数据主密钥按固定大小分块流式加密。两者均使用
+//! ChaCha20-Poly1305，文件各自保存独立 base nonce。`.veil-meta` 中记录对应的
 //! 算法 ID，具体值由 [`MetaHeader`] 持久化。
 
 use crate::error::VeilError;
+use crate::file_ops::{self, DATA_KEY_LEN};
 use crate::kdf;
 use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader};
 use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -53,13 +54,6 @@ pub enum MovedPathKind {
     File,
     /// 移动的是目录及其全部子文件。
     Directory,
-}
-
-/// 密码修改阶段中暂存的新密文和原密文备份。
-struct StagedPasswordFile {
-    original: PathBuf,
-    staged: PathBuf,
-    backup: PathBuf,
 }
 
 /// 对单个工作区容器执行初始化和文件操作。
@@ -141,10 +135,10 @@ impl WorkspaceManager {
     ) -> Result<MetaData, VeilError> {
         self.verify_veil_id(veil_id)?;
 
-        fs::create_dir_all(&self.workspace_path)
+        crate::fsutil::create_dir_all_durable(&self.workspace_path)
             .map_err(|e| VeilError::WorkspaceError(format!("创建容器目录失败: {}", e)))?;
 
-        // salt 决定主密钥，nonce 只保护首份元数据；二者都写入明文头部。
+        // salt 决定密码保护密钥；每次提交的 nonce 都写入当次明文头部。
         let salt = generate_random_bytes::<32>();
         let nonce = generate_random_bytes::<12>();
 
@@ -166,6 +160,8 @@ impl WorkspaceManager {
         let master_key = derive_master_key(password, &salt)?;
 
         self.write_meta(&header, &meta_data, &master_key)?;
+        // 初始化没有可回退的旧快照，目录同步失败时由调用方整体回滚。
+        crate::fsutil::sync_directory(&self.workspace_path)?;
 
         Ok(meta_data)
     }
@@ -178,7 +174,7 @@ impl WorkspaceManager {
         Ok(self.read_meta_context(password)?.0)
     }
 
-    /// 读取密码上下文，同时返回解密后的元数据、明文头部和零化主密钥。
+    /// 读取密码上下文，同时返回解密后的元数据、明文头部和零化密码保护密钥。
     fn read_meta_context(
         &self,
         password: &str,
@@ -194,8 +190,11 @@ impl WorkspaceManager {
         let master_key = derive_master_key(password, &header.salt)?;
         let header_len = MetaHeader::header_len(&bytes)?;
         let encrypted_data = &bytes[header_len..];
-        let decrypted = decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?;
-        let meta_data = MetaData::from_json(&decrypted)?;
+        let decrypted =
+            Zeroizing::new(decrypt_chacha20poly1305(&master_key, encrypted_data, &header.nonce)?);
+        let meta_data = MetaData::from_json(decrypted.as_slice())?;
+
+        self.cleanup_workspace_state(&meta_data);
 
         Ok((meta_data, header, master_key))
     }
@@ -223,18 +222,28 @@ impl WorkspaceManager {
         master_key: &[u8; 32],
     ) -> Result<(), VeilError> {
         self.verify_veil_id(&header.veil_id)?;
+        meta_data.primary_data_key()?;
         let meta_path = self.workspace_path.join(".veil-meta");
 
-        let header_bytes = header.to_bytes()?;
+        // 每次元数据提交都使用新的 nonce；同一密码保护密钥下不能重复使用
+        // ChaCha20-Poly1305
+        // nonce，否则会破坏元数据的机密性保证。
+        let mut commit_header = header.clone();
+        commit_header.nonce = generate_random_bytes::<12>();
+        let header_bytes = commit_header.to_bytes()?;
 
-        let json_bytes = meta_data.to_json()?;
-        let encrypted = encrypt_chacha20poly1305(master_key, &json_bytes, &header.nonce)?;
+        let json_bytes = Zeroizing::new(meta_data.to_json()?);
+        let encrypted = encrypt_chacha20poly1305(
+            master_key,
+            json_bytes.as_slice(),
+            &commit_header.nonce,
+        )?;
 
         // .veil-meta 使用“明文 TLV 头部 + 密文 JSON”的连续布局。
         let mut file_data = header_bytes;
         file_data.extend_from_slice(&encrypted);
 
-        atomic_write(&meta_path, &file_data)?;
+        crate::fsutil::atomic_write(&meta_path, &file_data)?;
 
         Ok(())
     }
@@ -250,17 +259,10 @@ impl WorkspaceManager {
         password: &str,
         update_fn: impl FnOnce(&mut MetaData),
     ) -> Result<(), VeilError> {
-        // 先在内存中完成调用方修改，避免闭包直接接触磁盘或密钥。
-        let mut meta_data = self.read_meta(password)?;
+        // 先在内存中完成调用方修改；读取上下文时只执行一次密钥派生。
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
 
         update_fn(&mut meta_data);
-
-        // 复用原头部的 salt/nonce，保持当前密码下的密钥参数不变。
-        let meta_path = self.workspace_path.join(".veil-meta");
-        let bytes = fs::read(&meta_path)?;
-        let header = MetaHeader::from_bytes(&bytes)?;
-
-        let master_key = derive_master_key(password, &header.salt)?;
 
         self.write_meta(&header, &meta_data, &master_key)?;
 
@@ -319,17 +321,18 @@ impl WorkspaceManager {
 
         let mut written = Vec::new();
         let mut new_entries = Vec::new();
+        let data_key = *meta_data.primary_data_key()?;
         let transaction = (|| -> Result<(), VeilError> {
             for file in &deduplicated {
-                let file_data = fs::read(&file.source)?;
-                let file_size = file_data.len() as u64;
                 let encrypted_name = format!("{}.enc", generate_random_id());
-                let file_nonce = generate_random_bytes::<12>();
-                let encrypted_data =
-                    encrypt_chacha20poly1305(&master_key, &file_data, &file_nonce)?;
+                let file_nonce = file_ops::generate_base_nonce();
                 let encrypted_path = self.workspace_path.join(&encrypted_name);
-
-                crate::temp::write_private_file(&encrypted_path, &encrypted_data)?;
+                let file_size = file_ops::encrypt_file_streaming(
+                    &file.source,
+                    &encrypted_path,
+                    &data_key,
+                    &file_nonce,
+                )?;
                 written.push(encrypted_name.clone());
                 new_entries.push(FileEntry::new(
                     encrypted_name,
@@ -339,15 +342,10 @@ impl WorkspaceManager {
                 ));
             }
 
-            let mut replaced = Vec::new();
+            // 新密文的目录项必须先持久化，之后写出的 .veil-meta 才能安全引用它们。
+            crate::fsutil::sync_directory(&self.workspace_path)?;
+
             for entry in &new_entries {
-                replaced.extend(
-                    meta_data
-                        .files
-                        .iter()
-                        .filter(|existing| existing.original_name == entry.original_name)
-                        .cloned(),
-                );
                 meta_data
                     .files
                     .retain(|existing| existing.original_name != entry.original_name);
@@ -355,11 +353,6 @@ impl WorkspaceManager {
             }
 
             self.write_meta(&header, &meta_data, &master_key)?;
-
-            // 元数据提交成功后旧密文才失去引用，删除失败不会影响新内容可用性。
-            for entry in replaced {
-                let _ = fs::remove_file(self.workspace_path.join(entry.encrypted_name));
-            }
 
             Ok(())
         })();
@@ -370,6 +363,9 @@ impl WorkspaceManager {
             }
             return Err(error);
         }
+
+        // 只有当前元数据目录项再次同步成功后，才删除失去引用的旧密文。
+        self.cleanup_workspace_state(&meta_data);
 
         Ok(new_entries
             .into_iter()
@@ -387,7 +383,7 @@ impl WorkspaceManager {
         output_path: &Path,
         password: &str,
     ) -> Result<(), VeilError> {
-        let meta_data = self.read_meta(password)?;
+        let (meta_data, _header, _master_key) = self.read_meta_context(password)?;
 
         let entry = meta_data
             .find_file(original_name)
@@ -395,18 +391,19 @@ impl WorkspaceManager {
 
         // 元数据只暴露原始名称，实际读取必须通过条目保存的加密文件名。
         let encrypted_path = self.workspace_path.join(&entry.encrypted_name);
-        let encrypted_data = fs::read(&encrypted_path)?;
-
-        let meta_path = self.workspace_path.join(".veil-meta");
-        let meta_bytes = fs::read(&meta_path)?;
-        let header = MetaHeader::from_bytes(&meta_bytes)?;
-        self.verify_veil_id(&header.veil_id)?;
-
-        let master_key = derive_master_key(password, &header.salt)?;
-
-        let decrypted = decrypt_chacha20poly1305(&master_key, &encrypted_data, &entry.nonce)?;
-
-        fs::write(output_path, decrypted)?;
+        let key_index = file_ops::detect_key_index(
+            &encrypted_path,
+            &meta_data.data_keys,
+            &entry.nonce,
+            entry.size,
+        )?;
+        file_ops::decrypt_file_streaming(
+            &encrypted_path,
+            output_path,
+            &meta_data.data_keys[key_index],
+            &entry.nonce,
+            entry.size,
+        )?;
 
         Ok(())
     }
@@ -461,24 +458,11 @@ impl WorkspaceManager {
             RemovedPathKind::File
         };
 
-        let removed: Vec<_> = meta_data
-            .files
-            .iter()
-            .filter(|entry| {
-                entry.original_name == normalized
-                    || entry.original_name.starts_with(&directory_prefix)
-            })
-            .cloned()
-            .collect();
-
         meta_data.files.retain(|entry| {
             entry.original_name != normalized && !entry.original_name.starts_with(&directory_prefix)
         });
         self.write_meta(&header, &meta_data, &master_key)?;
-
-        for entry in removed {
-            let _ = fs::remove_file(self.workspace_path.join(entry.encrypted_name));
-        }
+        self.cleanup_workspace_state(&meta_data);
 
         Ok(kind)
     }
@@ -492,128 +476,122 @@ impl WorkspaceManager {
         Ok(meta_data.files.clone())
     }
 
-    /// 使用新密码重新保护元数据和所有文件内容。
+    /// 只修改密码保护层，不重新加密文件内容。
     ///
-    /// 方法先验证旧密码、解密全部文件并生成新密文，再替换文件，最后提交新元数据。
-    /// 运行期任一步失败都会尝试恢复原文件；新密码不能为空。
-    ///
-    /// # 错误
-    /// 旧密码错误、元数据或文件解密失败，以及新元数据或文件写入失败时返回错误。
+    /// 数据主密钥保持不变，因此所有 `.enc` 文件无需改动；本方法只生成新的 salt、
+    /// 新密码派生密钥和新的元数据 nonce，并原子替换 `.veil-meta`。
     pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), VeilError> {
         if new_password.is_empty() {
             return Err(VeilError::WorkspaceError("新密码不能为空".to_string()));
         }
 
-        let (meta_data, old_header, old_master_key) = self.read_meta_context(old_password)?;
+        let (meta_data, old_header, _) = self.read_meta_context(old_password)?;
+        let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
+        self.write_meta(&new_header, &meta_data, &new_master_key)?;
+        Ok(())
+    }
 
+    /// 修改密码并轮换数据主密钥，逐个重新加密文件。
+    ///
+    /// 操作开始前先把“新数据密钥、旧数据密钥”同时写入元数据。每个文件完成迁移后
+    /// 各自提交一次元数据，因此进程被终止时只会出现明确的旧文件或新文件，而不会
+    /// 存在无法判断使用哪把数据密钥的文件。全部文件迁移完成后丢弃旧数据密钥。
+    pub fn change_password_full(
+        &self,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), VeilError> {
+        if new_password.is_empty() {
+            return Err(VeilError::WorkspaceError("新密码不能为空".to_string()));
+        }
+
+        let (mut meta_data, old_header, old_master_key) = self.read_meta_context(old_password)?;
+
+        // 已经处于双密钥状态时视为继续未完成的迁移，不生成第三把密钥。
+        if meta_data.data_keys.len() == 1 {
+            let old_data_key = meta_data.data_keys[0];
+            let new_data_key = generate_random_bytes::<DATA_KEY_LEN>();
+            meta_data.data_keys = vec![new_data_key, old_data_key];
+        } else if meta_data.data_keys.len() != 2 {
+            return Err(VeilError::InvalidFormat("数据主密钥槽位无效".to_string()));
+        }
+
+        // 先让双密钥状态成为可恢复的提交点。文件内容读写统一交给 file_ops，
+        // workspace_ops 只负责元数据事务和迁移顺序。
+        self.write_meta(&old_header, &meta_data, &old_master_key)?;
+
+        let active_data_key = meta_data.data_keys[0];
+        let file_count = meta_data.files.len();
+
+        for index in 0..file_count {
+            let file_entry = meta_data.files[index].clone();
+            let encrypted_path = self.workspace_path.join(&file_entry.encrypted_name);
+            let key_index = file_ops::detect_key_index(
+                &encrypted_path,
+                &meta_data.data_keys,
+                &file_entry.nonce,
+                file_entry.size,
+            )?;
+
+            // 已经使用当前数据密钥的文件无需再次迁移。
+            if key_index == 0 {
+                continue;
+            }
+
+            let new_nonce = file_ops::generate_base_nonce();
+            let new_encrypted_name = format!("{}.enc", generate_random_id());
+            let new_encrypted_path = self.workspace_path.join(&new_encrypted_name);
+            file_ops::rewrite_file_streaming(
+                &meta_data.data_keys[1],
+                &active_data_key,
+                &encrypted_path,
+                &new_encrypted_path,
+                &file_entry.nonce,
+                &new_nonce,
+                file_entry.size,
+            )?;
+
+            meta_data.files[index] = FileEntry::new(
+                new_encrypted_name,
+                file_entry.original_name,
+                file_entry.size,
+                new_nonce,
+            );
+
+            if let Err(error) = self.write_meta(&old_header, &meta_data, &old_master_key) {
+                let _ = fs::remove_file(&new_encrypted_path);
+                return Err(error);
+            }
+
+            self.cleanup_workspace_state(&meta_data);
+        }
+
+        // 所有文件都已使用 active_data_key，可以丢弃旧密钥并把密码切换到新值。
+        meta_data.data_keys.truncate(1);
+        let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
+        self.write_meta(&new_header, &meta_data, &new_master_key)?;
+        self.cleanup_workspace_state(&meta_data);
+
+        Ok(())
+    }
+
+    /// 为改密生成新的 salt、元数据 nonce 和密码派生密钥。
+    fn build_password_header(
+        &self,
+        old_header: &MetaHeader,
+        new_password: &str,
+    ) -> Result<(MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
         let new_salt = generate_random_bytes::<32>();
-        let new_nonce = generate_random_bytes::<12>();
-
         let new_master_key = derive_master_key(new_password, &new_salt)?;
-
         let new_header = MetaHeader::new(
             new_salt,
-            new_nonce,
+            generate_random_bytes::<12>(),
             AlgorithmId::ChaCha20Poly1305,
             old_header.veil_id.clone(),
             old_header.container_name.clone(),
             old_header.workspace_type.clone(),
         );
-
-        // 第一阶段只生成新密文，不触碰原文件；任一文件失败时原容器保持完整。
-        let mut staged = Vec::with_capacity(meta_data.files.len());
-        for file_entry in &meta_data.files {
-            let prepared = (|| -> Result<StagedPasswordFile, VeilError> {
-                let encrypted_path = self.workspace_path.join(&file_entry.encrypted_name);
-                let encrypted_file_data = fs::read(&encrypted_path)?;
-                let plaintext = decrypt_chacha20poly1305(
-                    &old_master_key,
-                    &encrypted_file_data,
-                    &file_entry.nonce,
-                )?;
-                let new_encrypted =
-                    encrypt_chacha20poly1305(&new_master_key, &plaintext, &file_entry.nonce)?;
-
-                let staged_path = self.unique_password_temp_path("new")?;
-                crate::temp::write_private_file(&staged_path, &new_encrypted)?;
-                let backup = match self.unique_password_temp_path("bak") {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let _ = fs::remove_file(&staged_path);
-                        return Err(error);
-                    }
-                };
-
-                Ok(StagedPasswordFile {
-                    original: encrypted_path,
-                    staged: staged_path,
-                    backup,
-                })
-            })();
-
-            match prepared {
-                Ok(file) => staged.push(file),
-                Err(error) => {
-                    remove_staged_password_files(&staged);
-                    return Err(error);
-                }
-            }
-        }
-
-        // 第二阶段用 rename 替换文件，并保留旧密文备份以便回滚。
-        let mut replaced = Vec::with_capacity(staged.len());
-        for file in &staged {
-            if let Err(error) = fs::rename(&file.original, &file.backup) {
-                restore_password_backups(&replaced);
-                remove_staged_password_files(&staged);
-                return Err(VeilError::Io(error));
-            }
-
-            if let Err(error) = fs::rename(&file.staged, &file.original) {
-                let _ = fs::rename(&file.backup, &file.original);
-                restore_password_backups(&replaced);
-                remove_staged_password_files(&staged);
-                return Err(VeilError::Io(error));
-            }
-
-            replaced.push((file.original.clone(), file.backup.clone()));
-        }
-
-        // 第三阶段提交元数据；失败时恢复全部旧密文。
-        if let Err(error) = self.write_meta(&new_header, &meta_data, &new_master_key) {
-            let rollback_errors = restore_password_backups(&replaced);
-            if !rollback_errors.is_empty() {
-                return Err(VeilError::WorkspaceError(format!(
-                    "密码修改失败，且部分文件回滚失败: {} ({})",
-                    error,
-                    rollback_errors.join("; ")
-                )));
-            }
-            return Err(error);
-        }
-
-        // 元数据和新密文均已持久化，旧密文备份可以安全删除。
-        for file in &staged {
-            let _ = fs::remove_file(&file.backup);
-        }
-
-        Ok(())
-    }
-
-    /// 为密码修改临时文件生成工作区内唯一路径。
-    fn unique_password_temp_path(&self, label: &str) -> Result<PathBuf, VeilError> {
-        for _ in 0..16 {
-            let candidate = self
-                .workspace_path
-                .join(format!(".veil-pw-{label}-{}.tmp", generate_random_id()));
-            if !candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-
-        Err(VeilError::WorkspaceError(
-            "无法分配密码修改临时文件".to_string(),
-        ))
+        Ok((new_header, new_master_key))
     }
 
     /// 修改文件路径的兼容入口。
@@ -744,30 +722,56 @@ impl WorkspaceManager {
         self.write_meta(&header, &meta_data, &master_key)?;
         Ok((source_kind, final_target))
     }
-}
 
-/// 删除尚未替换的密码修改暂存密文。
-fn remove_staged_password_files(files: &[StagedPasswordFile]) {
-    for file in files {
-        let _ = fs::remove_file(&file.staged);
-    }
-}
+    /// 清理崩溃遗留的临时文件，以及不再被当前元数据引用的随机密文文件。
+    ///
+    /// 只有成功解密元数据后才调用，因此清理依据始终是已提交快照。未知文件名不会
+    /// 被删除，避免误伤工作区中的非 Veil 文件。
+    fn cleanup_workspace_state(&self, meta_data: &MetaData) {
+        let referenced: HashSet<&str> = meta_data
+            .files
+            .iter()
+            .map(|entry| entry.encrypted_name.as_str())
+            .collect();
 
-/// 用旧密文备份恢复已经替换的文件，返回无法恢复的路径。
-fn restore_password_backups(replaced: &[(PathBuf, PathBuf)]) -> Vec<String> {
-    let mut errors = Vec::new();
-    for (original, backup) in replaced.iter().rev() {
-        if let Err(error) = fs::remove_file(original)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            errors.push(format!("{}: {}", original.display(), error));
-            continue;
+        let Ok(entries) = fs::read_dir(&self.workspace_path) else {
+            return;
+        };
+
+        let mut candidates = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let orphaned_ciphertext =
+                is_workspace_ciphertext_name(file_name) && !referenced.contains(file_name);
+            if !crate::fsutil::is_internal_temp_name(file_name) && !orphaned_ciphertext {
+                continue;
+            }
+
+            candidates.push(entry.path());
         }
-        if let Err(error) = fs::rename(backup, original) {
-            errors.push(format!("{}: {}", original.display(), error));
+
+        if candidates.is_empty() {
+            return;
         }
+
+        // 先稳定当前元数据快照，再删除任何旧密文；否则断电后旧元数据可能重新出现，
+        // 而它引用的文件已经被删除。
+        if crate::fsutil::sync_directory(&self.workspace_path).is_err() {
+            return;
+        }
+
+        for path in candidates {
+            let _ = fs::remove_file(path);
+        }
+        let _ = crate::fsutil::sync_directory(&self.workspace_path);
     }
-    errors
 }
 
 /// 使用 Argon2id 从用户密码和容器盐值派生零化主密钥。
@@ -832,10 +836,18 @@ fn generate_random_bytes<const N: usize>() -> [u8; N] {
     bytes
 }
 
-/// 生成 8 字节随机 ID，并编码为 16 个十六进制字符。
+/// 生成 16 字节随机 ID，并编码为 32 个十六进制字符。
 fn generate_random_id() -> String {
-    let bytes = generate_random_bytes::<8>();
+    let bytes = generate_random_bytes::<16>();
     hex::encode(bytes)
+}
+
+/// 判断文件名是否是工作区当前格式生成的随机密文名。
+fn is_workspace_ciphertext_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".enc") else {
+        return false;
+    };
+    stem.len() == 32 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// 校验并规范化容器内相对路径，统一使用 `/` 分隔。
@@ -874,19 +886,84 @@ pub fn normalize_container_path(path: &str) -> Result<String, VeilError> {
     Ok(parts.join("/"))
 }
 
-/// 先写同目录临时文件，再通过原子替换更新目标文件。
-///
-/// # 错误
-/// 临时文件创建、写入、同步或替换失败时返回 I/O 错误。
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), VeilError> {
-    // 临时文件与目标同目录，避免跨卷移动，并兼容 Windows 的覆盖语义。
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
-    temp_file.write_all(data)?;
-    temp_file.as_file().sync_all()?;
-    temp_file
-        .persist(path)
-        .map_err(|error| VeilError::Io(error.error))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kdf;
+    use tempfile::TempDir;
 
-    Ok(())
+    /// 验证双数据密钥状态可以同时读取迁移前和迁移后的文件。
+    #[test]
+    fn mixed_data_keys_fall_back_to_old_key() {
+        kdf::enable_fast_test_kdf();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_path = temp_dir.path().join("mixed-data-keys");
+        let manager = WorkspaceManager::new(workspace_path.clone());
+        let password = "test-password";
+
+        manager
+            .init_container("mixed-data-keys", "default", password)
+            .unwrap();
+        let first = temp_dir.path().join("first.txt");
+        let second = temp_dir.path().join("second.txt");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        manager
+            .add_files(
+                &[
+                    AddFileSpec::new(&first, "first.txt"),
+                    AddFileSpec::new(&second, "second.txt"),
+                ],
+                password,
+            )
+            .unwrap();
+
+        let (mut meta_data, header, master_key) =
+            manager.read_meta_context(password).unwrap();
+        let old_key = meta_data.data_keys[0];
+        let new_key = generate_random_bytes::<DATA_KEY_LEN>();
+        meta_data.data_keys = vec![new_key, old_key];
+
+        let first_index = meta_data
+            .files
+            .iter()
+            .position(|entry| entry.original_name == "first.txt")
+            .unwrap();
+        let first_entry = meta_data.files[first_index].clone();
+        let old_encrypted_path = workspace_path.join(&first_entry.encrypted_name);
+        let new_nonce = file_ops::generate_base_nonce();
+        let new_encrypted_name = format!("{}.enc", generate_random_id());
+        file_ops::rewrite_file_streaming(
+            &old_key,
+            &new_key,
+            &old_encrypted_path,
+            &workspace_path.join(&new_encrypted_name),
+            &first_entry.nonce,
+            &new_nonce,
+            first_entry.size,
+        )
+        .unwrap();
+        meta_data.files[first_index] = FileEntry::new(
+            new_encrypted_name,
+            first_entry.original_name,
+            first_entry.size,
+            new_nonce,
+        );
+        manager
+            .write_meta(&header, &meta_data, &master_key)
+            .unwrap();
+        manager.cleanup_workspace_state(&meta_data);
+
+        let first_output = temp_dir.path().join("first-out.txt");
+        let second_output = temp_dir.path().join("second-out.txt");
+        manager
+            .extract_file("first.txt", &first_output, password)
+            .unwrap();
+        manager
+            .extract_file("second.txt", &second_output, password)
+            .unwrap();
+
+        assert_eq!(fs::read(first_output).unwrap(), b"first");
+        assert_eq!(fs::read(second_output).unwrap(), b"second");
+    }
 }

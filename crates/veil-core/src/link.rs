@@ -134,17 +134,12 @@ impl VeilLink {
     pub fn save(&self, path: &Path) -> Result<(), VeilError> {
         self.validate()?;
 
-        // 链接允许写入尚不存在的子目录，父目录按需创建。
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let content = toml::to_string_pretty(self).map_err(|error| {
             VeilError::SerializationError(format!("序列化链接文件失败: {}", error))
         })?;
 
-        // 链接可能包含路径元数据，Unix 下强制仅当前用户可读写。
-        crate::temp::write_private_file(path, content.as_bytes())?;
+        // 链接允许写入尚不存在的子目录；原子替换保证中断时不会留下半截链接。
+        crate::fsutil::atomic_write(path, content.as_bytes())?;
         Ok(())
     }
 

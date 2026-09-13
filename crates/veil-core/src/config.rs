@@ -14,7 +14,6 @@ use crate::workspace::WorkspaceConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// `~/.veil/config.toml` 的根配置。
@@ -499,29 +498,18 @@ impl GlobalConfig {
         self.validate_container_ids()?;
         let path = Self::config_path()?;
 
-        // 配置目录可能尚未存在，保存前按需创建。
+        // 配置目录可能尚未存在，保存前按需创建并持久化目录链。
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
+            crate::fsutil::create_dir_all_durable(parent)
                 .map_err(|e| VeilError::ConfigError(format!("创建配置目录失败: {}", e)))?;
         }
 
         let content = toml::to_string_pretty(self)
             .map_err(|e| VeilError::ConfigError(format!("序列化配置失败: {}", e)))?;
 
-        // 同目录临时文件加原子替换，既避免半截配置，也兼容 Windows 覆盖语义。
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut temp_file = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| VeilError::ConfigError(format!("创建临时配置文件失败: {}", e)))?;
-        temp_file
-            .write_all(content.as_bytes())
-            .map_err(|e| VeilError::ConfigError(format!("写入临时文件失败: {}", e)))?;
-        temp_file
-            .as_file()
-            .sync_all()
-            .map_err(|e| VeilError::ConfigError(format!("同步临时文件失败: {}", e)))?;
-        temp_file
-            .persist(&path)
-            .map_err(|e| VeilError::ConfigError(format!("替换配置文件失败: {}", e.error)))?;
+        // 同目录临时文件加原子替换，并在返回前同步父目录。
+        crate::fsutil::atomic_write(&path, content.as_bytes())
+            .map_err(|e| VeilError::ConfigError(format!("保存配置文件失败: {}", e)))?;
 
         Ok(())
     }
@@ -1109,10 +1097,10 @@ impl GlobalConfig {
         }
 
         if let Some(parent) = link_path.parent() {
-            fs::create_dir_all(parent)?;
+            crate::fsutil::create_dir_all_durable(parent)?;
         }
         // 恢复的是捕获时的原始字节，避免 TOML 重新序列化造成内容漂移。
-        crate::temp::write_private_file(&link_path, &raw)?;
+        crate::fsutil::atomic_write(&link_path, &raw)?;
 
         if let Some(existing) = self
             .links

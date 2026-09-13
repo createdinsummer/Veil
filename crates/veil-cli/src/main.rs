@@ -230,6 +230,9 @@ enum Commands {
             value_name = "密码"
         )]
         new_password: Option<String>,
+        /// 轮换数据主密钥并逐个重新加密全部文件。
+        #[arg(short = 'f', long = "full", visible_alias = "reencrypt")]
+        full: bool,
     },
 
     /// 打开交互式容器命令会话。
@@ -568,6 +571,7 @@ fn build_localized_command() -> clap::Command {
                 a.value_name(v_password)
                     .help(i18n::t("help.passwd.new_password"))
             })
+            .mut_arg("full", |a| a.help(i18n::t("help.passwd.full")))
     });
 
     // --- shell ---
@@ -1096,11 +1100,12 @@ fn main() {
             new_password_pos,
             password,
             new_password,
+            full,
         } => {
             let container = require_container(container, "passwd");
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
-            commands::passwd_workspace::run_workspace(&container, old_pwd, new_pwd)
+            commands::passwd_workspace::run_workspace(&container, old_pwd, new_pwd, full)
         }
         // shell 在密码验证后进入长期交互循环。
         Commands::Shell {

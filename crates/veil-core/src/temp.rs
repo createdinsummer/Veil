@@ -104,6 +104,14 @@ pub fn write_private_file(path: &Path, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// 以私有临时文件加原子替换的方式写入完整内容。
+///
+/// 与 [`write_private_file`] 不同，本函数不会直接创建最终目标；进程在写入过程中
+/// 中断时，目标路径只会保留旧版本，不会看到半截新内容。
+pub fn write_private_file_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    crate::fsutil::atomic_write(path, data)
+}
+
 /// 生成进程内唯一的临时文件名，并在可行时保留原扩展名。
 fn unique_temp_name(virtual_path: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);

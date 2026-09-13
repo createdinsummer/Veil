@@ -75,25 +75,36 @@ impl Container {
     /// - `Err(VeilError)`：私钥保护、Header 写入、空索引提交或文件同步失败。
     pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>, cli_version: &str) -> Result<Container> {
         let passphrase = passphrase.into();
+        let final_path = path.as_ref().to_path_buf();
+        let parent = final_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+
         // 每创建一个容器就生成独立 x25519 身份，后续所有 blob 共用公钥加密。
         let key_pair = age::x25519::Identity::generate();
         let cip_pri_key = encrypt_pri_key(&key_pair, passphrase)?;
 
-        // 先建立仅含 Header 的文件，再由 commit 追加空目录树。
+        // 先在最终路径的同目录临时文件中完成整个容器，最后原子发布正式路径。
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
         {
-            let file = crate::temp::create_private_file(path.as_ref())?;
-            let mut writer = BufWriter::new(file);
+            let mut writer = BufWriter::new(temp_file.as_file_mut());
             format::write_header(&mut writer, cli_version, &cip_pri_key, crate::kdf::KdfType::Argon2id)?;
             writer.flush()?;
         }
 
-        let container = Container {
-            path: path.as_ref().to_path_buf(),
+        let mut container = Container {
+            path: temp_file.path().to_path_buf(),
             key_pair,
             root: Tree::new(),
             cli_version: cli_version.to_string(),
         };
         container.commit()?;
+        temp_file
+            .persist_noclobber(&final_path)
+            .map_err(|error| VeilError::Io(error.error))?;
+        container.path = final_path;
+        crate::fsutil::sync_parent(&container.path)?;
         Ok(container)
     }
 
@@ -266,7 +277,8 @@ impl Container {
     /// 修改容器密码。
     ///
     /// 新密码只重新保护 Header 中的容器私钥，已写入的 blob 和目录索引无需重新加密。
-    /// 新旧 Header 长度必须一致；长度变化时拒绝原地覆盖，避免破坏后续数据偏移。
+    /// 新旧 Header 长度必须一致，以保持所有 blob 偏移不变。更新在同目录副本上完成，
+    /// 完整同步后再原子替换原文件，因此进程中断不会留下半截 Header。
     ///
     /// # 参数
     /// - `new_passphrase`: 新密码（`impl Into<SecretString>`，可直接传 `String`）
@@ -276,8 +288,8 @@ impl Container {
     pub fn change_password(&self, new_passphrase: impl Into<SecretString>) -> Result<()> {
         let new_cip_pri_key = encrypt_pri_key(&self.key_pair, new_passphrase.into())?;
 
-        let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        let old_header = format::read_header(&mut file)?;
+        let mut source = File::open(&self.path)?;
+        let old_header = format::read_header(&mut source)?;
 
         let mut new_header_bytes = Vec::new();
         format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key, crate::kdf::KdfType::Argon2id)?;
@@ -291,13 +303,25 @@ impl Container {
         };
 
         if new_header_bytes.len() != old_header_len {
-            return Err(VeilError::Format("密文私钥长度变化，无法原地改密码".into()));
+            return Err(VeilError::Format("密文私钥长度变化，无法安全修改密码".into()));
         }
 
-        // CLI 版本与密文私钥长度均未变化，可安全原位覆盖。
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&new_header_bytes)?;
-        file.flush()?;
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        source.seek(SeekFrom::Start(0))?;
+        std::io::copy(&mut source, &mut replacement)?;
+        replacement.seek(SeekFrom::Start(0))?;
+        replacement.write_all(&new_header_bytes)?;
+        replacement.as_file().sync_all()?;
+        replacement
+            .persist(&self.path)
+            .map_err(|error| VeilError::Io(error.error))?;
+        let _ = crate::fsutil::sync_directory(parent);
+
         Ok(())
     }
 
@@ -555,42 +579,50 @@ impl Container {
         let meta = self.file_meta(virtual_path)?;
         let total_size = meta.size;
 
-        // 输出父目录缺失时自动补齐，满足一次性导出到嵌套路径的使用方式。
-        if let Some(parent) = dest.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
+        // 导出先写同目录临时文件；完整通过内容哈希后才原子替换目标文件。
+        let parent = dest
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::fsutil::create_dir_all_durable(parent)?;
 
-        // BufWriter 降低小块写盘次数，读取端仍按固定缓冲区流式解密。
         let mut reader = self.open_blob_reader(meta)?;
-        let mut writer = BufWriter::new(File::create(dest)?);
+        let mut replacement = tempfile::Builder::new()
+            .prefix(".veil-export-")
+            .tempfile_in(parent)?;
 
         // 边读边校验 hash
         let mut hasher = blake3::Hasher::new();
         let mut buffer = [0u8; 64 * 1024];
         let mut exported = 0u64;
 
-        // 每轮同时写盘、更新哈希并报告累计进度。
-        loop {
-            let n = reader.read(&mut buffer)?;
-            if n == 0 {
-                break;
+        {
+            // BufWriter 降低小块写盘次数，读取端仍按固定缓冲区流式解密。
+            let mut writer = BufWriter::new(replacement.as_file_mut());
+            loop {
+                let n = reader.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..n]);
+                writer.write_all(&buffer[..n])?;
+                exported += n as u64;
+                progress_callback(exported, total_size);
             }
-            hasher.update(&buffer[..n]);
-            writer.write_all(&buffer[..n])?;
-            exported += n as u64;
-            progress_callback(exported, total_size);
+            writer.flush()?;
         }
 
-        writer.flush()?;
-
-        // 只有完整读取并通过哈希校验后，目标文件才被视为有效导出结果。
+        // 只有完整读取并通过哈希校验后，临时结果才允许替换目标文件。
         let hash: [u8; 32] = hasher.finalize().into();
         if hash != meta.content_hash {
-            std::fs::remove_file(dest)?; // 校验失败，删除损坏文件
             return Err(VeilError::Format("内容哈希不匹配（数据损坏？）".into()));
         }
+
+        replacement.as_file().sync_all()?;
+        replacement
+            .persist(dest)
+            .map_err(|error| VeilError::Io(error.error))?;
+        let _ = crate::fsutil::sync_directory(parent);
 
         Ok(())
     }
@@ -631,11 +663,7 @@ impl Container {
         // 完整路径直接拼接导出目录，从而保留容器内的嵌套结构。
         for (path, _meta) in index::list_files(&self.root) {
             let dest = out_dir.join(&path);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let plaintext = self.read_file(&path)?;
-            std::fs::write(&dest, plaintext)?;
+            self.extract_file(&path, dest)?;
         }
         Ok(())
     }
@@ -748,6 +776,9 @@ impl Container {
         let mut file = OpenOptions::new().read(true).write(true).open(&self.path)?;
         let index_offset = file.seek(SeekFrom::End(0))?;
         file.write_all(&index_cipher)?;
+        // Index 先落盘，Footer 最后写；Footer 一旦完整可见，它引用的 Index 必然已
+        // 完成持久化。中断发生在两条 fsync 之间时，旧 Footer 仍可恢复上一快照。
+        file.sync_all()?;
         format::write_footer(&mut file, index_offset, index_cipher.len() as u64)?;
         file.sync_all()?;
         Ok(())
@@ -940,6 +971,18 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// 验证创建容器不会覆盖已有路径。
+    #[test]
+    fn create_does_not_overwrite_existing_path() {
+        let path = temp_path("existing.veil");
+        std::fs::write(&path, b"sentinel").unwrap();
+
+        assert!(Container::create(&path, pass(), test_cli_version()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"sentinel");
+
+        std::fs::remove_file(&path).ok();
+    }
+
     /// 验证添加文件后能按原字节读回。
     #[test]
     fn add_read_roundtrip() {
@@ -1032,7 +1075,9 @@ mod tests {
         let path = temp_path("chpw.veil");
         let mut container = Container::create(&path, "old-pass".to_string(), test_cli_version()).unwrap();
         container.add_file("f.txt", b"data").unwrap();
+        let size_before = std::fs::metadata(&path).unwrap().len();
         container.change_password("new-pass".to_string()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size_before);
 
         assert!(Container::open(&path, "old-pass".to_string()).is_err());
         let reopened = Container::open(&path, "new-pass".to_string()).unwrap();
