@@ -80,7 +80,6 @@ pub enum ErrorCode {
     VolumeUnavailable = 9016,
     VeilIdConflict = 9017,
     VeilNameAmbiguous = 9018,
-    Lock = 9019,
 }
 
 /// 错误码对应的模板和进程退出码。
@@ -312,7 +311,6 @@ impl ErrorCode {
                 "error.core_veil_name_ambiguous",
                 1,
             ),
-            Self::Lock => Self::define(value, "LOCK", "error.core_lock", 1),
         }
     }
 
@@ -461,7 +459,6 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
             VeilError::VeilIdConflict(error) => (ErrorCode::VeilIdConflict, error),
             VeilError::VeilNameAmbiguous(error) => (ErrorCode::VeilNameAmbiguous, error),
-            VeilError::LockError(error) => (ErrorCode::Lock, error),
         };
 
         Self::coded(code).param("error", detail)

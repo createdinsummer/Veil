@@ -598,7 +598,7 @@ impl FileEntry {
 /// 生成 `file-` 前缀的随机逻辑文件身份。
 ///
 /// # Panics
-/// 系统随机源不可用时 panic，因为文件身份是后续锁和元数据更新的必要前提。
+/// 系统随机源不可用时 panic，因为文件身份是后续版本和元数据更新的必要前提。
 pub fn generate_file_id() -> String {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).expect("无法生成文件 ID");

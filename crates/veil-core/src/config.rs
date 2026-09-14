@@ -8,7 +8,6 @@
 
 use crate::error::VeilError;
 use crate::link::{LINK_EXTENSION, VeilLink};
-use crate::lock::{self, LockMode};
 use crate::metadata::MetaHeader;
 use crate::volume::{self, VolumeInfo};
 use crate::work::WorkConfig;
@@ -475,7 +474,6 @@ impl GlobalConfig {
             return Ok(Self::default());
         }
 
-        let _lock = lock::acquire_config_lock(&path, LockMode::Shared, lock::DEFAULT_LOCK_TIMEOUT)?;
         let content = fs::read_to_string(&path)
             .map_err(|e| VeilError::ConfigError(format!("读取配置文件失败: {}", e)))?;
 
@@ -500,8 +498,6 @@ impl GlobalConfig {
     pub fn save(&self) -> Result<(), VeilError> {
         self.validate_veil_ids()?;
         let path = Self::config_path()?;
-        let _lock =
-            lock::acquire_config_lock(&path, LockMode::Exclusive, lock::DEFAULT_LOCK_TIMEOUT)?;
 
         // 配置目录可能尚未存在，保存前按需创建并持久化目录链。
         if let Some(parent) = path.parent() {
@@ -1117,8 +1113,6 @@ impl GlobalConfig {
 /// 读取 `veil_dir/.veil-meta` 明文头，用于确认 Veil 稳定身份。
 fn read_veil_header(veil_dir: &Path) -> Result<MetaHeader, VeilError> {
     let meta_path = veil_dir.join(".veil-meta");
-    let _metadata_lock =
-        lock::acquire_metadata_lock(veil_dir, LockMode::Shared, lock::DEFAULT_LOCK_TIMEOUT)?;
     let bytes = fs::read(&meta_path).map_err(|error| {
         VeilError::ConfigError(format!(
             "读取容器元数据失败 {}: {}",

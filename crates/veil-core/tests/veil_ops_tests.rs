@@ -1,12 +1,8 @@
 //! 工作区功能集成测试
 
 use std::fs;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 use tempfile::TempDir;
 use veil_core::kdf;
-use veil_core::lock::{self, LockMode};
 use veil_core::metadata::{AlgorithmId, MetaHeader};
 use veil_core::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
 
@@ -195,30 +191,6 @@ fn test_add_file_destination_replaces_existing() {
         .extract_file("nested/renamed.txt", &output, password)
         .unwrap();
     assert_eq!(fs::read_to_string(output).unwrap(), "second");
-}
-
-/// 验证 Veil 写锁会阻塞读取，释放后读取继续执行。
-#[test]
-fn test_veil_write_lock_blocks_metadata_read() {
-    kdf::enable_fast_test_kdf();
-    let temp_dir = TempDir::new().unwrap();
-    let veil_dir = temp_dir.path().join("test-veil");
-    let manager = VeilManager::new(veil_dir.clone());
-    let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
-
-    let write_lock =
-        lock::acquire_veil_lock(&veil_dir, LockMode::Exclusive, lock::DEFAULT_LOCK_TIMEOUT)
-            .unwrap();
-    let (sender, receiver) = mpsc::channel();
-    let reader = thread::spawn(move || {
-        sender.send(manager.read_meta(password).is_ok()).unwrap();
-    });
-
-    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
-    drop(write_lock);
-    assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
-    reader.join().unwrap();
 }
 
 /// 验证错误密码在任何密文写入前失败。

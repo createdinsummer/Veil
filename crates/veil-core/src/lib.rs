@@ -13,7 +13,6 @@ pub mod index;
 pub mod kdf;
 pub mod keys;
 pub mod link;
-pub mod lock;
 pub mod metadata;
 pub mod mime;
 pub mod single_file_veil;

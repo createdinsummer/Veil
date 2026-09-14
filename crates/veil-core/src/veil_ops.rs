@@ -9,7 +9,6 @@
 use crate::error::VeilError;
 use crate::file_ops::{self, DATA_KEY_LEN};
 use crate::kdf;
-use crate::lock::{self, FileLockGuard, LockMode};
 use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader};
 use chacha20poly1305::{
     ChaCha20Poly1305,
@@ -103,40 +102,6 @@ impl VeilManager {
         Ok(())
     }
 
-    /// 获取整个 Veil 的共享锁，供读取快照和文件内容使用。
-    fn acquire_read_lock(&self) -> Result<FileLockGuard, VeilError> {
-        lock::acquire_veil_lock(&self.veil_dir, LockMode::Shared, lock::DEFAULT_LOCK_TIMEOUT)
-    }
-
-    /// 获取整个 Veil 的排他锁，串行化同一 Veil 的写入操作。
-    fn acquire_write_lock(&self) -> Result<FileLockGuard, VeilError> {
-        lock::acquire_veil_lock(
-            &self.veil_dir,
-            LockMode::Exclusive,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )
-    }
-
-    /// 获取单个逻辑文件的共享锁。
-    fn acquire_file_read_lock(&self, file_id: &str) -> Result<FileLockGuard, VeilError> {
-        lock::acquire_file_lock(
-            &self.veil_dir,
-            file_id,
-            LockMode::Shared,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )
-    }
-
-    /// 获取单个逻辑文件的排他锁。
-    fn acquire_file_write_lock(&self, file_id: &str) -> Result<FileLockGuard, VeilError> {
-        lock::acquire_file_lock(
-            &self.veil_dir,
-            file_id,
-            LockMode::Exclusive,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )
-    }
-
     /// 为新 Veil 生成稳定 ID 并初始化目录。
     ///
     /// # 错误
@@ -169,7 +134,6 @@ impl VeilManager {
         password: &str,
     ) -> Result<MetaData, VeilError> {
         self.verify_veil_id(veil_id)?;
-        let _write_lock = self.acquire_write_lock()?;
 
         crate::fsutil::create_dir_all_durable(&self.veil_dir)
             .map_err(|e| VeilError::WorkError(format!("创建 Veil 目录失败: {}", e)))?;
@@ -195,7 +159,7 @@ impl VeilManager {
 
         let master_key = derive_master_key(password, &salt)?;
 
-        self.write_meta_unlocked(&header, &meta_data, &master_key)?;
+        self.write_meta(&header, &meta_data, &master_key)?;
         // 初始化没有可回退的旧快照，目录同步失败时由调用方整体回滚。
         crate::fsutil::sync_directory(&self.veil_dir)?;
 
@@ -210,25 +174,11 @@ impl VeilManager {
         Ok(self.read_meta_context(password)?.0)
     }
 
-    /// 获取读锁后读取密码上下文。
+    /// 读取密码上下文，同时返回解密后的元数据、明文头部和零化密码保护密钥。
     fn read_meta_context(
         &self,
         password: &str,
     ) -> Result<(MetaData, MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
-        let _read_lock = self.acquire_read_lock()?;
-        self.read_meta_context_unlocked(password)
-    }
-
-    /// 在调用方已经持有 Veil 锁时读取密码上下文。
-    fn read_meta_context_unlocked(
-        &self,
-        password: &str,
-    ) -> Result<(MetaData, MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
-        let _metadata_lock = lock::acquire_metadata_lock(
-            &self.veil_dir,
-            LockMode::Shared,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )?;
         let meta_path = self.veil_dir.join(".veil-meta");
         if !meta_path.exists() {
             return Err(VeilError::InvalidFormat("元数据文件不存在".to_string()));
@@ -257,12 +207,6 @@ impl VeilManager {
     /// # 错误
     /// `.veil-meta` 无法读取或头部格式无效时返回错误。
     pub fn read_meta_header(&self) -> Result<MetaHeader, VeilError> {
-        let _read_lock = self.acquire_read_lock()?;
-        let _metadata_lock = lock::acquire_metadata_lock(
-            &self.veil_dir,
-            LockMode::Shared,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )?;
         let meta_path = self.veil_dir.join(".veil-meta");
         let bytes = fs::read(&meta_path).map_err(VeilError::Io)?;
         let header = MetaHeader::from_bytes(&bytes)?;
@@ -274,18 +218,12 @@ impl VeilManager {
     ///
     /// # 错误
     /// 头部或 JSON 序列化、内容加密、临时文件写入或重命名失败时返回错误。
-    /// 在调用方已经持有 Veil 写锁时提交元数据。
-    fn write_meta_unlocked(
+    fn write_meta(
         &self,
         header: &MetaHeader,
         meta_data: &MetaData,
         master_key: &[u8; 32],
     ) -> Result<(), VeilError> {
-        let _metadata_lock = lock::acquire_metadata_lock(
-            &self.veil_dir,
-            LockMode::Exclusive,
-            lock::DEFAULT_LOCK_TIMEOUT,
-        )?;
         self.verify_veil_id(&header.veil_id)?;
         meta_data.primary_data_key()?;
         let meta_path = self.veil_dir.join(".veil-meta");
@@ -321,13 +259,12 @@ impl VeilManager {
         password: &str,
         update_fn: impl FnOnce(&mut MetaData),
     ) -> Result<(), VeilError> {
-        let _write_lock = self.acquire_write_lock()?;
         // 先在内存中完成调用方修改；读取上下文时只执行一次密钥派生。
-        let (mut meta_data, header, master_key) = self.read_meta_context_unlocked(password)?;
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
 
         update_fn(&mut meta_data);
 
-        self.write_meta_unlocked(&header, &meta_data, &master_key)?;
+        self.write_meta(&header, &meta_data, &master_key)?;
 
         Ok(())
     }
@@ -365,9 +302,8 @@ impl VeilManager {
             return Ok(Vec::new());
         }
 
-        let _write_lock = self.acquire_write_lock()?;
         // 先验证密码并解密元数据；这一步发生在任何文件写入之前。
-        let (mut meta_data, header, master_key) = self.read_meta_context_unlocked(password)?;
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
 
         // 同一批次内相同目标路径采用“后者覆盖前者”，避免重复元数据条目。
         let mut deduplicated = Vec::with_capacity(files.len());
@@ -385,7 +321,6 @@ impl VeilManager {
 
         let mut written = Vec::new();
         let mut new_entries = Vec::new();
-        let mut file_locks = Vec::new();
         let data_key = *meta_data.primary_data_key()?;
         let transaction = (|| -> Result<(), VeilError> {
             for file in &deduplicated {
@@ -393,7 +328,6 @@ impl VeilManager {
                     .find_file(&file.target)
                     .map(|entry| entry.file_id.clone())
                     .unwrap_or_else(crate::metadata::generate_file_id);
-                file_locks.push(self.acquire_file_write_lock(&file_id)?);
                 let encrypted_name = format!("{}.enc", generate_random_id());
                 let file_nonce = file_ops::generate_base_nonce();
                 let encrypted_path = self.veil_dir.join(&encrypted_name);
@@ -423,7 +357,7 @@ impl VeilManager {
                 meta_data.add_file(entry.clone());
             }
 
-            self.write_meta_unlocked(&header, &meta_data, &master_key)?;
+            self.write_meta(&header, &meta_data, &master_key)?;
 
             Ok(())
         })();
@@ -454,15 +388,13 @@ impl VeilManager {
         output_path: &Path,
         password: &str,
     ) -> Result<(), VeilError> {
-        let _read_lock = self.acquire_read_lock()?;
-        let (meta_data, _header, _master_key) = self.read_meta_context_unlocked(password)?;
+        let (meta_data, _header, _master_key) = self.read_meta_context(password)?;
 
         let entry = meta_data
             .find_file(original_name)
             .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?;
 
         // 元数据只暴露原始名称，实际读取必须通过条目保存的加密文件名。
-        let _file_lock = self.acquire_file_read_lock(&entry.file_id)?;
         let encrypted_path = self.veil_dir.join(&entry.encrypted_name);
         let key_index = file_ops::detect_key_index(
             &encrypted_path,
@@ -510,8 +442,7 @@ impl VeilManager {
         }
 
         let normalized = normalize_veil_dir(original_name)?;
-        let _write_lock = self.acquire_write_lock()?;
-        let (mut meta_data, header, master_key) = self.read_meta_context_unlocked(password)?;
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
         let exact_file = meta_data.find_file(&normalized).cloned();
         let directory_prefix = format!("{normalized}/");
         let has_children = meta_data
@@ -532,19 +463,10 @@ impl VeilManager {
             RemovedPathKind::File
         };
 
-        let mut file_locks = Vec::new();
-        for entry in &meta_data.files {
-            if entry.original_name == normalized
-                || entry.original_name.starts_with(&directory_prefix)
-            {
-                file_locks.push(self.acquire_file_write_lock(&entry.file_id)?);
-            }
-        }
-
         meta_data.files.retain(|entry| {
             entry.original_name != normalized && !entry.original_name.starts_with(&directory_prefix)
         });
-        self.write_meta_unlocked(&header, &meta_data, &master_key)?;
+        self.write_meta(&header, &meta_data, &master_key)?;
         self.cleanup_work_state(&meta_data);
 
         Ok(kind)
@@ -568,10 +490,9 @@ impl VeilManager {
             return Err(VeilError::WorkError("新密码不能为空".to_string()));
         }
 
-        let _write_lock = self.acquire_write_lock()?;
-        let (meta_data, old_header, _) = self.read_meta_context_unlocked(old_password)?;
+        let (meta_data, old_header, _) = self.read_meta_context(old_password)?;
         let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
-        self.write_meta_unlocked(&new_header, &meta_data, &new_master_key)?;
+        self.write_meta(&new_header, &meta_data, &new_master_key)?;
         Ok(())
     }
 
@@ -589,9 +510,7 @@ impl VeilManager {
             return Err(VeilError::WorkError("新密码不能为空".to_string()));
         }
 
-        let _write_lock = self.acquire_write_lock()?;
-        let (mut meta_data, old_header, old_master_key) =
-            self.read_meta_context_unlocked(old_password)?;
+        let (mut meta_data, old_header, old_master_key) = self.read_meta_context(old_password)?;
 
         // 已经处于双密钥状态时视为继续未完成的迁移，不生成第三把密钥。
         if meta_data.data_keys.len() == 1 {
@@ -604,14 +523,10 @@ impl VeilManager {
 
         // 先让双密钥状态成为可恢复的提交点。文件内容读写统一交给 file_ops，
         // veil_ops 只负责元数据事务和迁移顺序。
-        self.write_meta_unlocked(&old_header, &meta_data, &old_master_key)?;
+        self.write_meta(&old_header, &meta_data, &old_master_key)?;
 
         let active_data_key = meta_data.data_keys[0];
         let file_count = meta_data.files.len();
-        let mut file_locks = Vec::with_capacity(file_count);
-        for file_entry in &meta_data.files {
-            file_locks.push(self.acquire_file_write_lock(&file_entry.file_id)?);
-        }
 
         for index in 0..file_count {
             let file_entry = meta_data.files[index].clone();
@@ -649,7 +564,7 @@ impl VeilManager {
                 new_nonce,
             );
 
-            if let Err(error) = self.write_meta_unlocked(&old_header, &meta_data, &old_master_key) {
+            if let Err(error) = self.write_meta(&old_header, &meta_data, &old_master_key) {
                 let _ = fs::remove_file(&new_encrypted_path);
                 return Err(error);
             }
@@ -660,7 +575,7 @@ impl VeilManager {
         // 所有文件都已使用 active_data_key，可以丢弃旧密钥并把密码切换到新值。
         meta_data.data_keys.truncate(1);
         let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
-        self.write_meta_unlocked(&new_header, &meta_data, &new_master_key)?;
+        self.write_meta(&new_header, &meta_data, &new_master_key)?;
         self.cleanup_work_state(&meta_data);
 
         Ok(())
@@ -713,8 +628,7 @@ impl VeilManager {
         let destination = normalize_veil_dir(to)?;
         let destination_ends_with_separator = to.ends_with('/') || to.ends_with('\\');
 
-        let _write_lock = self.acquire_write_lock()?;
-        let (mut meta_data, header, master_key) = self.read_meta_context_unlocked(password)?;
+        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
         let source_prefix = format!("{source}/");
         let source_file = meta_data.find_file(&source).cloned();
         let source_children: Vec<_> = meta_data
@@ -785,13 +699,6 @@ impl VeilManager {
             return Err(VeilError::FileAlreadyExists(final_target));
         }
 
-        let mut file_locks = Vec::new();
-        for entry in meta_data.files.iter().filter(|entry| {
-            entry.original_name == source || entry.original_name.starts_with(&source_prefix)
-        }) {
-            file_locks.push(self.acquire_file_write_lock(&entry.file_id)?);
-        }
-
         match source_kind {
             MovedPathKind::File => {
                 let encrypted_name = source_file
@@ -816,7 +723,7 @@ impl VeilManager {
             }
         }
 
-        self.write_meta_unlocked(&header, &meta_data, &master_key)?;
+        self.write_meta(&header, &meta_data, &master_key)?;
         Ok((source_kind, final_target))
     }
 
@@ -1046,7 +953,7 @@ mod tests {
             new_nonce,
         );
         manager
-            .write_meta_unlocked(&header, &meta_data, &master_key)
+            .write_meta(&header, &meta_data, &master_key)
             .unwrap();
         manager.cleanup_work_state(&meta_data);
 

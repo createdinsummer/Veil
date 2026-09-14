@@ -382,10 +382,6 @@
     "zh": "容器名称不唯一: {error}",
     "en": "Veil name is ambiguous: {error}"
   },
-  "error.core_lock": {
-    "zh": "锁错误: {error}",
-    "en": "Lock error: {error}"
-  },
 
   "init.exists": {
     "zh": "容器文件已存在: {path}",

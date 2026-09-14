@@ -29,7 +29,6 @@
 
 use crate::error::VeilError;
 use crate::kdf;
-use crate::lock::{self, LockMode};
 use crate::metadata::{MetaData, MetaHeader};
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{
@@ -229,11 +228,9 @@ impl VeilPacker {
         encrypted_metadata: &[u8],
     ) -> Result<(), VeilError> {
         let veil_dir = veil_dir.as_ref();
-        let _read_lock =
-            lock::acquire_veil_lock(veil_dir, LockMode::Shared, lock::DEFAULT_LOCK_TIMEOUT)?;
         let current_metadata = std::fs::read(veil_dir.join(".veil-meta"))?;
         if current_metadata != encrypted_metadata {
-            return Err(VeilError::LockError(
+            return Err(VeilError::WorkError(
                 "元数据在打包前发生变化，请重新执行打包".to_string(),
             ));
         }
@@ -261,12 +258,6 @@ impl VeilPacker {
 
         for file_entry in &metadata.files {
             // 每个条目由头部和一段已加密文件字节组成，顺序与元数据清单一致。
-            let _file_lock = lock::acquire_file_lock(
-                veil_dir,
-                &file_entry.file_id,
-                LockMode::Shared,
-                lock::DEFAULT_LOCK_TIMEOUT,
-            )?;
             let encrypted_file_path = veil_dir.join(&file_entry.encrypted_name);
             let encrypted_data = std::fs::read(&encrypted_file_path)?;
 
@@ -384,8 +375,6 @@ impl VeilUnpacker {
         metadata: &MetaData,
     ) -> Result<(), VeilError> {
         let veil_dir = veil_dir.as_ref();
-        let _write_lock =
-            lock::acquire_veil_lock(veil_dir, LockMode::Exclusive, lock::DEFAULT_LOCK_TIMEOUT)?;
         let mut file = File::open(&self.package_path)?;
         let (header, _) = read_package_prefix(&mut file)?;
         crate::fsutil::create_dir_all_durable(veil_dir)?;

@@ -459,7 +459,7 @@ run_pair() {
     printf '%s\n' '--- 用例结束 ---'
 
     PASS_COUNT=$((PASS_COUNT + 1))
-    printf '[观察] %s 已完成，测试脚本未死锁\n' "$id"
+    printf '[观察] %s 已完成，测试脚本正常结束\n' "$id"
 }
 
 run_interactive_case() {

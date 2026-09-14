@@ -82,10 +82,6 @@ pub enum VeilError {
     /// 链接所依赖的磁盘卷当前不可用。
     #[error("卷不可用: {0}")]
     VolumeUnavailable(String),
-
-    /// 获取、等待、校验或释放锁失败。
-    #[error("锁错误: {0}")]
-    LockError(String),
 }
 
 /// `veil-core` 内部统一使用的结果类型别名。
