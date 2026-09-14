@@ -11,11 +11,7 @@ use veil_core::veil_package::VeilPacker;
 ///
 /// # 错误
 /// Veil 解析、输出路径检查、密码读取、元数据读取或打包写入失败时返回错误。
-pub fn run_veil(
-    veil_name: &str,
-    output_path: Option<&str>,
-    password: Option<String>,
-) -> Result<()> {
+pub fn run(veil_name: &str, output_path: Option<&str>, password: Option<String>) -> Result<()> {
     // 打包目标是解析后的 veil_dir，而不是输入链接文件。
     let resolved = super::resolve_veil(veil_name)?;
     let manager = super::veil_manager(&resolved);

@@ -7,20 +7,18 @@
 pub mod add;
 pub mod config;
 pub mod ex;
-pub mod exists_veil;
+pub mod exists;
+pub mod free;
 pub mod info;
 pub mod init;
 pub mod link;
+pub mod list;
+pub mod mv;
+pub mod pack;
+pub mod passwd;
 pub mod rm;
-
-// Veil 命令。
-pub mod free_veil;
-pub mod list_veil;
-pub mod mv_veil;
-pub mod pack_veil;
-pub mod passwd_veil;
-pub mod shell_veil;
-pub mod unpack_veil;
+pub mod shell;
+pub mod unpack;
 
 use std::path::PathBuf;
 use veil_core::config::{GlobalConfig, ResolvedVeil};

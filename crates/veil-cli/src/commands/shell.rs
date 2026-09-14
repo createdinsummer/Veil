@@ -12,7 +12,7 @@ use veil_core::veil_ops::VeilManager;
 ///
 /// # 错误
 /// Veil 解析、密码读取、标准输入输出操作或会话建立失败时返回错误。
-pub fn run_veil(veil_name: &str, password: Option<String>) -> Result<()> {
+pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // shell 生命周期内复用同一 VeilManager，避免每次命令重新解析链接。
     let resolved = super::resolve_veil(veil_name)?;
     let display_name = resolved.veil_name.clone();

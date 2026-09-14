@@ -10,7 +10,7 @@ use veil_core::veil_package::VeilUnpacker;
 use veil_core::work::{WorkConfig, allocate_veil_directory};
 
 /// 读取打包文件，验证密码后重建 `veil_dir`、配置记录和链接。
-pub fn run_veil(
+pub fn run(
     package_path: &str,
     veil_name: Option<&str>,
     work_name: Option<&str>,

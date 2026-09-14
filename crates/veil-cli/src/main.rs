@@ -996,7 +996,7 @@ fn main() {
             let pwd = password_pos.or(password);
 
             if let (Some(from), Some(to)) = (from, to) {
-                commands::mv_veil::run_veil(&veil, &from, &to, pwd)
+                commands::mv::run(&veil, &from, &to, pwd)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingSourceDestination, "mv");
             }
@@ -1009,7 +1009,7 @@ fn main() {
         } => {
             let veil = require_veil(veil, "free");
             let pwd = password_pos.or(password);
-            commands::free_veil::run_veil(&veil, pwd)
+            commands::free::run(&veil, pwd)
         }
         // ex 的输出路径是必填项，输入路径可为空并交由命令层报错。
         Commands::Ex {
@@ -1050,7 +1050,7 @@ fn main() {
         } => {
             let veil = require_veil(veil, "list");
             let pwd = password_pos.or(password);
-            commands::list_veil::run_veil(&veil, pwd)
+            commands::list::run(&veil, pwd)
         }
         // exists 只判断元数据中的文件或隐式目录是否存在。
         Commands::Exists {
@@ -1064,7 +1064,7 @@ fn main() {
                 exit_with_help(crate::error::ErrorCode::MissingCheckPath, "exists")
             });
             let pwd = password_pos.or(password);
-            match commands::exists_veil::run_veil(&veil, &path, pwd) {
+            match commands::exists::run(&veil, &path, pwd) {
                 Ok(true) => Ok(()),
                 Ok(false) => std::process::exit(1),
                 Err(error) => Err(error),
@@ -1082,7 +1082,7 @@ fn main() {
             let veil = require_veil(veil, "passwd");
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
-            commands::passwd_veil::run_veil(&veil, old_pwd, new_pwd, full)
+            commands::passwd::run(&veil, old_pwd, new_pwd, full)
         }
         // shell 在密码验证后进入长期交互循环。
         Commands::Shell {
@@ -1092,7 +1092,7 @@ fn main() {
         } => {
             let veil = require_veil(veil, "shell");
             let pwd = password_pos.or(password);
-            commands::shell_veil::run_veil(&veil, pwd)
+            commands::shell::run(&veil, pwd)
         }
         // pack 输出路径可选，默认值由命令实现根据容器名生成。
         Commands::Pack {
@@ -1103,7 +1103,7 @@ fn main() {
         } => {
             let veil = require_veil(veil, "pack");
             let pwd = password_pos.or(password);
-            commands::pack_veil::run_veil(&veil, output.as_deref(), pwd)
+            commands::pack::run(&veil, output.as_deref(), pwd)
         }
         // unpack 输入的 .veil 文件必填，其余名称、工作区和链接路径均可选。
         Commands::Unpack {
@@ -1117,7 +1117,7 @@ fn main() {
             let file = file
                 .unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingVeil, "unpack"));
             let pwd = password_pos.or(password);
-            commands::unpack_veil::run_veil(
+            commands::unpack::run(
                 &file,
                 name.as_deref(),
                 work.as_deref(),

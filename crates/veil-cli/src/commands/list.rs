@@ -7,7 +7,7 @@ use colored::Colorize;
 ///
 /// # 错误
 /// 容器解析、密码读取或元数据解密失败时返回错误。
-pub fn run_veil(veil_name: &str, password: Option<String>) -> Result<()> {
+pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // list 只读取容器元数据，不需要打开每个文件 blob。
     let resolved = super::resolve_veil(veil_name)?;
     let manager = super::veil_manager(&resolved);

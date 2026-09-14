@@ -10,7 +10,7 @@ use colored::Colorize;
 ///
 /// # 错误
 /// 容器解析、旧密码验证、新密码确认或重新加密失败时返回错误。
-pub fn run_veil(
+pub fn run(
     veil_name: &str,
     old_password: Option<String>,
     new_password: Option<String>,

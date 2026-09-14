@@ -9,7 +9,7 @@ use colored::Colorize;
 ///
 /// # 错误
 /// 容器解析、密码读取、源不存在、目标冲突、目录循环或元数据写回失败时返回错误。
-pub fn run_veil(veil_name: &str, from: &str, to: &str, password: Option<String>) -> Result<()> {
+pub fn run(veil_name: &str, from: &str, to: &str, password: Option<String>) -> Result<()> {
     // mv 只改变元数据中的原始路径，不复制或重新加密 blob。
     let resolved = super::resolve_veil(veil_name)?;
     let manager = super::veil_manager(&resolved);
