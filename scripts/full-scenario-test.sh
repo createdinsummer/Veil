@@ -1246,7 +1246,7 @@ run_persistence_artifact_section() {
         }
     ')
     printf '%s\n' "$META_TLV_FIELDS" > "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
-    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=3" \
+    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=4" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
     assert_contains "CONF-09-algorithm" "元数据 TLV 算法标识正确" "algorithm=2" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"

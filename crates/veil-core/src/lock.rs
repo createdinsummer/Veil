@@ -1,7 +1,7 @@
 //! Veil 锁模块。
 //!
 //! 本模块是锁的唯一操作入口，统一负责：
-//! - `config.lock`、`.veil-meta.lock` 和 `.enc` 文件锁；
+//! - `config.lock`、`.veil.lock`、`.veil-meta.lock` 和逻辑文件锁；
 //! - 共享锁和排他锁的获取、等待与释放；
 //! - 锁令牌、PID、进程启动时间和主机标识；
 //! - 锁记录的创建、校验和陈旧锁判断。
@@ -25,6 +25,9 @@ use crate::error::{Result, VeilError};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+
+/// 默认等待锁的时间。
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 锁记录对应的逻辑资源类型。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,6 +205,81 @@ pub struct FileLockGuard {
     mode: LockMode,
     lock_token: String,
     released: bool,
+}
+
+/// 返回配置文件的短锁路径。
+///
+/// 调用方传入 `config.toml`，本函数生成同目录下的 `config.lock`。
+pub fn config_lock_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("config.lock")
+}
+
+/// 返回同一个 Veil 的写入串行锁路径。
+pub fn veil_lock_path(veil_dir: &Path) -> PathBuf {
+    veil_dir.join(".veil.lock")
+}
+
+/// 返回 `.veil-meta` 的短锁路径。
+pub fn metadata_lock_path(veil_dir: &Path) -> PathBuf {
+    veil_dir.join(".veil-meta.lock")
+}
+
+/// 返回指定逻辑文件的锁路径。
+///
+/// 文件名使用稳定的 `file_id`，因此重命名和完整改密不会改变锁身份。
+pub fn file_lock_path(veil_dir: &Path, file_id: &str) -> Result<PathBuf> {
+    if file_id.is_empty()
+        || file_id.len() > 128
+        || !file_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(VeilError::LockError(format!("无效的文件锁标识: {file_id}")));
+    }
+
+    Ok(veil_dir.join(".veil-locks").join(format!("{file_id}.lock")))
+}
+
+/// 获取配置文件短锁。
+pub fn acquire_config_lock(
+    config_path: &Path,
+    mode: LockMode,
+    timeout: Duration,
+) -> Result<FileLockGuard> {
+    FileLockGuard::acquire(config_lock_path(config_path), mode, timeout)
+}
+
+/// 获取单个 Veil 的写入串行锁。
+pub fn acquire_veil_lock(
+    veil_dir: &Path,
+    mode: LockMode,
+    timeout: Duration,
+) -> Result<FileLockGuard> {
+    FileLockGuard::acquire(veil_lock_path(veil_dir), mode, timeout)
+}
+
+/// 获取 `.veil-meta` 短锁。
+pub fn acquire_metadata_lock(
+    veil_dir: &Path,
+    mode: LockMode,
+    timeout: Duration,
+) -> Result<FileLockGuard> {
+    FileLockGuard::acquire(metadata_lock_path(veil_dir), mode, timeout)
+}
+
+/// 获取逻辑文件锁。
+pub fn acquire_file_lock(
+    veil_dir: &Path,
+    file_id: &str,
+    mode: LockMode,
+    timeout: Duration,
+) -> Result<FileLockGuard> {
+    FileLockGuard::acquire(file_lock_path(veil_dir, file_id)?, mode, timeout)
+}
+
+/// 非阻塞尝试获取单个 Veil 的写入串行锁。
+pub fn try_acquire_veil_lock(veil_dir: &Path, mode: LockMode) -> Result<Option<FileLockGuard>> {
+    FileLockGuard::try_acquire(veil_lock_path(veil_dir), mode)
 }
 
 impl FileLockGuard {
@@ -686,5 +764,21 @@ mod tests {
         let record = LockRecord::new(LockScope::Veil, "veil-1234", None, "init");
         assert!(record.validate_token(record.token()).is_ok());
         assert!(record.validate_token("wrong-token").is_err());
+    }
+
+    /// 验证各类锁文件使用固定路径，文件锁由稳定 file_id 决定。
+    #[test]
+    fn lock_paths_are_stable() {
+        let dir = Path::new("/tmp/veil-lock-paths");
+        let config = Path::new("/tmp/config.toml");
+
+        assert_eq!(config_lock_path(config), Path::new("/tmp/config.lock"));
+        assert_eq!(veil_lock_path(dir), dir.join(".veil.lock"));
+        assert_eq!(metadata_lock_path(dir), dir.join(".veil-meta.lock"));
+        assert_eq!(
+            file_lock_path(dir, "file-0123456789abcdef").unwrap(),
+            dir.join(".veil-locks/file-0123456789abcdef.lock")
+        );
+        assert!(file_lock_path(dir, "../escape").is_err());
     }
 }

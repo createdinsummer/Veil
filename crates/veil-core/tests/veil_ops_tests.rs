@@ -1,8 +1,12 @@
 //! 工作区功能集成测试
 
 use std::fs;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 use veil_core::kdf;
+use veil_core::lock::{self, LockMode};
 use veil_core::metadata::{AlgorithmId, MetaHeader};
 use veil_core::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
 
@@ -170,6 +174,7 @@ fn test_add_file_destination_replaces_existing() {
     let files = manager.list_files(password).unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "nested/renamed.txt");
+    let original_file_id = files[0].file_id.clone();
     assert!(veil_dir.join(&first[0]).exists());
 
     fs::write(&source, b"second").unwrap();
@@ -181,6 +186,7 @@ fn test_add_file_destination_replaces_existing() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "nested/renamed.txt");
     assert_eq!(files[0].size, 6);
+    assert_eq!(files[0].file_id, original_file_id);
     assert!(!veil_dir.join(&first[0]).exists());
     assert!(veil_dir.join(&second[0]).exists());
 
@@ -189,6 +195,30 @@ fn test_add_file_destination_replaces_existing() {
         .extract_file("nested/renamed.txt", &output, password)
         .unwrap();
     assert_eq!(fs::read_to_string(output).unwrap(), "second");
+}
+
+/// 验证 Veil 写锁会阻塞读取，释放后读取继续执行。
+#[test]
+fn test_veil_write_lock_blocks_metadata_read() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
+    let password = "test-password";
+    manager.init_veil("test-veil", "default", password).unwrap();
+
+    let write_lock =
+        lock::acquire_veil_lock(&veil_dir, LockMode::Exclusive, lock::DEFAULT_LOCK_TIMEOUT)
+            .unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        sender.send(manager.read_meta(password).is_ok()).unwrap();
+    });
+
+    assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+    drop(write_lock);
+    assert!(receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+    reader.join().unwrap();
 }
 
 /// 验证错误密码在任何密文写入前失败。
@@ -272,29 +302,35 @@ fn test_move_file_into_directory_and_rename() {
             password,
         )
         .unwrap();
+    let original_file_id = manager
+        .list_files(password)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.original_name == "source.txt")
+        .unwrap()
+        .file_id;
 
     let (kind, target) = manager.move_path("source.txt", "target", password).unwrap();
     assert_eq!(kind, MovedPathKind::File);
     assert_eq!(target, "target/source.txt");
-    assert!(
-        manager
-            .list_files(password)
-            .unwrap()
-            .iter()
-            .any(|file| { file.original_name == "target/source.txt" })
-    );
+    let moved = manager.list_files(password).unwrap();
+    let moved_file = moved
+        .iter()
+        .find(|file| file.original_name == "target/source.txt")
+        .unwrap();
+    assert_eq!(moved_file.file_id, original_file_id);
 
     let (_, renamed) = manager
         .move_path("target/source.txt", "./renamed.txt", password)
         .unwrap();
     assert_eq!(renamed, "renamed.txt");
-    assert!(
-        manager
-            .list_files(password)
-            .unwrap()
-            .iter()
-            .any(|file| { file.original_name == "renamed.txt" })
-    );
+    let renamed_file = manager
+        .list_files(password)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.original_name == "renamed.txt")
+        .unwrap();
+    assert_eq!(renamed_file.file_id, original_file_id);
 }
 
 /// 验证目录整体移动、子路径更新和循环移动保护。
@@ -527,11 +563,14 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
         .add_files(&[AddFileSpec::new(&source, "data.txt")], old_password)
         .unwrap();
 
-    let old_names: std::collections::HashSet<_> = manager
-        .list_files(old_password)
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.encrypted_name)
+    let old_entries = manager.list_files(old_password).unwrap();
+    let old_names: std::collections::HashSet<_> = old_entries
+        .iter()
+        .map(|entry| entry.encrypted_name.clone())
+        .collect();
+    let old_file_ids: std::collections::HashSet<_> = old_entries
+        .iter()
+        .map(|entry| entry.file_id.clone())
         .collect();
     let old_ciphertexts: Vec<_> = old_names
         .iter()
@@ -540,13 +579,17 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
 
     manager.change_password(old_password, new_password).unwrap();
 
-    let new_names: std::collections::HashSet<_> = manager
-        .list_files(new_password)
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.encrypted_name)
+    let new_entries = manager.list_files(new_password).unwrap();
+    let new_names: std::collections::HashSet<_> = new_entries
+        .iter()
+        .map(|entry| entry.encrypted_name.clone())
+        .collect();
+    let new_file_ids: std::collections::HashSet<_> = new_entries
+        .iter()
+        .map(|entry| entry.file_id.clone())
         .collect();
     assert_eq!(old_names, new_names);
+    assert_eq!(old_file_ids, new_file_ids);
     assert_eq!(
         old_ciphertexts,
         new_names
@@ -591,24 +634,31 @@ fn test_change_password_full_reencrypts_ciphertext() {
         )
         .unwrap();
 
-    let old_names: std::collections::HashSet<_> = manager
-        .list_files(old_password)
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.encrypted_name)
+    let old_entries = manager.list_files(old_password).unwrap();
+    let old_names: std::collections::HashSet<_> = old_entries
+        .iter()
+        .map(|entry| entry.encrypted_name.clone())
+        .collect();
+    let old_file_ids: std::collections::HashSet<_> = old_entries
+        .iter()
+        .map(|entry| entry.file_id.clone())
         .collect();
 
     manager
         .change_password_full(old_password, new_password)
         .unwrap();
 
-    let new_names: std::collections::HashSet<_> = manager
-        .list_files(new_password)
-        .unwrap()
-        .into_iter()
-        .map(|entry| entry.encrypted_name)
+    let new_entries = manager.list_files(new_password).unwrap();
+    let new_names: std::collections::HashSet<_> = new_entries
+        .iter()
+        .map(|entry| entry.encrypted_name.clone())
+        .collect();
+    let new_file_ids: std::collections::HashSet<_> = new_entries
+        .iter()
+        .map(|entry| entry.file_id.clone())
         .collect();
     assert!(old_names.is_disjoint(&new_names));
+    assert_eq!(old_file_ids, new_file_ids);
     assert!(old_names.iter().all(|name| !veil_dir.join(name).exists()));
     assert!(manager.read_meta(old_password).is_err());
 

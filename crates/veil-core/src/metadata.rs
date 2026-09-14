@@ -10,13 +10,14 @@
 use crate::error::VeilError;
 pub use crate::file_ops::DATA_KEY_LEN;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use zeroize::Zeroize;
 
 /// 元数据文件固定魔数。
 pub const MAGIC: &[u8; 8] = b"VEILMETA";
 /// 当前支持的元数据格式版本。
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// 元数据中最多保存的数据主密钥数量。
 ///
@@ -437,6 +438,19 @@ impl MetaData {
                 return Err(VeilError::InvalidFormat("数据主密钥重复".to_string()));
             }
         }
+
+        let mut file_ids = HashSet::new();
+        for file in &self.files {
+            if file.file_id.trim().is_empty() {
+                return Err(VeilError::InvalidFormat("文件缺少 file_id".to_string()));
+            }
+            if !file_ids.insert(file.file_id.as_str()) {
+                return Err(VeilError::InvalidFormat(format!(
+                    "文件 ID 重复: {}",
+                    file.file_id
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -526,6 +540,9 @@ pub fn generate_veil_id() -> String {
 /// `.veil-meta` 中记录的文件条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
+    /// 不随路径、重命名或完整改密变化的稳定文件 ID。
+    pub file_id: String,
+
     /// 加密后的文件名（随机 ID）
     pub encrypted_name: String,
 
@@ -548,7 +565,25 @@ pub struct FileEntry {
 impl FileEntry {
     /// 创建文件条目并写入当前 UTC 时间，哈希字段默认留空。
     pub fn new(encrypted_name: String, original_name: String, size: u64, nonce: [u8; 12]) -> Self {
+        Self::with_file_id(
+            generate_file_id(),
+            encrypted_name,
+            original_name,
+            size,
+            nonce,
+        )
+    }
+
+    /// 使用已有稳定文件 ID 创建新版本条目。
+    pub fn with_file_id(
+        file_id: String,
+        encrypted_name: String,
+        original_name: String,
+        size: u64,
+        nonce: [u8; 12],
+    ) -> Self {
         Self {
+            file_id,
             encrypted_name,
             original_name,
             size,
@@ -558,6 +593,16 @@ impl FileEntry {
             hash: None,
         }
     }
+}
+
+/// 生成 `file-` 前缀的随机逻辑文件身份。
+///
+/// # Panics
+/// 系统随机源不可用时 panic，因为文件身份是后续锁和元数据更新的必要前提。
+pub fn generate_file_id() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("无法生成文件 ID");
+    format!("file-{}", hex::encode(bytes))
 }
 
 /// 将一个 TLV 字段追加到头部缓冲区。
