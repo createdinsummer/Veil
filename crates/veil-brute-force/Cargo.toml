@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 veil-core = { path = "../veil-core" }
-age = { version = "0.12", features = ["cli-common"] }
+age = "0.12"
 rayon = "1.12"
 num_cpus = "1.0"
 

@@ -17,17 +17,14 @@ clap = { version = "4.5", features = ["derive", "cargo"] }
 # 密码输入
 rpassword = "7.3"
 
-# 加密库（与 core 保持一致）
-age = { version = "0.12", features = ["cli-common"] }
+# 密码封装类型（与 core 使用同一版本）
+age = "0.12"
 
 # 错误处理
 anyhow = "1.0"
 
 # 彩色输出
 colored = "2.1"
-
-# 进度条
-indicatif = "0.17"
 
 # JSON 解析（用于 i18n）
 serde_json = "1.0"
@@ -37,10 +34,6 @@ walkdir = "2.4"
 
 # 时间处理
 chrono = "0.4"
-
-# 加密相关（用于 unpack）
-chacha20poly1305 = "0.10"
-zeroize = "1.9"
 
 # Windows 控制台 API（用于编码检测和转换）
 [target.'cfg(windows)'.dependencies]
