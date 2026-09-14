@@ -8,7 +8,7 @@ use predicates::prelude::*;
 
 /// 验证顶层帮助包含全部工作区命令。
 #[test]
-fn help_lists_workspace_model_commands() {
+fn help_lists_work_model_commands() {
     Command::cargo_bin("veil")
         .unwrap()
         .args(["--help"])
@@ -23,9 +23,9 @@ fn help_lists_workspace_model_commands() {
         .stdout(predicate::str::contains("help"));
 }
 
-/// 验证版本输出与 workspace 发布版本一致。
+/// 验证版本输出与 work 发布版本一致。
 #[test]
-fn version_matches_workspace_release() {
+fn version_matches_work_release() {
     Command::cargo_bin("veil")
         .unwrap()
         .args(["--version"])
@@ -66,7 +66,7 @@ fn broken_stdout_pipe_is_reported_without_panic() {
 
 /// 验证 `init` 帮助明确区分命名工作区和显式路径。
 #[test]
-fn init_help_describes_workspace_options() {
+fn init_help_describes_work_options() {
     Command::cargo_bin("veil")
         .unwrap()
         .args(["init", "-h"])
@@ -78,7 +78,7 @@ fn init_help_describes_workspace_options() {
         .stdout(predicate::str::contains("名称，不是路径"))
         .stdout(predicate::str::contains("自动注册给当前容器"))
         .stdout(predicate::str::contains("--dedicated"))
-        .stdout(predicate::str::contains("需配合 --workspace-path"));
+        .stdout(predicate::str::contains("需配合 --work-root"));
 }
 
 /// 验证未知参数使用本地化提示，而不是 clap 的英文建议。
@@ -144,7 +144,7 @@ fn init_accepts_custom_link_path() {
 
 /// 验证多个链接可以指向同一工作区并共享内容。
 #[test]
-fn multiple_links_can_target_the_same_workspace() {
+fn multiple_links_can_target_the_same_work() {
     let env = TestEnv::new("test-password");
     let primary_link = env.init("shared");
     let secondary_link = env.work.path().join("second.veil-link");
@@ -174,7 +174,7 @@ fn multiple_links_can_target_the_same_workspace() {
 
 /// 验证普通命令接受名称、ID 和显式链接，但拒绝直接工作区目录。
 #[test]
-fn container_selector_accepts_name_id_and_link_only() {
+fn veil_selector_accepts_name_id_and_link_only() {
     let env = TestEnv::new("test-password");
     let link = env.init("selector");
     let link_content = std::fs::read_to_string(&link).unwrap();
@@ -191,27 +191,22 @@ fn container_selector_accepts_name_id_and_link_only() {
         .assert()
         .success();
 
-    let workspace_root = env.home.path().join(".veil/workspaces/default");
-    let workspace = std::fs::read_dir(workspace_root)
+    let work_root = env.home.path().join(".veil/works/default");
+    let work = std::fs::read_dir(work_root)
         .unwrap()
         .filter_map(Result::ok)
         .find(|entry| entry.path().join(".veil-meta").is_file())
         .unwrap()
         .path();
     env.command()
-        .args(["list", &env.path(&workspace)])
+        .args(["list", &env.path(&work)])
         .assert()
         .failure()
         .stderr(predicate::str::contains("工作区目录不能直接作为容器参数"));
 
     let rebuilt_link = env.work.path().join("rebuilt.veil-link");
     env.command()
-        .args([
-            "link",
-            &env.path(&workspace),
-            "-o",
-            &env.path(&rebuilt_link),
-        ])
+        .args(["link", &env.path(&work), "-o", &env.path(&rebuilt_link)])
         .assert()
         .success();
     assert!(rebuilt_link.exists());
@@ -244,9 +239,9 @@ fn explicit_link_works_without_config_but_name_requires_config() {
 
 /// 验证主 CLI 支持创建专属工作区容器。
 #[test]
-fn dedicated_workspace_init_is_available_from_main_cli() {
+fn dedicated_work_init_is_available_from_main_cli() {
     let env = TestEnv::new("test-password");
-    let workspace = env.work.path().join("dedicated-volume");
+    let work = env.work.path().join("dedicated-volume");
     let link = env.work.path().join("vault.veil-link");
 
     env.command()
@@ -254,8 +249,8 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
             "init",
             "vault",
             "test-password",
-            "--workspace-path",
-            &env.path(&workspace),
+            "--work-root",
+            &env.path(&work),
             "--dedicated",
             "--link",
             &env.path(&link),
@@ -266,7 +261,7 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
 
     // 专属模式下列表项与 .veil-meta 都应直接位于指定工作区路径。
     assert!(link.exists());
-    assert!(workspace.join(".veil-meta").exists());
+    assert!(work.join(".veil-meta").exists());
 
     let source = env.write_file("secret.txt", "secret");
     env.command()
@@ -277,10 +272,10 @@ fn dedicated_workspace_init_is_available_from_main_cli() {
 
 /// 验证同名容器由不同 `veil_id` 区分且内容互不干扰。
 #[test]
-fn duplicate_container_names_are_distinguished_by_veil_id() {
+fn duplicate_veil_names_are_distinguished_by_veil_id() {
     let env = TestEnv::new("test-password");
-    let first_workspace = env.work.path().join("disk-a");
-    let second_workspace = env.work.path().join("disk-b");
+    let first_work = env.work.path().join("disk-a");
+    let second_work = env.work.path().join("disk-b");
     let first_link = env.work.path().join("first.veil-link");
     let second_link = env.work.path().join("second.veil-link");
 
@@ -289,8 +284,8 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
             "init",
             "photos",
             "test-password",
-            "--workspace-path",
-            &env.path(&first_workspace),
+            "--work-root",
+            &env.path(&first_work),
             "--link",
             &env.path(&first_link),
         ])
@@ -301,8 +296,8 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
             "init",
             "photos",
             "test-password",
-            "--workspace-path",
-            &env.path(&second_workspace),
+            "--work-root",
+            &env.path(&second_work),
             "--link",
             &env.path(&second_link),
         ])
@@ -349,7 +344,7 @@ fn duplicate_container_names_are_distinguished_by_veil_id() {
 
 /// 验证便携模式把链接和工作区放在同一路径下。
 #[test]
-fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
+fn portable_mode_keeps_link_and_work_on_the_same_path() {
     let env = TestEnv::new("test-password");
     let portable_dir = env.work.path().join("portable");
     std::fs::create_dir_all(&portable_dir).unwrap();
@@ -369,8 +364,8 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
         .stdout(predicate::str::contains("工作区将创建在"));
 
     // 便携模式的默认工作区根应位于链接所在目录内部。
-    let workspace_root = portable_dir.join(".veil/workspaces/default");
-    let container_dirs: Vec<_> = std::fs::read_dir(&workspace_root)
+    let work_root = portable_dir.join(".veil/works/default");
+    let veil_dirs: Vec<_> = std::fs::read_dir(&work_root)
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -381,10 +376,10 @@ fn portable_mode_keeps_link_and_workspace_on_the_same_path() {
                 && path.join(".veil-meta").exists()
         })
         .collect();
-    assert_eq!(container_dirs.len(), 1);
+    assert_eq!(veil_dirs.len(), 1);
 
     let link_content = std::fs::read_to_string(link).unwrap();
-    assert!(link_content.contains(".veil/workspaces/default/veil-"));
+    assert!(link_content.contains(".veil/works/default/veil-"));
     assert!(!link_content.contains("mount_path = "));
 
     // 链接不可用时应能仅凭配置中的实际工作区路径按名称恢复。
@@ -406,17 +401,17 @@ fn help_files_is_available_in_english() {
 
 /// 验证互斥的工作区参数不会有一项被静默忽略。
 #[test]
-fn init_rejects_conflicting_workspace_options() {
+fn init_rejects_conflicting_work_options() {
     let env = TestEnv::new("test-password");
 
     env.command()
         .args([
             "init",
             "conflict",
-            "--workspace",
+            "--work",
             "default",
-            "--workspace-path",
-            &env.path(env.work.path().join("workspace")),
+            "--work-root",
+            &env.path(env.work.path().join("work")),
         ])
         .assert()
         .failure()
@@ -427,8 +422,8 @@ fn init_rejects_conflicting_workspace_options() {
             "init",
             "portable-conflict",
             "--portable",
-            "--workspace-path",
-            &env.path(env.work.path().join("workspace")),
+            "--work-root",
+            &env.path(env.work.path().join("work")),
         ])
         .assert()
         .failure()
@@ -438,12 +433,12 @@ fn init_rejects_conflicting_workspace_options() {
         .args(["init", "dedicated-without-path", "--dedicated"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--workspace-path"));
+        .stderr(predicate::str::contains("--work-root"));
 }
 
 /// 验证相对工作区路径会固定为绝对位置，离开原目录后链接仍可解析。
 #[test]
-fn init_resolves_relative_workspace_path_from_another_directory() {
+fn init_resolves_relative_work_root_from_another_directory() {
     let env = TestEnv::new("test-password");
     let link = env.work.path().join("relative.veil-link");
 
@@ -451,8 +446,8 @@ fn init_resolves_relative_workspace_path_from_another_directory() {
         .args([
             "init",
             "relative",
-            "--workspace-path",
-            "relative-workspace",
+            "--work-root",
+            "relative-work",
             "--link",
             &env.path(&link),
         ])
@@ -461,15 +456,15 @@ fn init_resolves_relative_workspace_path_from_another_directory() {
 
     let link_data = veil_core::link::VeilLink::load(&link).unwrap();
     assert_ne!(
-        link_data.workspace.path,
-        std::path::PathBuf::from("relative-workspace")
+        link_data.veil.path,
+        std::path::PathBuf::from("relative-work")
     );
     assert!(
         link_data
-            .workspace
+            .veil
             .path
             .to_string_lossy()
-            .contains("relative-workspace")
+            .contains("relative-work")
     );
 
     let mut list = env.command();
@@ -504,11 +499,11 @@ fn init_rejects_link_path_with_unknown_extension() {
 
 /// 验证被手工改成绝对工作区路径的链接会被拒绝。
 #[test]
-fn link_rejects_absolute_workspace_path() {
+fn link_rejects_absolute_work_root() {
     let env = TestEnv::new("test-password");
     let link = env.init("absolute-link");
-    let workspace = env.home.path().join(".veil/workspaces/default");
-    let container_dir = std::fs::read_dir(&workspace)
+    let work = env.home.path().join(".veil/works/default");
+    let veil_dir = std::fs::read_dir(&work)
         .unwrap()
         .filter_map(Result::ok)
         .find(|entry| entry.path().join(".veil-meta").is_file())
@@ -520,7 +515,7 @@ fn link_rejects_absolute_workspace_path() {
         .lines()
         .map(|line| {
             if line.starts_with("path = ") {
-                format!("path = \"{}\"", container_dir.display())
+                format!("path = \"{}\"", veil_dir.display())
             } else {
                 line.to_string()
             }
@@ -554,37 +549,37 @@ fn init_rolls_back_when_link_registration_fails() {
     assert!(!link.exists());
     assert!(!env.home.path().join(".veil/config.toml").exists());
 
-    let workspace_root = env.home.path().join(".veil/workspaces/default");
-    if workspace_root.exists() {
-        assert_eq!(std::fs::read_dir(workspace_root).unwrap().count(), 0);
+    let work_root = env.home.path().join(".veil/works/default");
+    if work_root.exists() {
+        assert_eq!(std::fs::read_dir(work_root).unwrap().count(), 0);
     }
 }
 
 /// 验证专属工作区允许复用空目录，但拒绝覆盖已有内容。
 #[test]
-fn init_dedicated_workspace_requires_empty_directory() {
+fn init_dedicated_work_requires_empty_directory() {
     let env = TestEnv::new("test-password");
-    let empty_workspace = env.work.path().join("empty-workspace");
-    std::fs::create_dir_all(&empty_workspace).unwrap();
+    let empty_work = env.work.path().join("empty-work");
+    std::fs::create_dir_all(&empty_work).unwrap();
     let empty_link = env.work.path().join("empty.veil-link");
 
     env.command()
         .args([
             "init",
             "empty",
-            "--workspace-path",
-            &env.path(&empty_workspace),
+            "--work-root",
+            &env.path(&empty_work),
             "--dedicated",
             "--link",
             &env.path(&empty_link),
         ])
         .assert()
         .success();
-    assert!(empty_workspace.join(".veil-meta").exists());
+    assert!(empty_work.join(".veil-meta").exists());
 
-    let non_empty_workspace = env.work.path().join("non-empty-workspace");
-    std::fs::create_dir_all(&non_empty_workspace).unwrap();
-    let existing_file = non_empty_workspace.join("keep.txt");
+    let non_empty_work = env.work.path().join("non-empty-work");
+    std::fs::create_dir_all(&non_empty_work).unwrap();
+    let existing_file = non_empty_work.join("keep.txt");
     std::fs::write(&existing_file, "keep").unwrap();
     let non_empty_link = env.work.path().join("non-empty.veil-link");
 
@@ -592,8 +587,8 @@ fn init_dedicated_workspace_requires_empty_directory() {
         .args([
             "init",
             "non-empty",
-            "--workspace-path",
-            &env.path(&non_empty_workspace),
+            "--work-root",
+            &env.path(&non_empty_work),
             "--dedicated",
             "--link",
             &env.path(&non_empty_link),
@@ -603,7 +598,7 @@ fn init_dedicated_workspace_requires_empty_directory() {
         .stderr(predicate::str::contains("必须为空目录"));
 
     assert_eq!(std::fs::read_to_string(existing_file).unwrap(), "keep");
-    assert!(!non_empty_workspace.join(".veil-meta").exists());
+    assert!(!non_empty_work.join(".veil-meta").exists());
     assert!(!non_empty_link.exists());
 }
 
@@ -621,7 +616,7 @@ fn init_rejects_empty_password_without_side_effects() {
 
     assert!(!link.exists());
     assert!(!env.home.path().join(".veil/config.toml").exists());
-    assert!(!env.home.path().join(".veil/workspaces/default").exists());
+    assert!(!env.home.path().join(".veil/works/default").exists());
 }
 
 /// 验证 link 支持自动创建父目录并限制输出扩展名。
@@ -660,7 +655,7 @@ fn help_accepts_command_topics() {
         .assert()
         .success()
         .stdout(predicate::str::contains("用法: veil init"))
-        .stdout(predicate::str::contains("--workspace-path"));
+        .stdout(predicate::str::contains("--work-root"));
 
     env.command()
         .args(["help", "not-a-command"])

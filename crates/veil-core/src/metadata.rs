@@ -40,9 +40,9 @@ pub enum MetaTag {
     /// 容器稳定身份。
     VeilId = 0x06,
     /// 明文容器展示名称。
-    ContainerName = 0x07,
+    VeilName = 0x07,
     /// 明文工作区类型。
-    WorkspaceType = 0x08,
+    WorkType = 0x08,
     /// 供扩展字段使用的预留标签。
     Custom = 0xF0,
     /// 预留的 TLV 结束标记；当前写入流程不生成该字段。
@@ -60,8 +60,8 @@ impl MetaTag {
             0x04 => Some(Self::KdfParams),
             0x05 => Some(Self::Nonce),
             0x06 => Some(Self::VeilId),
-            0x07 => Some(Self::ContainerName),
-            0x08 => Some(Self::WorkspaceType),
+            0x07 => Some(Self::VeilName),
+            0x08 => Some(Self::WorkType),
             0xF0 => Some(Self::Custom),
             0xFF => Some(Self::EndMarker),
             _ => None,
@@ -118,24 +118,24 @@ pub struct MetaHeader {
     pub veil_id: String,
 
     /// 恢复用明文容器名称；仅用于识别容器。
-    pub container_name: String,
+    pub veil_name: String,
 
     /// 恢复用明文工作区类型。
-    pub workspace_type: String,
+    pub work_type: String,
 }
 
 impl MetaHeader {
     /// 使用当前格式版本构造元数据头部。
     ///
-    /// `veil_id`、`container_name` 和 `workspace_type` 必须非空，具体约束在
+    /// `veil_id`、`veil_name` 和 `work_type` 必须非空，具体约束在
     /// [`MetaHeader::to_bytes`] 中统一校验。
     pub fn new(
         salt: [u8; 32],
         nonce: [u8; 12],
         algorithm: AlgorithmId,
         veil_id: String,
-        container_name: String,
-        workspace_type: String,
+        veil_name: String,
+        work_type: String,
     ) -> Self {
         Self {
             salt,
@@ -143,8 +143,8 @@ impl MetaHeader {
             algorithm,
             version: VERSION,
             veil_id,
-            container_name,
-            workspace_type,
+            veil_name,
+            work_type,
         }
     }
 
@@ -156,10 +156,10 @@ impl MetaHeader {
         if self.veil_id.is_empty() {
             return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
         }
-        if self.container_name.is_empty() {
+        if self.veil_name.is_empty() {
             return Err(VeilError::InvalidFormat("缺少容器名称".to_string()));
         }
-        if self.workspace_type.is_empty() {
+        if self.work_type.is_empty() {
             return Err(VeilError::InvalidFormat("缺少工作区类型".to_string()));
         }
 
@@ -176,16 +176,8 @@ impl MetaHeader {
         write_tlv(&mut buf, MetaTag::Algorithm, &[self.algorithm as u8])?;
         write_tlv(&mut buf, MetaTag::Nonce, &self.nonce)?;
         write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
-        write_tlv(
-            &mut buf,
-            MetaTag::ContainerName,
-            self.container_name.as_bytes(),
-        )?;
-        write_tlv(
-            &mut buf,
-            MetaTag::WorkspaceType,
-            self.workspace_type.as_bytes(),
-        )?;
+        write_tlv(&mut buf, MetaTag::VeilName, self.veil_name.as_bytes())?;
+        write_tlv(&mut buf, MetaTag::WorkType, self.work_type.as_bytes())?;
 
         // header_len 只统计 TLV 区域，不包含 magic 和长度字段本身。
         let header_len = u16::try_from(buf.len() - 10)
@@ -223,8 +215,8 @@ impl MetaHeader {
         let mut algorithm = None;
         let mut nonce = None;
         let mut veil_id = String::new();
-        let mut container_name = String::new();
-        let mut workspace_type = String::new();
+        let mut veil_name = String::new();
+        let mut work_type = String::new();
         let mut pos = 10;
 
         // TLV 区域按 tag、u16 长度、value 的固定布局连续解析。
@@ -272,13 +264,13 @@ impl MetaHeader {
                         VeilError::InvalidFormat(format!("veil_id 不是有效的 UTF-8: {}", error))
                     })?;
                 }
-                Some(MetaTag::ContainerName) => {
-                    container_name = String::from_utf8(value.to_vec()).map_err(|error| {
+                Some(MetaTag::VeilName) => {
+                    veil_name = String::from_utf8(value.to_vec()).map_err(|error| {
                         VeilError::InvalidFormat(format!("容器名称不是有效的 UTF-8: {}", error))
                     })?;
                 }
-                Some(MetaTag::WorkspaceType) => {
-                    workspace_type = String::from_utf8(value.to_vec()).map_err(|error| {
+                Some(MetaTag::WorkType) => {
+                    work_type = String::from_utf8(value.to_vec()).map_err(|error| {
                         VeilError::InvalidFormat(format!("工作区类型不是有效的 UTF-8: {}", error))
                     })?;
                 }
@@ -307,11 +299,11 @@ impl MetaHeader {
             veil_id: (!veil_id.is_empty())
                 .then_some(veil_id)
                 .ok_or_else(|| VeilError::InvalidFormat("缺少 veil_id".to_string()))?,
-            container_name: (!container_name.is_empty())
-                .then_some(container_name)
+            veil_name: (!veil_name.is_empty())
+                .then_some(veil_name)
                 .ok_or_else(|| VeilError::InvalidFormat("缺少容器名称".to_string()))?,
-            workspace_type: (!workspace_type.is_empty())
-                .then_some(workspace_type)
+            work_type: (!work_type.is_empty())
+                .then_some(work_type)
                 .ok_or_else(|| VeilError::InvalidFormat("缺少工作区类型".to_string()))?,
         })
     }
@@ -354,10 +346,10 @@ pub struct MetaData {
     pub veil_id: String,
 
     /// 容器名称
-    pub container_name: String,
+    pub veil_name: String,
 
     /// 工作区类型
-    pub workspace_type: String,
+    pub work_type: String,
 
     /// 创建时间
     pub created_at: String,
@@ -382,8 +374,8 @@ impl fmt::Debug for MetaData {
         formatter
             .debug_struct("MetaData")
             .field("veil_id", &self.veil_id)
-            .field("container_name", &self.container_name)
-            .field("workspace_type", &self.workspace_type)
+            .field("veil_name", &self.veil_name)
+            .field("work_type", &self.work_type)
             .field("created_at", &self.created_at)
             .field("files", &self.files)
             .field(
@@ -397,23 +389,23 @@ impl fmt::Debug for MetaData {
 impl MetaData {
     /// 创建带随机容器身份和空文件清单的元数据。
     ///
-    /// `container_name` 是展示名称，`workspace_type` 记录默认、自定义或专属类型。
-    pub fn new(container_name: String, workspace_type: String) -> Self {
+    /// `veil_name` 是展示名称，`work_type` 记录默认、自定义或专属类型。
+    pub fn new(veil_name: String, work_type: String) -> Self {
         // 随机身份与调用方提供的展示信息分离，名称变化不影响容器身份。
-        Self::with_veil_id(generate_veil_id(), container_name, workspace_type)
+        Self::with_veil_id(generate_veil_id(), veil_name, work_type)
     }
 
     /// 使用调用方指定的稳定 ID 创建空元数据。
     ///
     /// `veil_id` 应来自已分配的身份，以保证链接和配置在路径变化后仍能定位容器。
-    pub fn with_veil_id(veil_id: String, container_name: String, workspace_type: String) -> Self {
+    pub fn with_veil_id(veil_id: String, veil_name: String, work_type: String) -> Self {
         let mut data_key = [0u8; DATA_KEY_LEN];
         getrandom::getrandom(&mut data_key).expect("无法生成数据主密钥");
 
         Self {
             veil_id,
-            container_name,
-            workspace_type,
+            veil_name,
+            work_type,
             // 初始清单为空，文件条目由后续 add_file 逐步追加。
             created_at: chrono::Utc::now().to_rfc3339(),
             files: Vec::new(),

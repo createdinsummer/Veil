@@ -1,30 +1,30 @@
-//! `veil pack` 子命令：把工作区打包为单文件 `.veil`。
+//! `veil pack` 子命令：把 `veil_dir` 打包为单文件 `.veil`。
 
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::container_format::ContainerPacker;
+use veil_core::veil_package::VeilPacker;
 
-/// 将容器元数据和所有加密文件封装为可分享的 `.veil` 文件。
+/// 将 Veil 元数据和所有加密文件封装为可分享的 `.veil` 文件。
 ///
-/// 输出已存在时拒绝覆盖；未指定路径时使用 `<容器名>.vault.veil`。
+/// 输出已存在时拒绝覆盖；未指定路径时使用 `<veil-name>.vault.veil`。
 ///
 /// # 错误
-/// 容器解析、输出路径检查、密码读取、元数据读取或打包写入失败时返回错误。
-pub fn run_workspace(
-    container_name: &str,
+/// Veil 解析、输出路径检查、密码读取、元数据读取或打包写入失败时返回错误。
+pub fn run_veil(
+    veil_name: &str,
     output_path: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
-    // 打包目标是解析后的工作区，而不是输入链接文件。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    // 打包目标是解析后的 veil_dir，而不是输入链接文件。
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
-    // 未指定输出时沿用命令约定的 <名称>.vault.veil。
+    // 未指定输出时沿用命令约定的 <veil-name>.vault.veil。
     let output = if let Some(path) = output_path {
         path.to_string()
     } else {
-        format!("{}.vault.veil", resolved.name)
+        format!("{}.vault.veil", resolved.veil_name)
     };
 
     // 打包文件整体覆写，因此必须显式拒绝已存在的输出路径。
@@ -33,8 +33,7 @@ pub fn run_workspace(
     }
 
     crate::outln!("{}", crate::i18n::t("pack.in_progress").cyan());
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -42,12 +41,12 @@ pub fn run_workspace(
     // 先完成密码验证和清单读取，再读取 .veil-meta 的完整字节。
     let metadata = manager.read_meta(password)?;
 
-    let meta_path = manager.workspace_path.join(".veil-meta");
+    let meta_path = manager.veil_dir.join(".veil-meta");
     let meta_bytes = std::fs::read(&meta_path)?;
 
     // packer 只负责布局，不重新加密元数据或文件内容。
-    let packer = ContainerPacker::new(&output);
-    packer.pack(&manager.workspace_path, &metadata, &meta_bytes)?;
+    let packer = VeilPacker::new(&output);
+    packer.pack(&manager.veil_dir, &metadata, &meta_bytes)?;
 
     let output_size = std::fs::metadata(&output)?.len();
 
@@ -68,7 +67,7 @@ pub fn run_workspace(
     );
 
     crate::hints::show_pack_explain_hint(
-        &resolved.name,
+        &resolved.veil_name,
         resolved.link_path.as_deref(),
         &output,
         output_size,

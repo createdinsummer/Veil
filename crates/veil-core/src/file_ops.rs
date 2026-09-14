@@ -1,4 +1,4 @@
-//! 工作区文件操作的统一入口。
+//! Veil 文件操作的统一入口。
 //!
 //! 上层文件流程不得直接读取或写入 `.enc`，所有文件内容的读取、写入、解密导出和
 //! 密钥轮换重写都应经过本模块。`.enc` 文件由固定大小的独立 AEAD 分块依次拼接，
@@ -18,10 +18,10 @@ use chacha20poly1305::{
 
 use crate::error::{Result, VeilError};
 
-/// 工作区数据主密钥长度，单位为字节。
+/// Veil 数据主密钥长度，单位为字节。
 pub const DATA_KEY_LEN: usize = 32;
 
-/// 工作区文件分块 nonce 长度，单位为字节。
+/// Veil 文件分块 nonce 长度，单位为字节。
 pub const NONCE_LEN: usize = 12;
 
 /// 单个分块的明文大小，单位为字节。
@@ -42,7 +42,7 @@ pub fn generate_base_nonce() -> [u8; NONCE_LEN] {
     nonce
 }
 
-/// 将明文文件流式加密为工作区 `.enc` 文件。
+/// 将明文文件流式加密为 Veil 的 `.enc` 文件。
 ///
 /// 输入是明文源文件，输出是分块 ChaCha20-Poly1305 密文文件。目标通过同目录
 /// 临时文件原子发布，目标已存在时拒绝覆盖。返回源文件的实际明文大小。
@@ -66,7 +66,7 @@ pub fn encrypt_file_streaming(
     Ok(plaintext_size)
 }
 
-/// 将工作区 `.enc` 文件流式解密到目标路径。
+/// 将 Veil 的 `.enc` 文件流式解密到目标路径。
 ///
 /// 目标允许被原子替换。源文件必须与元数据声明的 `plaintext_size` 和分块格式
 /// 一致，否则不会发布输出文件。
@@ -117,7 +117,7 @@ pub fn rewrite_file_streaming(
     publish_atomic_output(new_file, new_path, false)
 }
 
-/// 通过首个分块判断工作区文件可以使用哪一把数据主密钥解密。
+/// 通过首个分块判断 `.enc` 文件可以使用哪一把数据主密钥解密。
 ///
 /// 返回 `keys` 中命中密钥的索引。该函数只读取首个分块，不写出明文；完整改密可
 /// 据此判断文件是否已经迁移到当前数据主密钥。

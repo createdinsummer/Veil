@@ -4,35 +4,33 @@ use std::fs;
 use tempfile::TempDir;
 use veil_core::kdf;
 use veil_core::metadata::{AlgorithmId, MetaHeader};
-use veil_core::workspace_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, WorkspaceManager};
+use veil_core::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
 
 /// 验证工作区初始化、元数据读取和空文件列表。
 #[test]
-fn test_workspace_init_and_operations() {
+fn test_work_init_and_operations() {
     kdf::enable_fast_test_kdf();
     // 创建临时目录
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
+    let veil_dir = temp_dir.path().join("test-veil");
 
     // 创建工作区管理器
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let manager = VeilManager::new(veil_dir.clone());
 
     // 初始化容器
     let password = "test-password-123";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     // 验证 .veil-meta 文件存在，并记录实际的 ChaCha20-Poly1305 算法。
-    let meta_path = workspace_path.join(".veil-meta");
+    let meta_path = veil_dir.join(".veil-meta");
     assert!(meta_path.exists());
     let header = MetaHeader::from_bytes(&fs::read(meta_path).unwrap()).unwrap();
     assert_eq!(header.algorithm, AlgorithmId::ChaCha20Poly1305);
 
     // 读取元数据
     let meta = manager.read_meta(password).unwrap();
-    assert_eq!(meta.container_name, "test-container");
-    assert_eq!(meta.workspace_type, "default");
+    assert_eq!(meta.veil_name, "test-veil");
+    assert_eq!(meta.work_type, "default");
     assert_eq!(meta.files.len(), 0);
     assert_eq!(meta.data_keys.len(), 1);
 
@@ -44,13 +42,11 @@ fn test_workspace_init_and_operations() {
 fn test_add_and_extract_file() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
 
     let password = "test-password-123";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     // 创建测试文件
     let test_file = temp_dir.path().join("test.txt");
@@ -61,7 +57,7 @@ fn test_add_and_extract_file() {
     println!("✓ 文件已加密: {}", encrypted_name);
 
     // 验证加密文件存在
-    assert!(workspace_path.join(&encrypted_name).exists());
+    assert!(veil_dir.join(&encrypted_name).exists());
 
     // 列出文件
     let files = manager.list_files(password).unwrap();
@@ -90,18 +86,16 @@ fn test_added_ciphertext_is_private() {
 
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let source = temp_dir.path().join("private.txt");
     fs::write(&source, b"private").unwrap();
     let encrypted_name = manager.add_file(&source, password).unwrap();
 
-    let mode = fs::metadata(workspace_path.join(encrypted_name))
+    let mode = fs::metadata(veil_dir.join(encrypted_name))
         .unwrap()
         .permissions()
         .mode()
@@ -114,13 +108,11 @@ fn test_added_ciphertext_is_private() {
 fn test_wrong_password() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path);
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir);
 
     let password = "correct-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     // 使用错误密码应该失败
     let result = manager.read_meta("wrong-password");
@@ -134,13 +126,11 @@ fn test_wrong_password() {
 fn test_remove_file() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
 
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     // 添加文件
     let test_file = temp_dir.path().join("delete-me.txt");
@@ -148,14 +138,14 @@ fn test_remove_file() {
     let encrypted_name = manager.add_file(&test_file, password).unwrap();
 
     // 验证文件存在
-    assert!(workspace_path.join(&encrypted_name).exists());
+    assert!(veil_dir.join(&encrypted_name).exists());
     assert_eq!(manager.list_files(password).unwrap().len(), 1);
 
     // 删除文件
     manager.remove_file("delete-me.txt", password).unwrap();
 
     // 验证文件已删除
-    assert!(!workspace_path.join(&encrypted_name).exists());
+    assert!(!veil_dir.join(&encrypted_name).exists());
     assert_eq!(manager.list_files(password).unwrap().len(), 0);
 
     println!("✓ 文件删除成功");
@@ -166,12 +156,10 @@ fn test_remove_file() {
 fn test_add_file_destination_replaces_existing() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     fs::write(&source, b"first").unwrap();
@@ -182,7 +170,7 @@ fn test_add_file_destination_replaces_existing() {
     let files = manager.list_files(password).unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "nested/renamed.txt");
-    assert!(workspace_path.join(&first[0]).exists());
+    assert!(veil_dir.join(&first[0]).exists());
 
     fs::write(&source, b"second").unwrap();
     let second = manager
@@ -193,8 +181,8 @@ fn test_add_file_destination_replaces_existing() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "nested/renamed.txt");
     assert_eq!(files[0].size, 6);
-    assert!(!workspace_path.join(&first[0]).exists());
-    assert!(workspace_path.join(&second[0]).exists());
+    assert!(!veil_dir.join(&first[0]).exists());
+    assert!(veil_dir.join(&second[0]).exists());
 
     let output = temp_dir.path().join("output.txt");
     manager
@@ -208,21 +196,19 @@ fn test_add_file_destination_replaces_existing() {
 fn test_add_files_wrong_password_does_not_write_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "correct-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     fs::write(&source, b"secret").unwrap();
 
-    let before = encrypted_file_count(&workspace_path);
+    let before = encrypted_file_count(&veil_dir);
     let result = manager.add_files(&[AddFileSpec::new(&source, "source.txt")], "wrong-password");
 
     assert!(result.is_err());
-    assert_eq!(encrypted_file_count(&workspace_path), before);
+    assert_eq!(encrypted_file_count(&veil_dir), before);
     assert!(manager.list_files(password).unwrap().is_empty());
 }
 
@@ -231,12 +217,10 @@ fn test_add_files_wrong_password_does_not_write_ciphertext() {
 fn test_remove_directory_recursively() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let top = temp_dir.path().join("top.txt");
     let deep = temp_dir.path().join("deep.txt");
@@ -262,7 +246,7 @@ fn test_remove_directory_recursively() {
     let files = manager.list_files(password).unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "keep.txt");
-    assert_eq!(encrypted_file_count(&workspace_path), 1);
+    assert_eq!(encrypted_file_count(&veil_dir), 1);
 }
 
 /// 验证文件重命名和移动到已有目录。
@@ -270,12 +254,10 @@ fn test_remove_directory_recursively() {
 fn test_move_file_into_directory_and_rename() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path);
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir);
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     let existing = temp_dir.path().join("existing.txt");
@@ -320,12 +302,10 @@ fn test_move_file_into_directory_and_rename() {
 fn test_move_directory_recursively() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path);
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir);
     let password = "test-password";
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
 
     let top = temp_dir.path().join("top.txt");
     let deep = temp_dir.path().join("deep.txt");
@@ -374,11 +354,11 @@ fn test_move_directory_recursively() {
 fn test_change_password_full_failure_keeps_old_password() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let old_password = "old-password";
     manager
-        .init_container("test-container", "default", old_password)
+        .init_veil("test-veil", "default", old_password)
         .unwrap();
 
     let first = temp_dir.path().join("first.txt");
@@ -401,7 +381,7 @@ fn test_change_password_full_failure_keeps_old_password() {
         .into_iter()
         .find(|file| file.original_name == "second.txt")
         .unwrap();
-    fs::remove_file(workspace_path.join(missing.encrypted_name)).unwrap();
+    fs::remove_file(veil_dir.join(missing.encrypted_name)).unwrap();
 
     let result = manager.change_password_full(old_password, "new-password");
     assert!(result.is_err());
@@ -411,7 +391,7 @@ fn test_change_password_full_failure_keeps_old_password() {
     let files = manager.list_files(old_password).unwrap();
     assert_eq!(files.len(), 2);
     assert!(
-        !fs::read_dir(&workspace_path)
+        !fs::read_dir(&veil_dir)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().starts_with(".veil-pw-"))
@@ -423,13 +403,13 @@ fn test_change_password_full_failure_keeps_old_password() {
 fn test_change_password_full_can_resume_after_partial_migration() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let old_password = "old-password";
     let new_password = "new-password";
 
     manager
-        .init_container("test-container", "default", old_password)
+        .init_veil("test-veil", "default", old_password)
         .unwrap();
     let first = temp_dir.path().join("first.txt");
     let second = temp_dir.path().join("second.txt");
@@ -451,7 +431,7 @@ fn test_change_password_full_can_resume_after_partial_migration() {
         .into_iter()
         .find(|entry| entry.original_name == "second.txt")
         .unwrap();
-    let second_path = workspace_path.join(&second_entry.encrypted_name);
+    let second_path = veil_dir.join(&second_entry.encrypted_name);
     let second_ciphertext = fs::read(&second_path).unwrap();
     fs::remove_file(&second_path).unwrap();
 
@@ -485,19 +465,17 @@ fn test_change_password_full_can_resume_after_partial_migration() {
 fn test_metadata_nonce_rotates_on_commit() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
 
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
-    let first = MetaHeader::from_bytes(&fs::read(workspace_path.join(".veil-meta")).unwrap())
+    manager.init_veil("test-veil", "default", password).unwrap();
+    let first = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-meta")).unwrap())
         .unwrap()
         .nonce;
 
     manager.update_meta(password, |_| {}).unwrap();
-    let second = MetaHeader::from_bytes(&fs::read(workspace_path.join(".veil-meta")).unwrap())
+    let second = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-meta")).unwrap())
         .unwrap()
         .nonce;
 
@@ -509,25 +487,23 @@ fn test_metadata_nonce_rotates_on_commit() {
 fn test_crash_orphans_are_cleaned_after_successful_read() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
 
-    manager
-        .init_container("test-container", "default", password)
-        .unwrap();
+    manager.init_veil("test-veil", "default", password).unwrap();
     let source = temp_dir.path().join("keep.txt");
     fs::write(&source, b"keep").unwrap();
     let encrypted_name = manager.add_file(&source, password).unwrap();
 
-    let orphan = workspace_path.join(format!("{}.enc", "a".repeat(32)));
-    let temp = workspace_path.join(".veil-tmp-crashed");
+    let orphan = veil_dir.join(format!("{}.enc", "a".repeat(32)));
+    let temp = veil_dir.join(".veil-tmp-crashed");
     fs::write(&orphan, b"orphan").unwrap();
     fs::write(&temp, b"partial").unwrap();
 
     manager.read_meta(password).unwrap();
 
-    assert!(workspace_path.join(encrypted_name).exists());
+    assert!(veil_dir.join(encrypted_name).exists());
     assert!(!orphan.exists());
     assert!(!temp.exists());
 }
@@ -537,13 +513,13 @@ fn test_crash_orphans_are_cleaned_after_successful_read() {
 fn test_change_password_metadata_only_keeps_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let old_password = "old-password";
     let new_password = "new-password";
 
     manager
-        .init_container("test-container", "default", old_password)
+        .init_veil("test-veil", "default", old_password)
         .unwrap();
     let source = temp_dir.path().join("data.txt");
     fs::write(&source, b"secret").unwrap();
@@ -559,12 +535,10 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
         .collect();
     let old_ciphertexts: Vec<_> = old_names
         .iter()
-        .map(|name| fs::read(workspace_path.join(name)).unwrap())
+        .map(|name| fs::read(veil_dir.join(name)).unwrap())
         .collect();
 
-    manager
-        .change_password(old_password, new_password)
-        .unwrap();
+    manager.change_password(old_password, new_password).unwrap();
 
     let new_names: std::collections::HashSet<_> = manager
         .list_files(new_password)
@@ -577,10 +551,10 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
         old_ciphertexts,
         new_names
             .iter()
-            .map(|name| fs::read(workspace_path.join(name)).unwrap())
+            .map(|name| fs::read(veil_dir.join(name)).unwrap())
             .collect::<Vec<_>>()
     );
-    assert!(new_names.iter().all(|name| workspace_path.join(name).exists()));
+    assert!(new_names.iter().all(|name| veil_dir.join(name).exists()));
     assert!(manager.read_meta(old_password).is_err());
 
     let output = temp_dir.path().join("output.txt");
@@ -595,13 +569,13 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
 fn test_change_password_full_reencrypts_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path.clone());
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir.clone());
     let old_password = "old-password";
     let new_password = "new-password";
 
     manager
-        .init_container("test-container", "default", old_password)
+        .init_veil("test-veil", "default", old_password)
         .unwrap();
     let first = temp_dir.path().join("first.txt");
     let second = temp_dir.path().join("second.txt");
@@ -635,7 +609,7 @@ fn test_change_password_full_reencrypts_ciphertext() {
         .map(|entry| entry.encrypted_name)
         .collect();
     assert!(old_names.is_disjoint(&new_names));
-    assert!(old_names.iter().all(|name| !workspace_path.join(name).exists()));
+    assert!(old_names.iter().all(|name| !veil_dir.join(name).exists()));
     assert!(manager.read_meta(old_password).is_err());
 
     let output = temp_dir.path().join("first-out.txt");
@@ -647,11 +621,11 @@ fn test_change_password_full_reencrypts_ciphertext() {
 
 /// 验证工作区对跨多个分块的大文件执行添加、完整改密和导出。
 #[test]
-fn test_workspace_streaming_multichunk_full_rekey() {
+fn test_work_streaming_multichunk_full_rekey() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
-    let workspace_path = temp_dir.path().join("test-container");
-    let manager = WorkspaceManager::new(workspace_path);
+    let veil_dir = temp_dir.path().join("test-veil");
+    let manager = VeilManager::new(veil_dir);
     let old_password = "old-password";
     let new_password = "new-password";
     let plaintext: Vec<u8> = (0..veil_core::file_ops::CHUNK_SIZE * 2 + 123)
@@ -659,7 +633,7 @@ fn test_workspace_streaming_multichunk_full_rekey() {
         .collect();
 
     manager
-        .init_container("test-container", "default", old_password)
+        .init_veil("test-veil", "default", old_password)
         .unwrap();
     let source = temp_dir.path().join("large.bin");
     fs::write(&source, &plaintext).unwrap();
@@ -679,8 +653,8 @@ fn test_workspace_streaming_multichunk_full_rekey() {
 }
 
 /// 统计工作区根目录下的密文文件数量。
-fn encrypted_file_count(workspace_path: &std::path::Path) -> usize {
-    fs::read_dir(workspace_path)
+fn encrypted_file_count(veil_dir: &std::path::Path) -> usize {
+    fs::read_dir(veil_dir)
         .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| {

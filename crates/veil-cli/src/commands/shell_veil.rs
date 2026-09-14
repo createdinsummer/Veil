@@ -1,29 +1,28 @@
-//! `veil shell` 子命令：提供针对单个容器的交互式命令循环。
+//! `veil shell` 子命令：提供针对单个 Veil 的交互式命令循环。
 
 use crate::error::Result;
 use colored::Colorize;
 use std::io::{self, Write};
-use veil_core::workspace_ops::WorkspaceManager;
+use veil_core::veil_ops::VeilManager;
 
 /// 验证密码后进入交互式文件管理会话。
 ///
 /// 支持 `ls`、`info`、`add`、`rm`、`ex`、`help` 和 `exit`；每次操作都复用已解析的
-/// 工作区管理器，并在读取信息时重新解密最新元数据。
+/// Veil 管理器，并在读取信息时重新解密最新元数据。
 ///
 /// # 错误
-/// 容器解析、密码读取、标准输入输出操作或会话建立失败时返回错误。
-pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
-    // shell 生命周期内复用同一 WorkspaceManager，避免每次命令重新解析链接。
-    let resolved = super::resolve_container(container_name)?;
-    let display_name = resolved.name.clone();
-    let manager = super::workspace_manager(&resolved);
+/// Veil 解析、密码读取、标准输入输出操作或会话建立失败时返回错误。
+pub fn run_veil(veil_name: &str, password: Option<String>) -> Result<()> {
+    // shell 生命周期内复用同一 VeilManager，避免每次命令重新解析链接。
+    let resolved = super::resolve_veil(veil_name)?;
+    let display_name = resolved.veil_name.clone();
+    let manager = super::veil_manager(&resolved);
 
     crate::outln!(
         "{}",
-        crate::i18n::t1("shell.opening_named", "name", container_name).cyan()
+        crate::i18n::t1("shell.opening_named", "name", veil_name).cyan()
     );
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let pwd = password_str.expose_secret();
@@ -56,7 +55,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
         let parts: Vec<&str> = input.split_whitespace().collect();
         let cmd = parts[0];
 
-        // 命令分发保持轻量，具体文件操作仍委托给 WorkspaceManager。
+        // 命令分发保持轻量，具体文件操作仍委托给 VeilManager。
         match cmd {
             "exit" | "quit" | "q" => {
                 crate::outln!("{}", crate::i18n::t("shell.goodbye").bright_black());
@@ -209,7 +208,7 @@ fn print_help() {
 ///
 /// # 错误
 /// 元数据读取或密码校验失败时返回错误。
-fn list_files(manager: &WorkspaceManager, password: &str) -> Result<()> {
+fn list_files(manager: &VeilManager, password: &str) -> Result<()> {
     let files = manager.list_files(password)?;
 
     // 空容器只显示空状态，不打印表头。
@@ -247,21 +246,17 @@ fn list_files(manager: &WorkspaceManager, password: &str) -> Result<()> {
 
 /// 使用已解密元数据展示容器身份和内容统计。
 ///
-/// 当前实现不读取 `_container_name`，容器名称直接取自 `metadata`。
-fn show_info(_container_name: &str, metadata: &veil_core::metadata::MetaData) -> Result<()> {
+/// 当前实现不读取 `_veil_name`，容器名称直接取自 `metadata`。
+fn show_info(_veil_name: &str, metadata: &veil_core::metadata::MetaData) -> Result<()> {
     // info 子命令直接复用已解密元数据，不进行第二次读取。
     crate::outln!("{}", crate::i18n::t("info.title").bright_cyan());
     crate::outln!(
         "{}",
-        crate::i18n::t1("info.container_name", "name", &metadata.container_name)
+        crate::i18n::t1("info.veil_name", "name", &metadata.veil_name)
     );
     crate::outln!(
         "{}",
-        crate::i18n::t1(
-            "info.workspace_type",
-            "workspace_type",
-            &metadata.workspace_type
-        )
+        crate::i18n::t1("info.work_type", "work_type", &metadata.work_type)
     );
     crate::outln!(
         "{}",

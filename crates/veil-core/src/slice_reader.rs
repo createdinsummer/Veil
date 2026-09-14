@@ -31,7 +31,12 @@ impl<R: Seek> SliceReader<R> {
     pub fn new(mut inner: R, start: u64, len: u64) -> io::Result<Self> {
         // 构造时同步底层游标，之后 pos 始终只表达区间内相对位置。
         inner.seek(SeekFrom::Start(start))?;
-        Ok(Self { inner, start, len, pos: 0 })
+        Ok(Self {
+            inner,
+            start,
+            len,
+            pos: 0,
+        })
     }
 }
 
@@ -127,10 +132,10 @@ mod tests {
         let mut reader = SliceReader::new(Cursor::new(data), 3, 4).unwrap();
 
         // 段内坐标 2 → 底层第 5 字节
-        reader.seek(SeekFrom::Start(2)).unwrap();// 设置段内游标到 2
+        reader.seek(SeekFrom::Start(2)).unwrap(); // 设置段内游标到 2
         let mut one = [0u8; 1]; // 申请一个字节的缓冲区
         // read_exact 会读取，直到填满 one，否则返回错误
-        reader.read_exact(&mut one).unwrap();// 读取一个字节，填满 one
+        reader.read_exact(&mut one).unwrap(); // 读取一个字节，填满 one
         assert_eq!(one[0], 5);
 
         // 从末尾往前 1 → 段内位置 3 → 底层第 6 字节

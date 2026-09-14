@@ -1,8 +1,8 @@
 //! `.veil-link` 便携定位文件模型。
 //!
-//! 链接文件保存容器所在卷、相对卷根的路径以及展示信息，不保存任何文件内容或密码。
+//! 链接文件保存 Veil 所在卷、相对卷根的路径以及展示信息，不保存任何文件内容或密码。
 //! 它可被复制到其他位置，并可通过配置中的原始字节副本恢复；容器身份始终以
-//! `veil_id` 为准，工作区路径变化不会改变身份。
+//! `veil_id` 为准，`veil_dir` 变化不会改变身份。
 
 use crate::error::VeilError;
 use crate::volume;
@@ -21,25 +21,25 @@ pub struct VeilLink {
     pub version: String,
     /// RFC 3339 格式的链接创建时间。
     pub created_at: String,
-    /// 工作区位置与容器身份信息。
-    pub workspace: LinkWorkspace,
+    /// Veil 目录位置与容器身份信息。
+    pub veil: LinkVeil,
     /// 容器使用的加密方案描述。
     pub encryption: LinkEncryption,
     /// 可选展示元数据。
     pub metadata: LinkMetadata,
 }
 
-/// 容器目录的位置和基础身份信息。
+/// Veil 目录的位置和基础身份信息。
 ///
 /// `path` 相对卷根目录保存，不写入容器自己的 `.veil-meta`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LinkWorkspace {
+pub struct LinkVeil {
     /// 不随路径或展示名称变化的容器稳定 ID。
     pub veil_id: String,
     /// 面向用户的容器名称。
-    pub container_name: String,
+    pub veil_name: String,
 
-    /// 工作区相对于卷根目录的路径。
+    /// `veil_dir` 相对于卷根目录的路径。
     pub path: PathBuf,
 
     /// 稳定卷 ID。
@@ -48,7 +48,7 @@ pub struct LinkWorkspace {
     /// 链接创建时记录的卷展示名称。
     pub volume_label: String,
 
-    /// RFC 3339 格式的工作区记录创建时间。
+    /// RFC 3339 格式的 Veil 目录记录创建时间。
     pub created_at: String,
 }
 
@@ -83,22 +83,22 @@ pub struct LinkMetadata {
 }
 
 impl VeilLink {
-    /// 使用容器身份、工作区相对路径和卷信息构造新链接。
+    /// 使用 Veil 身份、`veil_dir` 相对路径和卷信息构造新链接。
     pub fn new(
         veil_id: impl Into<String>,
-        container_name: impl Into<String>,
+        veil_name: impl Into<String>,
         relative_path: PathBuf,
         volume_id: impl Into<String>,
         volume_label: impl Into<String>,
     ) -> Self {
-        // 链接创建时间与工作区记录时间使用同一次采样，保证首次序列化一致。
+        // 链接创建时间与 Veil 目录记录时间使用同一次采样，保证首次序列化一致。
         let now = now();
         Self {
             version: default_version(),
             created_at: now.clone(),
-            workspace: LinkWorkspace {
+            veil: LinkVeil {
                 veil_id: veil_id.into(),
-                container_name: container_name.into(),
+                veil_name: veil_name.into(),
                 path: relative_path,
                 volume_id: volume_id.into(),
                 volume_label: volume_label.into(),
@@ -143,32 +143,32 @@ impl VeilLink {
         Ok(())
     }
 
-    /// 根据链接所在位置解析其工作区路径。
+    /// 根据链接所在位置解析其 `veil_dir`。
     ///
     /// 只有链接当前所在卷的 ID 与链接记录一致时才允许拼接相对路径。
     ///
     /// # 错误
-    /// 卷识别失败或链接与工作区不在同一卷时返回错误。
-    pub fn resolve_workspace_path(&self, link_path: &Path) -> Result<PathBuf, VeilError> {
+    /// 卷识别失败或链接与 Veil 目录不在同一卷时返回错误。
+    pub fn resolve_veil_dir(&self, link_path: &Path) -> Result<PathBuf, VeilError> {
         // 先确认链接当前落在目标卷，避免把相对路径错误拼到另一块磁盘。
         let link_volume = volume::volume_for_path(link_path)?;
-        if link_volume.volume_id == self.workspace.volume_id {
-            return Ok(link_volume.mount_path.join(&self.workspace.path));
+        if link_volume.volume_id == self.veil.volume_id {
+            return Ok(link_volume.mount_path.join(&self.veil.path));
         }
 
         Err(VeilError::VolumeUnavailable(format!(
             "卷 {} ({}) 未挂载；链接位于卷 {}",
-            self.workspace.volume_id, self.workspace.volume_label, link_volume.volume_label
+            self.veil.volume_id, self.veil.volume_label, link_volume.volume_label
         )))
     }
 
-    /// 优先使用调用方提供的挂载路径解析工作区。
+    /// 优先使用调用方提供的挂载路径解析 `veil_dir`。
     ///
     /// `mount_path` 存在时直接与其拼接；否则回退到按链接所在卷解析。
     ///
     /// # 错误
     /// 未提供挂载路径且卷校验失败时返回错误。
-    pub fn resolve_workspace_path_with_mount(
+    pub fn resolve_veil_dir_with_mount(
         &self,
         link_path: &Path,
         mount_path: Option<&Path>,
@@ -176,54 +176,52 @@ impl VeilLink {
         // 配置缓存提供挂载点时可跳过卷探测，适用于卷 ID 已注册的场景。
         if let Some(mount_path) = mount_path {
             let mounted_volume = volume::volume_for_path(mount_path)?;
-            if mounted_volume.volume_id != self.workspace.volume_id {
+            if mounted_volume.volume_id != self.veil.volume_id {
                 return Err(VeilError::VolumeUnavailable(format!(
                     "卷 {} ({}) 当前不可用；缓存挂载点属于卷 {}",
-                    self.workspace.volume_id,
-                    self.workspace.volume_label,
-                    mounted_volume.volume_label
+                    self.veil.volume_id, self.veil.volume_label, mounted_volume.volume_label
                 )));
             }
-            return Ok(mounted_volume.mount_path.join(&self.workspace.path));
+            return Ok(mounted_volume.mount_path.join(&self.veil.path));
         }
 
         // 没有缓存挂载点时必须回到链接自身的卷身份校验。
-        self.resolve_workspace_path(link_path)
+        self.resolve_veil_dir(link_path)
     }
 
-    /// 返回工作区记录的容器展示名称。
-    pub fn container_name(&self) -> String {
-        self.workspace.container_name.clone()
+    /// 返回链接记录的 Veil 展示名称。
+    pub fn veil_name(&self) -> String {
+        self.veil.veil_name.clone()
     }
 
-    /// 校验链接身份和相对工作区路径。
+    /// 校验链接身份和 `veil_dir` 相对路径。
     fn validate(&self) -> Result<(), VeilError> {
-        if self.workspace.veil_id.trim().is_empty() {
+        if self.veil.veil_id.trim().is_empty() {
             return Err(VeilError::InvalidFormat("链接缺少 veil_id".to_string()));
         }
-        if self.workspace.container_name.trim().is_empty() {
+        if self.veil.veil_name.trim().is_empty() {
             return Err(VeilError::InvalidFormat("链接缺少容器名称".to_string()));
         }
-        if self.workspace.volume_id.trim().is_empty() {
+        if self.veil.volume_id.trim().is_empty() {
             return Err(VeilError::InvalidFormat("链接缺少 volume_id".to_string()));
         }
 
         let mut has_normal_component = false;
-        for component in self.workspace.path.components() {
+        for component in self.veil.path.components() {
             match component {
                 Component::Normal(_) => has_normal_component = true,
                 Component::CurDir => {}
                 Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                     return Err(VeilError::InvalidFormat(format!(
-                        "链接工作区路径必须是安全的相对路径: {}",
-                        self.workspace.path.display()
+                        "链接中的 Veil 目录必须是安全的相对路径: {}",
+                        self.veil.path.display()
                     )));
                 }
             }
         }
         if !has_normal_component {
             return Err(VeilError::InvalidFormat(
-                "链接工作区路径不能为空".to_string(),
+                "链接中的 Veil 目录不能为空".to_string(),
             ));
         }
         Ok(())
@@ -263,7 +261,7 @@ mod tests {
         let link = VeilLink::new(
             "veil-1234",
             "photos",
-            PathBuf::from(".veil/workspaces/default/photos"),
+            PathBuf::from(".veil/works/default/photos"),
             "fs:abcd",
             "MyUSB",
         );
@@ -271,18 +269,18 @@ mod tests {
         link.save(&link_path).unwrap();
         let loaded = VeilLink::load(&link_path).unwrap();
 
-        assert_eq!(loaded.workspace.veil_id, "veil-1234");
-        assert_eq!(loaded.container_name(), "photos");
+        assert_eq!(loaded.veil.veil_id, "veil-1234");
+        assert_eq!(loaded.veil_name(), "photos");
         assert_eq!(loaded.encryption.algorithm, "ChaCha20-Poly1305");
     }
 
     /// 验证绝对路径、父目录穿越和空路径在保存与加载时都会被拒绝。
     #[test]
-    fn rejects_unsafe_workspace_paths() {
+    fn rejects_unsafe_veil_dirs() {
         let dir = tempfile::TempDir::new().unwrap();
 
         for invalid_path in [
-            PathBuf::from("/absolute/workspace"),
+            PathBuf::from("/absolute/work"),
             PathBuf::from("../outside"),
             PathBuf::from("safe/../../outside"),
             PathBuf::new(),
@@ -294,7 +292,7 @@ mod tests {
 
     /// 验证加载被手工改写的绝对路径链接时也会拒绝。
     #[test]
-    fn load_rejects_absolute_workspace_path() {
+    fn load_rejects_absolute_veil_dir() {
         let dir = tempfile::TempDir::new().unwrap();
         let link_path = dir.path().join("unsafe.veil-link");
         fs::write(
@@ -302,10 +300,10 @@ mod tests {
             r#"version = "1.0"
 created_at = "2026-01-01T00:00:00+00:00"
 
-[workspace]
+[veil]
 veil_id = "veil-1234"
-container_name = "photos"
-path = "/absolute/workspace"
+veil_name = "photos"
+path = "/absolute/work"
 volume_id = "fs:abcd"
 volume_label = "MyUSB"
 created_at = "2026-01-01T00:00:00+00:00"
@@ -330,13 +328,13 @@ key_derivation = "Argon2id"
         let link = VeilLink::new(
             "veil-1234",
             "photos",
-            PathBuf::from(".veil/workspaces/default/photos"),
+            PathBuf::from(".veil/works/default/photos"),
             "fs:definitely-wrong",
             "MissingDisk",
         );
 
         assert!(matches!(
-            link.resolve_workspace_path_with_mount(&link_path, Some(dir.path())),
+            link.resolve_veil_dir_with_mount(&link_path, Some(dir.path())),
             Err(VeilError::VolumeUnavailable(_))
         ));
     }
@@ -352,7 +350,7 @@ key_derivation = "Argon2id"
         let link = VeilLink::new(
             "veil-1234",
             "photos",
-            PathBuf::from(".veil/workspaces/default/photos"),
+            PathBuf::from(".veil/works/default/photos"),
             "fs:abcd",
             "MyUSB",
         );

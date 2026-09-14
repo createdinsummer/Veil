@@ -14,7 +14,7 @@ use veil_core::volume;
 /// 工作区时会读取明文头部身份并构造新链接。
 ///
 /// # 参数
-/// - `target`：容器名、`veil_id`、工作区路径或现有链接路径。
+/// - `target`：Veil 名、`veil_id`、`veil_dir` 或现有链接路径。
 /// - `output`：输出链接路径；省略时使用当前目录下的默认文件名。
 ///
 /// # 错误
@@ -25,10 +25,10 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     if resolved.veil_id.is_empty() {
         crate::cli_bail!(LinkMissingVeilId);
     }
-    let manager = super::workspace_manager(&resolved);
+    let manager = super::veil_manager(&resolved);
     let output_path = output
         .map(PathBuf::from)
-        .unwrap_or_else(|| super::default_link_path(&resolved.name));
+        .unwrap_or_else(|| super::default_link_path(&resolved.veil_name));
 
     if output_path
         .extension()
@@ -50,20 +50,20 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
             // 已有链接直接逐字节复制，避免重新序列化改变内容。
             std::fs::copy(existing_link, &output_path)?;
             config.cache_link(&output_path)?;
-        } else if config.find_container_key(&resolved.veil_id).is_some() {
+        } else if config.find_veil_key(&resolved.veil_id).is_some() {
             // 容器已注册但没有现有链接时，由配置模型生成新链接。
             config.register_link(&resolved.veil_id, &output_path)?;
         } else {
             // 未注册的脱离工作区也使用解析阶段确认过的稳定 ID。
-            let volume = volume::volume_for_path(&manager.workspace_path)?;
+            let volume = volume::volume_for_path(&manager.veil_dir)?;
             let relative_path = manager
-                .workspace_path
+                .veil_dir
                 .strip_prefix(&volume.mount_path)
-                .unwrap_or(&manager.workspace_path)
+                .unwrap_or(&manager.veil_dir)
                 .to_path_buf();
             VeilLink::new(
                 resolved.veil_id.clone(),
-                resolved.name.clone(),
+                resolved.veil_name.clone(),
                 relative_path,
                 volume.volume_id,
                 volume.volume_label,

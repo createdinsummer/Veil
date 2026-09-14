@@ -62,14 +62,12 @@ fn init_creates_a_reusable_veil_link() {
         .args(["init", "demo", "test-password"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Container created successfully: demo",
-        ))
+        .stdout(predicate::str::contains("Veil created successfully: demo"))
         .stdout(predicate::str::contains(
             "demo.veil-link is just a data entry point and does not store data",
         ))
-        .stdout(predicate::str::contains("Data is stored in the workspace:"))
-        .stdout(predicate::str::contains("/.veil/workspaces/default/veil-"))
+        .stdout(predicate::str::contains("Data is stored in the work:"))
+        .stdout(predicate::str::contains("/.veil/works/default/veil-"))
         .stdout(predicate::str::contains("veil pack demo.veil-link"))
         .stdout(predicate::str::contains("veil unpack <file.veil>"))
         .stdout(predicate::str::contains("veil config --hints off"));
@@ -78,7 +76,7 @@ fn init_creates_a_reusable_veil_link() {
     assert!(link_path.exists());
     let link = std::fs::read_to_string(&link_path).unwrap();
     assert!(link.contains("veil_id = \"veil-"));
-    assert!(link.contains("container_name = \"demo\""));
+    assert!(link.contains("veil_name = \"demo\""));
     assert!(link.contains("volume_id = "));
     assert!(link.contains("algorithm = \"ChaCha20-Poly1305\""));
 
@@ -97,7 +95,7 @@ fn init_creates_a_reusable_veil_link() {
 
 /// 验证每个新容器都会显示独立的首次使用引导。
 #[test]
-fn init_guidance_is_shown_for_each_new_container() {
+fn init_guidance_is_shown_for_each_new_veil() {
     let env = TestEnv::new("test-password");
 
     for name in ["first", "second"] {
@@ -156,7 +154,7 @@ fn missing_link_is_rebuilt_from_config() {
 
 /// 验证操作一个容器不会顺带恢复其他缺失链接。
 #[test]
-fn operating_one_container_does_not_restore_sibling_link() {
+fn operating_one_veil_does_not_restore_sibling_link() {
     let env = TestEnv::new("test-password");
     let first_link = env.init("first");
     let second_link = env.init("second");

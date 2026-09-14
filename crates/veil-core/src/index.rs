@@ -164,7 +164,7 @@ pub fn list_files(root: &Tree) -> Vec<(String, FileMeta)> {
 /// # 错误
 /// 如果模式无效则返回 `Err`。
 pub fn match_files(root: &Tree, pattern: &str) -> Result<Vec<(String, FileMeta)>> {
-    use glob::{Pattern, MatchOptions};
+    use glob::{MatchOptions, Pattern};
 
     // 先验证模式，避免无效 glob 进入逐文件匹配阶段。
     let glob_pattern = Pattern::new(pattern)

@@ -29,11 +29,11 @@ struct Cli {
 /// 按当前语言替换。
 #[derive(Subcommand)]
 enum Commands {
-    /// 创建新的工作区容器和链接文件。
+    /// 创建新的 Veil 和链接文件。
     Init {
-        // 新容器名称或链接输出目标。
-        #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        // 新 Veil 名称或链接输出目标。
+        #[arg(value_name = "Veil 名称")]
+        veil: Option<String>,
         // 位置参数形式的密码；实际输入仍由命令层统一处理。
         #[arg(value_name = "密码")]
         password: Option<String>,
@@ -50,11 +50,11 @@ enum Commands {
         link: Option<String>,
         // 已注册的命名工作区查找键，不是文件系统路径。
         #[arg(short = 'w', long, value_name = "工作区", help = "使用命名工作区")]
-        workspace: Option<String>,
+        work: Option<String>,
         // 指定工作区根路径并自动登记到当前容器，不会新增命名工作区。
         #[arg(long, value_name = "路径", help = "使用指定工作区路径")]
-        workspace_path: Option<String>,
-        // 让 --workspace-path 指定的目录由当前容器独占。
+        work_root: Option<String>,
+        // 让 --work-root 指定的目录由当前容器独占。
         #[arg(long, help = "工作区由该容器独占")]
         dedicated: bool,
         // 强制把工作区放在链接文件所在卷。
@@ -64,9 +64,9 @@ enum Commands {
 
     /// 加密并添加本地文件。
     Add {
-        // 位置参数形式的容器名称、ID 或链接目标。
-        #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        // 位置参数形式的 Veil 名称、ID 或链接目标。
+        #[arg(value_name = "Veil 名称")]
+        veil: Option<String>,
         // 位置参数形式的源文件路径。
         #[arg(value_name = "源路径")]
         input_pos: Option<String>,
@@ -91,7 +91,7 @@ enum Commands {
     Rm {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 要删除的容器内路径。
         #[arg(value_name = "路径")]
         path: Option<String>,
@@ -107,7 +107,7 @@ enum Commands {
     Mv {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的源路径。
         #[arg(value_name = "源路径")]
         from_pos: Option<String>,
@@ -132,7 +132,7 @@ enum Commands {
     Free {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的密码。
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -145,7 +145,7 @@ enum Commands {
     Ex {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的容器内输入路径。
         #[arg(value_name = "输入路径")]
         input_pos: Option<String>,
@@ -170,7 +170,7 @@ enum Commands {
     Info {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的密码。
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -183,7 +183,7 @@ enum Commands {
     List {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的密码。
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -196,7 +196,7 @@ enum Commands {
     Exists {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 要检查的容器内相对路径。
         #[arg(value_name = "路径")]
         path: Option<String>,
@@ -212,7 +212,7 @@ enum Commands {
     Passwd {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的旧密码。
         #[arg(value_name = "旧密码")]
         old_password_pos: Option<String>,
@@ -239,7 +239,7 @@ enum Commands {
     Shell {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 位置参数形式的密码。
         #[arg(value_name = "密码")]
         password_pos: Option<String>,
@@ -252,7 +252,7 @@ enum Commands {
     Pack {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
-        container: Option<String>,
+        veil: Option<String>,
         // 可选的自定义打包文件路径。
         #[arg(short, long, value_name = "输出文件")]
         output: Option<String>,
@@ -274,7 +274,7 @@ enum Commands {
         name: Option<String>,
         // 接收工作区的命名工作区。
         #[arg(short = 'w', long, value_name = "工作区")]
-        workspace: Option<String>,
+        work: Option<String>,
         // 解包后生成的 `.veil-link` 路径。
         #[arg(long, value_name = "链接文件", help = "解包后生成 .veil-link 的路径")]
         link: Option<String>,
@@ -301,8 +301,8 @@ enum Commands {
 
     /// 重建 .veil-link
     Link {
-        // 已注册容器名称、ID、现有链接路径或工作区路径。
-        #[arg(value_name = "容器名、ID、链接或工作区路径")]
+        // 已注册 Veil 名称、ID、现有链接路径或 veil_dir。
+        #[arg(value_name = "Veil 名、ID、链接或目录")]
         target: String,
         // 新链接文件的输出路径。
         #[arg(short, long, value_name = "链接文件")]
@@ -335,7 +335,7 @@ fn build_localized_command() -> clap::Command {
         .help_template(i18n::t("clap.help_template"));
 
     let sub_template = i18n::t("clap.sub_help_template");
-    let v_container = i18n::t("arg.container");
+    let v_veil = i18n::t("arg.veil");
     let v_password = i18n::t("arg.password");
     let v_path = i18n::t("arg.path");
     let v_source = i18n::t("arg.source_path");
@@ -350,9 +350,8 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.init.about"))
             .override_usage(i18n::t("cmd.init.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container)
-                    .help(i18n::t("help.init.container"))
+            .mut_arg("veil", |a| {
+                a.value_name(v_veil).help(i18n::t("help.init.veil"))
             })
             .mut_arg("password", |a| {
                 a.value_name(v_password).help(i18n::t("help.init.password"))
@@ -365,13 +364,13 @@ fn build_localized_command() -> clap::Command {
                 a.value_name(i18n::t("arg.link_file"))
                     .help(i18n::t("help.init.link"))
             })
-            .mut_arg("workspace", |a| {
-                a.value_name(i18n::t("arg.workspace"))
-                    .help(i18n::t("help.init.workspace"))
+            .mut_arg("work", |a| {
+                a.value_name(i18n::t("arg.work"))
+                    .help(i18n::t("help.init.work"))
             })
-            .mut_arg("workspace_path", |a| {
+            .mut_arg("work_root", |a| {
                 a.value_name(i18n::t("arg.path"))
-                    .help(i18n::t("help.init.workspace_path"))
+                    .help(i18n::t("help.init.work_root"))
             })
             .mut_arg("dedicated", |a| a.help(i18n::t("help.init.dedicated")))
             .mut_arg("portable", |a| a.help(i18n::t("help.init.portable")))
@@ -382,9 +381,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.add.about"))
             .override_usage(i18n::t("cmd.add.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("input_pos", |a| {
                 a.value_name(v_input).help(i18n::t("help.add.input_pos"))
             })
@@ -410,9 +407,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.rm.about"))
             .override_usage(i18n::t("cmd.rm.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("path", |a| {
                 a.value_name(v_path).help(i18n::t("help.rm.path"))
             })
@@ -429,9 +424,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.mv.about"))
             .override_usage(i18n::t("cmd.mv.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("from_pos", |a| {
                 a.value_name(v_source).help(i18n::t("help.mv.from_pos"))
             })
@@ -457,9 +450,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.free.about"))
             .override_usage(i18n::t("cmd.free.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("password_pos", |a| {
                 a.value_name(v_password).help(i18n::t("help.password_pos"))
             })
@@ -473,9 +464,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.ex.about"))
             .override_usage(i18n::t("cmd.ex.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("input_pos", |a| {
                 a.value_name(v_input).help(i18n::t("help.ex.input_pos"))
             })
@@ -501,9 +490,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.info.about"))
             .override_usage(i18n::t("cmd.info.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("password_pos", |a| {
                 a.value_name(v_password).help(i18n::t("help.password_pos"))
             })
@@ -517,9 +504,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.list.about"))
             .override_usage(i18n::t("cmd.list.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("password_pos", |a| {
                 a.value_name(v_password).help(i18n::t("help.password_pos"))
             })
@@ -533,9 +518,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.exists.about"))
             .override_usage(i18n::t("cmd.exists.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("path", |a| {
                 a.value_name(v_path).help(i18n::t("help.exists.path"))
             })
@@ -552,9 +535,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.passwd.about"))
             .override_usage(i18n::t("cmd.passwd.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("old_password_pos", |a| {
                 a.value_name(v_old_pw)
                     .help(i18n::t("help.passwd.old_password_pos"))
@@ -579,9 +560,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.shell.about"))
             .override_usage(i18n::t("cmd.shell.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("password_pos", |a| {
                 a.value_name(v_password).help(i18n::t("help.password_pos"))
             })
@@ -595,9 +574,7 @@ fn build_localized_command() -> clap::Command {
         sub.about(i18n::t("cmd.pack.about"))
             .override_usage(i18n::t("cmd.pack.usage"))
             .help_template(sub_template)
-            .mut_arg("container", |a| {
-                a.value_name(v_container).help(i18n::t("help.container"))
-            })
+            .mut_arg("veil", |a| a.value_name(v_veil).help(i18n::t("help.veil")))
             .mut_arg("output", |a| {
                 a.value_name(i18n::t("arg.output_file"))
                     .help(i18n::t("help.pack.output"))
@@ -620,12 +597,12 @@ fn build_localized_command() -> clap::Command {
                     .help(i18n::t("help.unpack.file"))
             })
             .mut_arg("name", |a| {
-                a.value_name(i18n::t("arg.container_name"))
+                a.value_name(i18n::t("arg.veil_name"))
                     .help(i18n::t("help.unpack.name"))
             })
-            .mut_arg("workspace", |a| {
-                a.value_name(i18n::t("arg.workspace"))
-                    .help(i18n::t("help.unpack.workspace"))
+            .mut_arg("work", |a| {
+                a.value_name(i18n::t("arg.work"))
+                    .help(i18n::t("help.unpack.work"))
             })
             .mut_arg("link", |a| {
                 a.value_name(i18n::t("arg.link_file"))
@@ -866,8 +843,8 @@ fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
 }
 
 /// 返回容器参数，缺失时输出对应子命令的帮助并退出。
-fn require_container(container: Option<String>, cmd_name: &str) -> String {
-    container.unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingContainer, cmd_name))
+fn require_veil(veil: Option<String>, cmd_name: &str) -> String {
+    veil.unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingVeil, cmd_name))
 }
 
 /// 显示程序版本，并根据构建模式输出安全提示。
@@ -946,30 +923,30 @@ fn main() {
     let result = match cli.command {
         // init 允许位置密码和 --password 两种写法，优先保留用户实际提供的一项。
         Commands::Init {
-            container,
+            veil,
             password,
             password_opt,
             link,
-            workspace,
-            workspace_path,
+            work,
+            work_root,
             dedicated,
             portable,
         } => {
-            let container = require_container(container, "init");
+            let veil = require_veil(veil, "init");
             let pwd = password.or(password_opt);
             commands::init::run(
-                &container,
+                &veil,
                 pwd,
                 link.as_deref(),
-                workspace.as_deref(),
-                workspace_path.map(Into::into),
+                work.as_deref(),
+                work_root.map(Into::into),
                 dedicated,
                 portable,
             )
         }
         // add 的容器、输入、输出和密码均有位置/选项两套兼容输入。
         Commands::Add {
-            container,
+            veil,
             input_pos,
             output_pos,
             password_pos,
@@ -977,35 +954,35 @@ fn main() {
             output,
             password,
         } => {
-            let container = require_container(container, "add");
+            let veil = require_veil(veil, "add");
             let inp = input_pos.or(input);
             let out = output_pos.or(output);
             let pwd = password_pos.or(password);
 
             if let Some(inp) = inp {
-                commands::add::run(&container, &inp, out.as_deref(), pwd)
+                commands::add::run(&veil, &inp, out.as_deref(), pwd)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingInputPath, "add");
             }
         }
         // rm 至少需要一个容器内路径，缺失时终止前打印两种参数用法。
         Commands::Rm {
-            container,
+            veil,
             path,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "rm");
+            let veil = require_veil(veil, "rm");
             let pwd = password_pos.or(password);
             if let Some(path) = path {
-                commands::rm::run(&container, &path, pwd)
+                commands::rm::run(&veil, &path, pwd)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingDeletePath, "rm");
             }
         }
         // mv 必须同时获得源路径和目标路径，之后才调用元数据重命名。
         Commands::Mv {
-            container,
+            veil,
             from_pos,
             to_pos,
             password_pos,
@@ -1013,30 +990,30 @@ fn main() {
             output,
             password,
         } => {
-            let container = require_container(container, "mv");
+            let veil = require_veil(veil, "mv");
             let from = from_pos.or(input);
             let to = to_pos.or(output);
             let pwd = password_pos.or(password);
 
             if let (Some(from), Some(to)) = (from, to) {
-                commands::mv_workspace::run_workspace(&container, &from, &to, pwd)
+                commands::mv_veil::run_veil(&veil, &from, &to, pwd)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingSourceDestination, "mv");
             }
         }
         // free 只需要容器和可选密码，适合快速检查容器内容。
         Commands::Free {
-            container,
+            veil,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "free");
+            let veil = require_veil(veil, "free");
             let pwd = password_pos.or(password);
-            commands::free_workspace::run_workspace(&container, pwd)
+            commands::free_veil::run_veil(&veil, pwd)
         }
         // ex 的输出路径是必填项，输入路径可为空并交由命令层报错。
         Commands::Ex {
-            container,
+            veil,
             input_pos,
             output_pos,
             password_pos,
@@ -1044,50 +1021,50 @@ fn main() {
             output,
             password,
         } => {
-            let container = require_container(container, "ex");
+            let veil = require_veil(veil, "ex");
             let inp = input_pos.or(input);
             let out = output_pos.or(output);
             let pwd = password_pos.or(password);
 
             if let Some(out) = out {
-                commands::ex::run(&container, inp.as_deref(), &out, pwd)
+                commands::ex::run(&veil, inp.as_deref(), &out, pwd)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingOutputPath, "ex");
             }
         }
         // info 只读取元数据并展示身份与统计信息。
         Commands::Info {
-            container,
+            veil,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "info");
+            let veil = require_veil(veil, "info");
             let pwd = password_pos.or(password);
-            commands::info::run(&container, pwd)
+            commands::info::run(&veil, pwd)
         }
         // list 与 free 共用工作区解析，但输出更偏机器可读的逐项清单。
         Commands::List {
-            container,
+            veil,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "list");
+            let veil = require_veil(veil, "list");
             let pwd = password_pos.or(password);
-            commands::list_workspace::run_workspace(&container, pwd)
+            commands::list_veil::run_veil(&veil, pwd)
         }
         // exists 只判断元数据中的文件或隐式目录是否存在。
         Commands::Exists {
-            container,
+            veil,
             path,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "exists");
+            let veil = require_veil(veil, "exists");
             let path = path.unwrap_or_else(|| {
                 exit_with_help(crate::error::ErrorCode::MissingCheckPath, "exists")
             });
             let pwd = password_pos.or(password);
-            match commands::exists_workspace::run_workspace(&container, &path, pwd) {
+            match commands::exists_veil::run_veil(&veil, &path, pwd) {
                 Ok(true) => Ok(()),
                 Ok(false) => std::process::exit(1),
                 Err(error) => Err(error),
@@ -1095,56 +1072,55 @@ fn main() {
         }
         // passwd 同时接受旧、新密码的位置参数和选项参数。
         Commands::Passwd {
-            container,
+            veil,
             old_password_pos,
             new_password_pos,
             password,
             new_password,
             full,
         } => {
-            let container = require_container(container, "passwd");
+            let veil = require_veil(veil, "passwd");
             let old_pwd = old_password_pos.or(password);
             let new_pwd = new_password_pos.or(new_password);
-            commands::passwd_workspace::run_workspace(&container, old_pwd, new_pwd, full)
+            commands::passwd_veil::run_veil(&veil, old_pwd, new_pwd, full)
         }
         // shell 在密码验证后进入长期交互循环。
         Commands::Shell {
-            container,
+            veil,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "shell");
+            let veil = require_veil(veil, "shell");
             let pwd = password_pos.or(password);
-            commands::shell_workspace::run_workspace(&container, pwd)
+            commands::shell_veil::run_veil(&veil, pwd)
         }
         // pack 输出路径可选，默认值由命令实现根据容器名生成。
         Commands::Pack {
-            container,
+            veil,
             output,
             password_pos,
             password,
         } => {
-            let container = require_container(container, "pack");
+            let veil = require_veil(veil, "pack");
             let pwd = password_pos.or(password);
-            commands::pack_workspace::run_workspace(&container, output.as_deref(), pwd)
+            commands::pack_veil::run_veil(&veil, output.as_deref(), pwd)
         }
         // unpack 输入的 .veil 文件必填，其余名称、工作区和链接路径均可选。
         Commands::Unpack {
             file,
             name,
-            workspace,
+            work,
             link,
             password_pos,
             password,
         } => {
-            let file = file.unwrap_or_else(|| {
-                exit_with_help(crate::error::ErrorCode::MissingContainer, "unpack")
-            });
+            let file = file
+                .unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingVeil, "unpack"));
             let pwd = password_pos.or(password);
-            commands::unpack_workspace::run_workspace(
+            commands::unpack_veil::run_veil(
                 &file,
                 name.as_deref(),
-                workspace.as_deref(),
+                work.as_deref(),
                 link.as_deref(),
                 pwd,
             )

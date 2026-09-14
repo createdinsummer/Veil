@@ -195,15 +195,15 @@ count_enc_files() {
     find "$1" -maxdepth 1 -type f -name '*.enc' ! -name '._*' | wc -l | tr -d ' '
 }
 
-workspace_file_bytes() {
+work_file_bytes() {
     find "$1" -type f -print | while IFS= read -r file; do
         file_size "$file"
     done | awk '{ total += $1 } END { print total + 0 }'
 }
 
-package_entries_match_workspace() {
+package_entries_match_work() {
     package=$1
-    workspace=$2
+    work=$2
     expected_count=$3
     metadata_size=$(dd if="$package" bs=1 skip=14 count=4 2>/dev/null | od -An -tu4 | tr -d ' \n')
     position=$((22 + metadata_size))
@@ -221,7 +221,7 @@ package_entries_match_workspace() {
         extracted_hash=$(hash_file "$extracted")
 
         matched=0
-        for encrypted in "$workspace"/*.enc; do
+        for encrypted in "$work"/*.enc; do
             [ -f "$encrypted" ] || continue
             if [ "$(file_size "$encrypted")" = "$data_size" ] && [ "$(hash_file "$encrypted")" = "$extracted_hash" ]; then
                 matched=1
@@ -242,7 +242,7 @@ package_entries_match_workspace() {
 PRE_HASH=""
 POST_HASH=""
 
-snapshot_workspace() {
+snapshot_work() {
     root=$1
     if [ ! -d "$root" ]; then
         printf '工作区不存在=%s\n' "$root"
@@ -261,7 +261,7 @@ capture_snapshot() {
     label=$1
     path=$2
     out="$RUN_ROOT/snapshot-$CURRENT_PHASE-$label.txt"
-    snapshot_workspace "$path" > "$out"
+    snapshot_work "$path" > "$out"
     printf '[快照] %s\n' "$out"
     cat "$out"
 }
@@ -828,8 +828,8 @@ run_global_help_section() {
     run_case "GLB-21" 2 "未知选项" env VEIL_HINTS=off "$BIN" init demo --bogus-option
     run_case "GLB-22" 2 "未知子命令" env VEIL_HINTS=off "$BIN" definitely-not-a-command
     run_case "GLB-27" 2 "缺少容器参数" env VEIL_HINTS=off "$BIN" add
-    run_case "GLB-27-source" 2 "缺少添加源路径" env VEIL_HINTS=off "$BIN" add container-only
-    run_case "GLB-27-output" 2 "缺少导出输出路径" env VEIL_HINTS=off "$BIN" ex container-only input.txt
+    run_case "GLB-27-source" 2 "缺少添加源路径" env VEIL_HINTS=off "$BIN" add veil-only
+    run_case "GLB-27-output" 2 "缺少导出输出路径" env VEIL_HINTS=off "$BIN" ex veil-only input.txt
     run_case "GLB-29-invalid-lang" 0 "不支持的语言正常回退" env VEIL_LANG=zz-ZZ VEIL_HINTS=off "$BIN" --help
 
     run_case "GLB-19-conflict" 2 "位置密码和选项密码冲突" \
@@ -884,7 +884,7 @@ run_init_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=full VEIL_TEST_KDF=fast "$DEBUG_BIN" init core
     assert_file_exists "INIT-01-link" "core 链接存在" "$PHASE_WORK/core.veil-link"
     assert_file_exists "INIT-01-meta" "默认工作区包含元数据" \
-        "$PHASE_HOME/.veil/workspaces/default"
+        "$PHASE_HOME/.veil/works/default"
     assert_file_exists "INIT-01-config" "全局配置已创建" "$PHASE_HOME/.veil/config.toml"
 
     run_case "INIT-02-empty-list" 0 "新建容器列表为空" \
@@ -919,29 +919,29 @@ run_init_section() {
 
     run_case "INIT-13-default-root" 0 "显式指定默认命名工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init named-default \
-        --workspace default
+        --work default
     run_case "INIT-14-missing-named" 1 "拒绝不存在的命名工作区" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init missing-workspace \
-        --workspace does-not-exist
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init missing-work \
+        --work does-not-exist
 
-    CUSTOM_ROOT="$RUN_ROOT/custom-workspace"
+    CUSTOM_ROOT="$RUN_ROOT/custom-work"
     mkdir -p "$CUSTOM_ROOT"
     cat >> "$PHASE_HOME/.veil/config.toml" <<EOF
 
-[workspace.custom.lab]
+[work.custom.lab]
 path = "$CUSTOM_ROOT"
-workspace_type = { Custom = "lab" }
+work_type = { Custom = "lab" }
 created_at = "2026-01-01T00:00:00+00:00"
 EOF
     run_case "INIT-14-named" 0 "使用已注册的命名工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init named-custom \
-        --workspace lab
+        --work lab
 
     DEDICATED="$RUN_ROOT/dedicated-empty"
     mkdir -p "$DEDICATED"
     run_case "INIT-19-dedicated-empty" 0 "使用空目录作为专属工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated \
-        --workspace-path "$DEDICATED" --dedicated --link "$PHASE_WORK/dedicated.veil-link"
+        --work-root "$DEDICATED" --dedicated --link "$PHASE_WORK/dedicated.veil-link"
     assert_file_exists "INIT-19-meta" "专属目录根下直接存在元数据" "$DEDICATED/.veil-meta"
 
     NONEMPTY="$RUN_ROOT/dedicated-nonempty"
@@ -950,45 +950,45 @@ EOF
     printf 'keep\n' > "$RUN_ROOT/dedicated-keep-expected.txt"
     run_case "INIT-20-dedicated-nonempty" 1 "拒绝非空专属工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated-nonempty \
-        --workspace-path "$NONEMPTY" --dedicated --link "$PHASE_WORK/dedicated-nonempty.veil-link"
+        --work-root "$NONEMPTY" --dedicated --link "$PHASE_WORK/dedicated-nonempty.veil-link"
     assert_file_equals "INIT-20-preserved" "原有专属目录文件保持不变" \
         "$NONEMPTY/keep.txt" "$RUN_ROOT/dedicated-keep-expected.txt"
 
     DEDICATED_NEW="$RUN_ROOT/dedicated-new"
     run_case "INIT-21-dedicated-create" 0 "创建不存在的专属工作区目录" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated-new \
-        --workspace-path "$DEDICATED_NEW" --dedicated --link "$PHASE_WORK/dedicated-new.veil-link"
+        --work-root "$DEDICATED_NEW" --dedicated --link "$PHASE_WORK/dedicated-new.veil-link"
 
     DEDICATED_FILE="$RUN_ROOT/dedicated-file"
     printf 'not a directory\n' > "$DEDICATED_FILE"
     run_case "INIT-22-dedicated-file" 1 "拒绝将普通文件作为专属工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated-file \
-        --workspace-path "$DEDICATED_FILE" --dedicated --link "$PHASE_WORK/dedicated-file.veil-link"
+        --work-root "$DEDICATED_FILE" --dedicated --link "$PHASE_WORK/dedicated-file.veil-link"
 
     run_case "INIT-23-conflict" 1 "命名工作区和显式路径冲突" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init conflict-workspace \
-        --workspace default --workspace-path "$RUN_ROOT/conflict"
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init conflict-work \
+        --work default --work-root "$RUN_ROOT/conflict"
     run_case "INIT-24-dedicated-no-path" 1 "专属模式缺少路径时拒绝" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated-no-path \
         --dedicated
     run_case "INIT-25-portable-conflict" 1 "便携模式与工作区选项冲突" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init portable-conflict \
-        --portable --workspace-path "$RUN_ROOT/portable-conflict"
+        --portable --work-root "$RUN_ROOT/portable-conflict"
 
     PORTABLE="$RUN_ROOT/portable"
     mkdir -p "$PORTABLE"
     run_case "INIT-26-portable" 0 "显式便携布局" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init portable \
         --portable --link "$PORTABLE/portable.veil-link"
-    assert_file_exists "INIT-26-workspace" "便携工作区位于链接目录下" \
-        "$PORTABLE/.veil/workspaces/default"
+    assert_file_exists "INIT-26-work" "便携工作区位于链接目录下" \
+        "$PORTABLE/.veil/works/default"
 
-    REL_ROOT="$RUN_ROOT/relative-workspace-parent"
+    REL_ROOT="$RUN_ROOT/relative-work-parent"
     mkdir -p "$REL_ROOT"
     (
         cd "$REL_ROOT" || exit 1
         VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init relative \
-            --workspace-path relative-workspace --link "$REL_ROOT/relative.veil-link"
+            --work-root relative-work --link "$REL_ROOT/relative.veil-link"
     ) > "$RUN_ROOT/cases/INIT-18.stdout" 2> "$RUN_ROOT/cases/INIT-18.stderr"
     printf '\n[用例 INIT-18] 相对显式工作区固定为稳定绝对路径\n'
     cat "$RUN_ROOT/cases/INIT-18.stdout"
@@ -1072,7 +1072,7 @@ run_add_view_section() {
     printf 'replacement-first\n' > "$RUN_ROOT/replace.txt"
     run_case "ADD-22-first" 0 "替换前先添加文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add fileops "$RUN_ROOT/replace.txt"
-    before_enc_count=$(find "$(resolve_workspace_for_link "$PHASE_WORK/fileops.veil-link")" -name '*.enc' | wc -l | tr -d ' ')
+    before_enc_count=$(find "$(resolve_work_for_link "$PHASE_WORK/fileops.veil-link")" -name '*.enc' | wc -l | tr -d ' ')
     printf 'replacement-second\n' > "$RUN_ROOT/replace.txt"
     run_case "ADD-22-replace" 0 "替换已有目标" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add fileops "$RUN_ROOT/replace.txt"
@@ -1122,8 +1122,10 @@ run_add_view_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" ex fileops hello.txt "$RUN_ROOT/export/overwrite.txt"
     assert_file_equals "EX-05-overwrite-bytes" "覆盖后的输出与源文件一致" \
         "$RUN_ROOT/export/overwrite.txt" "$FIXTURES/hello.txt"
-    run_case "EX-04-missing-parent" 1 "输出父目录不存在时处理一致" \
+    run_case "EX-04-missing-parent" 0 "输出父目录不存在时自动创建" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" ex fileops hello.txt "$RUN_ROOT/no-such-parent/x.bin"
+    assert_file_equals "EX-04-missing-parent-bytes" "自动创建父目录后导出内容一致" \
+        "$RUN_ROOT/no-such-parent/x.bin" "$FIXTURES/hello.txt"
     run_case "EX-07-missing" 1 "导出不存在的容器内文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" ex fileops missing.bin "$RUN_ROOT/export/missing.bin"
     assert_file_missing "EX-07-no-file" "导出不存在文件时不应创建输出" "$RUN_ROOT/export/missing.bin"
@@ -1142,7 +1144,7 @@ run_add_view_section() {
         "$RUN_ROOT/export/one-mib.bin" "$FIXTURES/one-mib.bin"
 }
 
-resolve_workspace_for_link() {
+resolve_work_for_link() {
     link=$1
     if [ ! -f "$link" ]; then
         return 1
@@ -1168,7 +1170,7 @@ run_persistence_artifact_section() {
 
     ARTIFACT_LINK="$PHASE_WORK/artifact-check.veil-link"
     ARTIFACT_CONFIG="$PHASE_HOME/.veil/config.toml"
-    ARTIFACT_WS=$(resolve_workspace_for_link "$ARTIFACT_LINK")
+    ARTIFACT_WS=$(resolve_work_for_link "$ARTIFACT_LINK")
     ARTIFACT_META="$ARTIFACT_WS/.veil-meta"
     LINK_HASH_BEFORE=$(hash_file "$ARTIFACT_LINK")
 
@@ -1176,14 +1178,14 @@ run_persistence_artifact_section() {
     assert_file_exists "CONF-01-link" "链接文件存在" "$ARTIFACT_LINK"
     assert_file_exists "CONF-01-meta" "元数据文件存在" "$ARTIFACT_META"
     assert_contains "CONF-01-version" "配置包含版本" "version =" "$ARTIFACT_CONFIG"
-    assert_contains "CONF-02-container" "配置包含容器记录" "[containers." "$ARTIFACT_CONFIG"
+    assert_contains "CONF-02-veil" "配置包含容器记录" "[veils." "$ARTIFACT_CONFIG"
     assert_contains "CONF-02-id" "容器记录包含稳定 ID" "veil_id =" "$ARTIFACT_CONFIG"
     assert_contains "CONF-03-volume" "配置包含卷记录" "[volumes." "$ARTIFACT_CONFIG"
     assert_contains "CONF-04-link-record" "配置包含链接缓存记录" "raw_hex =" "$ARTIFACT_CONFIG"
     assert_contains "CONF-04-hash" "配置包含链接内容哈希" "content_hash =" "$ARTIFACT_CONFIG"
 
     LINK_ID=$(awk -F'"' '/^veil_id = / { print $2; exit }' "$ARTIFACT_LINK")
-    LINK_NAME=$(awk -F'"' '/^container_name = / { print $2; exit }' "$ARTIFACT_LINK")
+    LINK_NAME=$(awk -F'"' '/^veil_name = / { print $2; exit }' "$ARTIFACT_LINK")
     LINK_PATH=$(awk -F'"' '/^path = / { print $2; exit }' "$ARTIFACT_LINK")
     META_STRINGS="$RUN_ROOT/cases/CONF-09-meta-strings.txt"
     strings "$ARTIFACT_META" > "$META_STRINGS"
@@ -1244,7 +1246,7 @@ run_persistence_artifact_section() {
         }
     ')
     printf '%s\n' "$META_TLV_FIELDS" > "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
-    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=1" \
+    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=3" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
     assert_contains "CONF-09-algorithm" "元数据 TLV 算法标识正确" "algorithm=2" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
@@ -1342,7 +1344,7 @@ run_persistence_artifact_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" rm artifact-check second.txt
     assert_values_equal "ART-08-count" "删除后活动密文数量减少一" "7" "$(count_enc_files "$ARTIFACT_WS")"
 
-    ACTUAL_BYTES=$(workspace_file_bytes "$ARTIFACT_WS")
+    ACTUAL_BYTES=$(work_file_bytes "$ARTIFACT_WS")
     printf '[实际占用] 工作区字节数: %s\n' "$ACTUAL_BYTES"
     run_case "ART-16-info" 0 "查看容器实际占用" \
         env VEIL_PASSWORD=1 VEIL_LANG=zh VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" info artifact-check
@@ -1373,7 +1375,7 @@ run_persistence_artifact_section() {
     assert_contains "ART-13-name" "包内可见预期的逻辑路径" "first.txt" "$PACKAGE_STRINGS"
     assert_contains "ART-13-dir" "包内可见目录导入路径" "many/file-1.txt" "$PACKAGE_STRINGS"
     assert_true "ART-13-ciphertext" "包内每个密文条目与工作区 .enc 逐字节一致" \
-        package_entries_match_workspace "$PACKAGE" "$ARTIFACT_WS" "$PACKAGE_FILE_COUNT"
+        package_entries_match_work "$PACKAGE" "$ARTIFACT_WS" "$PACKAGE_FILE_COUNT"
     assert_not_contains "ART-04-package-secret" "包内不含明文内容标记" "$ARTIFACT_SECRET" "$PACKAGE"
 
     CURRENT_LINK_HASH=$(hash_file "$ARTIFACT_LINK")
@@ -1420,7 +1422,7 @@ run_mutation_operations_section() {
     run_case "MUT-add-file" 0 "准备普通文件数据" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add mutate "$FIXTURES/hello.txt" keep.txt
 
-    WS=$(resolve_workspace_for_link "$PHASE_WORK/mutate.veil-link")
+    WS=$(resolve_work_for_link "$PHASE_WORK/mutate.veil-link")
     capture_snapshot "before-mutations" "$WS"
 
     run_case "MV-01-file" 0 "重命名文件" \
@@ -1545,9 +1547,9 @@ run_pack_unpack_section() {
     run_case "UNPACK-04-duplicate-id" 1 "同一配置重复解包拒绝 ID 冲突" \
         env HOME="$UNPACK_04_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name duplicate-id --link "$PHASE_WORK/duplicate-id.veil-link"
-    run_case "UNPACK-06-missing-workspace" 1 "解包时拒绝未知命名工作区" \
+    run_case "UNPACK-06-missing-work" 1 "解包时拒绝未知命名工作区" \
         env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
-        --name workspace-missing --workspace no-such-workspace
+        --name work-missing --work no-such-work
     run_case "UNPACK-08-bad-extension" 1 "解包时检查链接扩展名" \
         env HOME="$UNPACK_FAIL_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" unpack "$PACKAGE" \
         --name bad-link --link "$PHASE_WORK/bad-unpack.txt"
@@ -1616,7 +1618,7 @@ run_pack_unpack_section() {
         "声明 64 MiB 元数据时应有界失败" \
         "HOME='$UNPACK_FAIL_HOME' VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' unpack '$oversized_meta' --name oversized --link '$PHASE_WORK/oversized.veil-link'"
 
-    PACK_WS=$(resolve_workspace_for_link "$PHASE_WORK/package.veil-link")
+    PACK_WS=$(resolve_work_for_link "$PHASE_WORK/package.veil-link")
     run_case "PACK-08-missing-ciphertext" 1 "密文缺失时打包失败" \
         sh -c "find '$PACK_WS' -name '*.enc' | head -n 1 | xargs rm -f; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' pack package --output '$RUN_ROOT/missing-ciphertext.veil'"
     assert_file_missing "PACK-08-output" "密文缺失时不应留下包文件" "$RUN_ROOT/missing-ciphertext.veil"
@@ -1692,8 +1694,8 @@ run_config_link_section() {
     run_case "LINK-08-parent" 0 "创建链接父目录" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link linked --output "$RUN_ROOT/link-parent/nested/new.veil-link"
 
-    run_case "RES-06-workspace-path" 1 "普通命令拒绝直接使用工作区路径" \
-        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$(resolve_workspace_for_link "$PHASE_WORK/linked.veil-link")"
+    run_case "RES-06-work-path" 1 "普通命令拒绝直接使用工作区路径" \
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$(resolve_work_for_link "$PHASE_WORK/linked.veil-link")"
     run_case "RES-07-ordinary-directory" 1 "拒绝普通目录作为容器" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$FIXTURES"
     run_case "RES-08-package-direct" 1 "直接访问包文件时提示先解包" \
@@ -1703,7 +1705,7 @@ run_config_link_section() {
         sh -c "printf 'not toml\\n' > '$PHASE_WORK/broken.veil-link'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/broken.veil-link'"
 
     cp "$PHASE_WORK/linked.veil-link" "$RUN_ROOT/link-absolute-source.veil-link"
-    ws=$(resolve_workspace_for_link "$PHASE_WORK/linked.veil-link")
+    ws=$(resolve_work_for_link "$PHASE_WORK/linked.veil-link")
     sed "s#^path = .*#path = \"$ws\"#" "$RUN_ROOT/link-absolute-source.veil-link" > "$PHASE_WORK/absolute.veil-link"
     run_case "RES-29-absolute-link-path" 1 "链接中的绝对工作区路径应被拒绝或限制" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$PHASE_WORK/absolute.veil-link"
@@ -1775,7 +1777,7 @@ run_corruption_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init corrupt
     run_case "DATA-add-good" 0 "添加正常文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add corrupt "$FIXTURES/hello.txt" good.txt
-    WS=$(resolve_workspace_for_link "$PHASE_WORK/corrupt.veil-link")
+    WS=$(resolve_work_for_link "$PHASE_WORK/corrupt.veil-link")
     meta="$WS/.veil-meta"
     cp "$meta" "$RUN_ROOT/meta-good.bin"
     meta_before=$(hash_file "$meta")
@@ -1794,7 +1796,19 @@ run_corruption_section() {
     first_enc=$(find "$WS" -name '*.enc' | LC_ALL=C sort | head -n 1)
     cp "$first_enc" "$RUN_ROOT/enc-good.bin"
     run_case "DATA-13-cipher-bitflip" 1 "拒绝被篡改的密文" \
-        sh -c "cp '$RUN_ROOT/enc-good.bin' '$first_enc'; printf '\\001' | dd of='$first_enc' bs=1 seek=0 conv=notrunc 2>/dev/null; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' ex corrupt good.txt '$RUN_ROOT/corrupt-export.bin'"
+        sh -c '
+            source=$1
+            target=$2
+            output=$3
+            binary=$4
+            cp "$source" "$target"
+            original=$(dd if="$target" bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d " ")
+            flipped=$((original ^ 1))
+            printf "\\$(printf "%03o" "$flipped")" \
+                | dd of="$target" bs=1 seek=0 conv=notrunc 2>/dev/null
+            VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast \
+                "$binary" ex corrupt good.txt "$output"
+        ' sh "$RUN_ROOT/enc-good.bin" "$first_enc" "$RUN_ROOT/corrupt-export.bin" "$DEBUG_BIN"
     assert_file_missing "DATA-13-no-output" "corrupt ciphertext export leaves no output" "$RUN_ROOT/corrupt-export.bin"
     cp "$RUN_ROOT/enc-good.bin" "$first_enc"
     run_case "DATA-15-cipher-truncate" 1 "拒绝截断的密文" \
@@ -1807,7 +1821,7 @@ run_corruption_section() {
     run_case "REC-10-lost-config" 0 "配置丢失后通过显式链接访问" \
         sh -c "mv '$PHASE_HOME/.veil/config.toml' '$RUN_ROOT/config-lost.toml'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/corrupt.veil-link'; rc=\$?; mv '$RUN_ROOT/config-lost.toml' '$PHASE_HOME/.veil/config.toml'; exit \$rc"
     run_case "REC-11-header-link" 0 "根据工作区元数据头重建链接" \
-        sh -c "cp -R '$WS' '$RUN_ROOT/detached-workspace'; mv '$RUN_ROOT/detached-workspace' '$RUN_ROOT/detached-workspace-renamed'; HOME='$REC_11_HOME' VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-workspace-renamed' --output '$RUN_ROOT/detached.veil-link'"
+        sh -c "cp -R '$WS' '$RUN_ROOT/detached-work'; mv '$RUN_ROOT/detached-work' '$RUN_ROOT/detached-work-renamed'; HOME='$REC_11_HOME' VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-work-renamed' --output '$RUN_ROOT/detached.veil-link'"
     run_case "REC-11-open" 0 "打开重建的脱离工作区链接" \
         env HOME="$REC_11_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/detached.veil-link"
 }
@@ -1916,7 +1930,7 @@ run_external_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=full VEIL_TEST_KDF=fast "$DEBUG_BIN" init external \
         --link "$EXT/external.veil-link"
     assert_file_exists "INIT-27-link" "外置卷链接存在" "$EXT/external.veil-link"
-    assert_file_exists "INIT-27-portable" "外置卷隐藏工作区存在" "$EXT/.veil/workspaces/default"
+    assert_file_exists "INIT-27-portable" "外置卷隐藏工作区存在" "$EXT/.veil/works/default"
 
     run_case "E2E-07-add" 0 "在外置卷添加文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add "$EXT/external.veil-link" \
@@ -1932,7 +1946,7 @@ run_external_section() {
     run_case "RES-27-local-pointer" 0 "创建本地卷上的外置工作区链接" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link "$EXT/external.veil-link" \
         --output "$RUN_ROOT/external-local-pointer.veil-link"
-    EXTERNAL_WS=$(find "$EXT/.veil/workspaces/default" -maxdepth 1 -type d -name 'veil-*' | head -n 1)
+    EXTERNAL_WS=$(find "$EXT/.veil/works/default" -maxdepth 1 -type d -name 'veil-*' | head -n 1)
     EXTERNAL_LINK_HASH_BEFORE=$(hash_file "$RUN_ROOT/external-local-pointer.veil-link")
     EXTERNAL_ENC_BEFORE=$(count_enc_files "$EXTERNAL_WS")
 
@@ -2066,7 +2080,7 @@ create_single_file_helper() {
     helper_root=$1
     mkdir -p "$helper_root/src"
     cat > "$helper_root/src/main.rs" <<'EOF'
-use veil_core::container::Container;
+use veil_core::single_file_veil::SingleFileVeil;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -2074,9 +2088,9 @@ fn main() {
         eprintln!("usage: helper <output.veil> <password>");
         std::process::exit(2);
     }
-    let mut container = Container::create(&args[1], args[2].clone(), "veil-scenario/1.0")
-        .expect("create single-file container");
-    container
+    let mut veil = SingleFileVeil::create(&args[1], args[2].clone(), "veil-scenario/1.0")
+        .expect("create single-file veil");
+    veil
         .add_file("secret.txt", b"veil brute force test\n")
         .expect("add test file");
     println!("created {}", args[1]);
@@ -2117,7 +2131,7 @@ run_brute_force_section() {
         skip_case "BF" "夹具创建失败，跳过交互式攻击场景"
         return
     fi
-    assert_file_exists "BF-fixture" "single-file container created" "$SINGLE"
+    assert_file_exists "BF-fixture" "single-file veil created" "$SINGLE"
 
     run_case "BF-01-no-path" 0 "未提供路径时进入交互模式并由 q 退出" \
         sh -c "printf 'q\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
@@ -2125,7 +2139,7 @@ run_brute_force_section() {
         sh -c "printf 'missing.veil\\nq\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
 
     PACK_FIXTURE="$RUN_ROOT/not-a-single-file.veil"
-    printf 'not a container\n' > "$PACK_FIXTURE"
+    printf 'not a veil\n' > "$PACK_FIXTURE"
     run_case "BF-02-corrupt-header" 0 "损坏头部后可重新输入" \
         sh -c "printf '$PACK_FIXTURE\\nq\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
 
@@ -2146,7 +2160,7 @@ run_brute_force_section() {
         sh -c "printf '4\\n1 2\\n1\\n1\\ny\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
     run_case "BF-14-thread-zero" 0 "线程数 0 被修正后处理" \
         sh -c "printf '5\\n0\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
-    run_case "BF-16-switch-container" 0 "切换容器菜单流程" \
+    run_case "BF-16-switch-veil" 0 "切换容器菜单流程" \
         sh -c "printf '6\\n$SINGLE\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
     run_case "BF-18-history" 0 "历史记录写入并显示" \
         sh -c "printf '1\\n$RUN_ROOT/wordlist-miss.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"

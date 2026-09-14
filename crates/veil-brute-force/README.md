@@ -10,7 +10,7 @@
 
 ## 支持的容器
 
-当前工具面向 `veil-core::container` 单文件容器。它直接读取 `.veil` 文件 Header，不处理工作区目录、`.veil-link` 或 `.veil-meta`。
+当前工具面向 `veil-core::single_file_veil` 单文件容器。它直接读取 `.veil` 文件 Header，不处理工作区目录、`.veil-link` 或 `.veil-meta`。
 
 如果目标是工作区容器，当前工具不能直接使用；需要先确认项目中的单文件容器与打包文件格式，再选择对应测试对象。
 

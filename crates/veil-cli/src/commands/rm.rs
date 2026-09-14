@@ -2,14 +2,14 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::RemovedPathKind;
+use veil_core::veil_ops::RemovedPathKind;
 
 /// 从容器删除文件或目录（工作区架构）。
 ///
 /// 删除容器内的文件和加密数据。
 ///
 /// # 参数
-/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
+/// - `veil_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `file_name`: 要删除的容器内文件或目录路径
 /// - `password`: 容器密码（`None` 则交互式输入）
 ///
@@ -21,18 +21,17 @@ use veil_core::workspace_ops::RemovedPathKind;
 /// ```bash
 /// veil rm photos vacation.jpg
 /// ```
-pub fn run(container_name: &str, file_name: &str, password: Option<String>) -> Result<()> {
+pub fn run(veil_name: &str, file_name: &str, password: Option<String>) -> Result<()> {
     // 先解析稳定 ID，确保后续删除针对的是最终工作区而不是输入本身。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
     // 删除前先输出目标；真正删除仍需要密码和元数据查找成功。
     crate::outln!(
         "{}",
         crate::i18n::t1("rm.deleting", "path", file_name).yellow()
     );
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();

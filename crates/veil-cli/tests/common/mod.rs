@@ -45,19 +45,17 @@ impl TestEnv {
     }
 
     /// 初始化容器并返回默认链接文件路径。
-    pub fn init(&self, container_name: &str) -> PathBuf {
+    pub fn init(&self, veil_name: &str) -> PathBuf {
         self.command()
-            .args(["init", container_name, &self.password])
+            .args(["init", veil_name, &self.password])
             .assert()
             .success();
-        self.link_path(container_name)
+        self.link_path(veil_name)
     }
 
     /// 返回当前工作目录下指定容器名称的默认链接路径。
-    pub fn link_path(&self, container_name: &str) -> PathBuf {
-        self.work
-            .path()
-            .join(format!("{}.veil-link", container_name))
+    pub fn link_path(&self, veil_name: &str) -> PathBuf {
+        self.work.path().join(format!("{}.veil-link", veil_name))
     }
 
     /// 在工作目录下创建文本文件，必要时先创建父目录。

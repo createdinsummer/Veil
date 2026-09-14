@@ -33,7 +33,7 @@ pub enum VeilError {
 
     /// 工作区创建、读取或更新失败。
     #[error("工作区错误: {0}")]
-    WorkspaceError(String),
+    WorkError(String),
 
     /// 全局配置读写或解析失败。
     #[error("配置错误: {0}")]
@@ -41,15 +41,15 @@ pub enum VeilError {
 
     /// 按名称、ID、链接或路径均无法定位容器。
     #[error("容器未找到: {0}")]
-    ContainerNotFound(String),
+    VeilNotFound(String),
 
     /// 同一稳定 `veil_id` 被注册给多个容器。
     #[error("容器 ID 冲突: {0}")]
-    ContainerIdConflict(String),
+    VeilIdConflict(String),
 
     /// 容器展示名称匹配到多个容器。
     #[error("容器名称不唯一: {0}")]
-    ContainerNameAmbiguous(String),
+    VeilNameAmbiguous(String),
 
     /// 文件格式或字段内容无效。
     #[error("无效的格式: {0}")]
@@ -82,6 +82,10 @@ pub enum VeilError {
     /// 链接所依赖的磁盘卷当前不可用。
     #[error("卷不可用: {0}")]
     VolumeUnavailable(String),
+
+    /// 获取、等待、校验或释放锁失败。
+    #[error("锁错误: {0}")]
+    LockError(String),
 }
 
 /// `veil-core` 内部统一使用的结果类型别名。

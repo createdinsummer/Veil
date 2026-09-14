@@ -1,30 +1,30 @@
-//! `veil unpack` 子命令：把 `.veil` 包还原为工作区容器。
+//! `veil unpack` 子命令：把 `.veil` 包还原为 Work 中的 Veil。
 
 use crate::error::Result;
 use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use veil_core::config::{ContainerConfig, GlobalConfig};
-use veil_core::container_format::ContainerUnpacker;
+use veil_core::config::{GlobalConfig, VeilConfig};
 use veil_core::metadata::MetaHeader;
-use veil_core::workspace::{WorkspaceConfig, allocate_container_directory};
+use veil_core::veil_package::VeilUnpacker;
+use veil_core::work::{WorkConfig, allocate_veil_directory};
 
-/// 读取打包文件，验证密码后重建容器、工作区和链接。
-pub fn run_workspace(
-    container_path: &str,
-    container_name: Option<&str>,
-    workspace_name: Option<&str>,
+/// 读取打包文件，验证密码后重建 `veil_dir`、配置记录和链接。
+pub fn run_veil(
+    package_path: &str,
+    veil_name: Option<&str>,
+    work_name: Option<&str>,
     link_output: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
-    if !Path::new(container_path).exists() {
-        crate::cli_bail!(UnpackContainerNotFound, "path" => container_path);
+    if !Path::new(package_path).exists() {
+        crate::cli_bail!(UnpackVeilNotFound, "path" => package_path);
     }
 
-    let name = if let Some(name) = container_name {
+    let name = if let Some(name) = veil_name {
         name.to_string()
     } else {
-        let stem = Path::new(container_path)
+        let stem = Path::new(package_path)
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| crate::cli_error!(UnpackNameExtractFailed))?;
@@ -35,36 +35,34 @@ pub fn run_workspace(
     }
 
     let mut config = GlobalConfig::load()?;
-    if config.workspace.default.is_none() {
-        config.workspace.default = Some(WorkspaceConfig::default_workspace()?);
+    if config.work.default.is_none() {
+        config.work.default = Some(WorkConfig::default_work()?);
     }
 
-    let workspace_root = if let Some(workspace_name) = workspace_name {
-        if workspace_name == "default" {
-            config.workspace.default.as_ref().unwrap().path.clone()
+    let work_root = if let Some(work_name) = work_name {
+        if work_name == "default" {
+            config.work.default.as_ref().unwrap().path.clone()
         } else {
             config
-                .workspace
+                .work
                 .custom
-                .get(workspace_name)
-                .ok_or_else(
-                    || crate::cli_error!(UnpackWorkspaceNotFound, "name" => workspace_name),
-                )?
+                .get(work_name)
+                .ok_or_else(|| crate::cli_error!(UnpackWorkNotFound, "name" => work_name))?
                 .path
                 .clone()
         }
     } else {
-        config.workspace.default.as_ref().unwrap().path.clone()
+        config.work.default.as_ref().unwrap().path.clone()
     };
-    let workspace_root = absolute_path(&workspace_root)?;
+    let work_root = absolute_path(&work_root)?;
 
-    let unpacker = ContainerUnpacker::new(container_path);
+    let unpacker = VeilUnpacker::new(package_path);
     let encrypted_metadata = unpacker.read_encrypted_metadata()?;
     let header = MetaHeader::from_bytes(&encrypted_metadata)?;
     if header.veil_id.is_empty() {
         crate::cli_bail!(UnpackMissingVeilId);
     }
-    config.ensure_container_id_available(&header.veil_id)?;
+    config.ensure_veil_id_available(&header.veil_id)?;
 
     let creation_time = super::creation_timestamp();
     let link_path = link_output
@@ -81,15 +79,13 @@ pub fn run_workspace(
         crate::cli_bail!(LinkOutputExists, "path" => link_path.display());
     }
 
-    let container_dir =
-        allocate_container_directory(&workspace_root, &header.veil_id, &creation_time);
-    if container_dir.exists() {
-        crate::cli_bail!(UnpackDirectoryExists, "path" => container_dir.display());
+    let veil_dir = allocate_veil_directory(&work_root, &header.veil_id, &creation_time);
+    if veil_dir.exists() {
+        crate::cli_bail!(UnpackDirectoryExists, "path" => veil_dir.display());
     }
 
     crate::outln!("{}", crate::i18n::t("unpack.in_progress").cyan());
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -103,41 +99,36 @@ pub fn run_workspace(
         .into());
     }
 
-    let workspace_root_existed = workspace_root.exists();
+    let work_root_existed = work_root.exists();
     let transaction = (|| -> Result<()> {
-        unpacker.unpack_encrypted_files(&container_dir, &metadata)?;
+        unpacker.unpack_encrypted_files(&veil_dir, &metadata)?;
 
-        let meta_path = container_dir.join(".veil-meta");
+        let meta_path = veil_dir.join(".veil-meta");
         veil_core::temp::write_private_file_atomic(&meta_path, &encrypted_metadata)?;
 
-        let container_config = ContainerConfig {
+        let veil_config = VeilConfig {
             veil_id: metadata.veil_id.clone(),
-            container_name: name.clone(),
-            workspace: Some(workspace_name.unwrap_or("default").to_string()),
-            container_dir: container_dir
+            veil_name: name.clone(),
+            work: Some(work_name.unwrap_or("default").to_string()),
+            veil_dir_name: veil_dir
                 .file_name()
                 .and_then(|directory| directory.to_str())
                 .map(ToOwned::to_owned),
-            workspace_path: None,
-            dedicated: false,
+            veil_dir: None,
+            dedicated_work: false,
             created_at: chrono::Utc::now().to_rfc3339(),
             last_accessed: None,
             links: Vec::new(),
         };
-        config.register_container(container_config)?;
+        config.register_veil(veil_config)?;
 
         // 注册链接会写入链接文件并保存完整配置。
-        config.register_link_at(&metadata.veil_id, &name, &container_dir, &link_path)?;
+        config.register_link_at(&metadata.veil_id, &name, &veil_dir, &link_path)?;
         Ok(())
     })();
 
     if let Err(error) = transaction {
-        cleanup_failed_unpack(
-            &container_dir,
-            workspace_root_existed,
-            &workspace_root,
-            &link_path,
-        );
+        cleanup_failed_unpack(&veil_dir, work_root_existed, &work_root, &link_path);
         return Err(error);
     }
 
@@ -152,7 +143,7 @@ pub fn run_workspace(
             "count",
             &metadata.files.len().to_string(),
             "path",
-            &container_dir.display().to_string()
+            &veil_dir.display().to_string()
         )
         .bright_black()
     );
@@ -161,7 +152,7 @@ pub fn run_workspace(
     Ok(())
 }
 
-/// 将相对工作区路径固定到当前目录。
+/// 将相对 Work 根路径固定到当前目录。
 fn absolute_path(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -170,16 +161,16 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
-/// 解包失败时移除新建容器、链接和空工作区根目录。
+/// 解包失败时移除新建 `veil_dir`、链接和空 `work_root`。
 fn cleanup_failed_unpack(
-    container_dir: &Path,
-    workspace_root_existed: bool,
-    workspace_root: &Path,
+    veil_dir: &Path,
+    work_root_existed: bool,
+    work_root: &Path,
     link_path: &Path,
 ) {
     let _ = fs::remove_file(link_path);
-    let _ = fs::remove_dir_all(container_dir);
-    if !workspace_root_existed {
-        let _ = fs::remove_dir(workspace_root);
+    let _ = fs::remove_dir_all(veil_dir);
+    if !work_root_existed {
+        let _ = fs::remove_dir(work_root);
     }
 }

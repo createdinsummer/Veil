@@ -58,7 +58,7 @@ fn raw(key: &str) -> &str {
 /// 返回当前语言的文本；键不存在时返回 `key` 本身。
 ///
 /// ```text
-/// let text = i18n::t("opening_container"); // "正在打开容器..." 或 "Opening container..."
+/// let text = i18n::t("opening_veil"); // "正在打开容器..." 或 "Opening veil..."
 /// ```
 pub fn t(key: &str) -> &str {
     raw(key)

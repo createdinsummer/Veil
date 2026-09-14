@@ -3,7 +3,7 @@
 //! 测试 `veil_core::index` 模块的公开 API，验证嵌套目录树的操作。
 
 use veil_core::index::{FileMeta, Tree, deserialize_index, serialize_index};
-use veil_core::index::{insert_file, remove_file, get_file, list_files, match_files};
+use veil_core::index::{get_file, insert_file, list_files, match_files, remove_file};
 
 /// 构造指定大小的测试文件元数据。
 fn create_test_meta(size: u64) -> FileMeta {

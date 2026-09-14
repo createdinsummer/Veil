@@ -43,7 +43,7 @@ fn shell_add_and_list_work() {
 
 /// 验证 shell 删除命令会更新容器内容。
 #[test]
-fn shell_remove_updates_workspace() {
+fn shell_remove_updates_work() {
     let env = TestEnv::new("test-password");
     let link = env.init("shell-rm");
     let source = env.write_file("delete-me.txt", "content");

@@ -16,13 +16,13 @@
 //! - 可配置线程数（默认使用所有核心）
 //! - 线程安全的密钥共享（Arc）
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashSet;
 
 use age::secrecy::SecretString;
 use rayon::prelude::*;
@@ -39,10 +39,9 @@ const HISTORY_DIR: &str = ".veil_history";
 /// 路径无法 canonicalize 时使用原路径；去掉根前缀后把 `/` 和 `\` 替换为 `.`，
 /// 最后追加 `.txt`。例如 `/Users/mac/test.veil` 会变为
 /// `Users.mac.test.veil.txt`。
-fn container_path_to_history_filename(container_path: &Path) -> String {
+fn veil_path_to_history_filename(veil_path: &Path) -> String {
     // 优先使用规范化路径，确保同一容器通过不同相对路径访问时共用历史文件。
-    let abs_path = std::fs::canonicalize(container_path)
-        .unwrap_or_else(|_| container_path.to_path_buf());
+    let abs_path = std::fs::canonicalize(veil_path).unwrap_or_else(|_| veil_path.to_path_buf());
 
     let path_str = abs_path.to_string_lossy();
 
@@ -64,7 +63,7 @@ fn container_path_to_history_filename(container_path: &Path) -> String {
 /// 返回指定容器的历史密码文件路径，并尽力创建历史目录。
 ///
 /// 优先使用 `HOME`，Windows 下回退到 `USERPROFILE`；两者都不存在时使用当前目录。
-fn get_history_file_path(container_path: &Path) -> std::path::PathBuf {
+fn get_history_file_path(veil_path: &Path) -> std::path::PathBuf {
     // HOME 是 Unix 首选，Windows 则回退到 USERPROFILE。
     let home_dir = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -75,15 +74,15 @@ fn get_history_file_path(container_path: &Path) -> std::path::PathBuf {
 
     std::fs::create_dir_all(&history_dir).ok();
 
-    let filename = container_path_to_history_filename(container_path);
+    let filename = veil_path_to_history_filename(veil_path);
     history_dir.join(filename)
 }
 
 /// 读取历史密码集合，自动忽略空行和不可读取的行。
 ///
 /// 文件不存在或打开失败时返回空集合。
-fn load_history(container_path: &Path) -> HashSet<String> {
-    let history_file = get_history_file_path(container_path);
+fn load_history(veil_path: &Path) -> HashSet<String> {
+    let history_file = get_history_file_path(veil_path);
 
     // 首次运行没有历史文件属于正常状态。
     if !history_file.exists() {
@@ -107,8 +106,8 @@ fn load_history(container_path: &Path) -> HashSet<String> {
 /// 以追加方式保存本次尝试的密码。
 ///
 /// 文件打开或写入失败时只输出错误信息，不中断当前攻击流程。
-fn save_to_history(container_path: &Path, passwords: &[String]) {
-    let history_file = get_history_file_path(container_path);
+fn save_to_history(veil_path: &Path, passwords: &[String]) {
+    let history_file = get_history_file_path(veil_path);
 
     // 以追加方式打开：历史只增长，不覆盖之前已经尝试过的密码。
     let mut file = match std::fs::OpenOptions::new()
@@ -133,9 +132,9 @@ fn save_to_history(container_path: &Path, passwords: &[String]) {
 }
 
 /// 输出指定容器的历史密码数量及文件位置。
-fn show_history_stats(container_path: &Path) {
-    let history = load_history(container_path);
-    let history_file = get_history_file_path(container_path);
+fn show_history_stats(veil_path: &Path) {
+    let history = load_history(veil_path);
+    let history_file = get_history_file_path(veil_path);
 
     if history.is_empty() {
         println!("📝 历史记录: 无");
@@ -151,11 +150,15 @@ fn show_history_stats(container_path: &Path) {
 ///
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
-fn retry_history_passwords(cip_pri_key: Arc<Vec<u8>>, container_path: &Path, stats: Arc<Stats>) -> Option<String> {
+fn retry_history_passwords(
+    cip_pri_key: Arc<Vec<u8>>,
+    veil_path: &Path,
+    stats: Arc<Stats>,
+) -> Option<String> {
     println!("\n🔄 重试历史密码");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    let history = load_history(container_path);
+    let history = load_history(veil_path);
 
     if history.is_empty() {
         println!("❌ 没有历史密码记录");
@@ -227,23 +230,21 @@ fn retry_history_passwords(cip_pri_key: Arc<Vec<u8>>, container_path: &Path, sta
     });
 
     // 每个并行任务先检查停止标志，找到密码后其余任务尽快退出。
-    let result = passwords
-        .par_iter()
-        .find_map_any(|password| {
-            if !stats.is_running() || stats.is_found() {
-                return None;
-            }
+    let result = passwords.par_iter().find_map_any(|password| {
+        if !stats.is_running() || stats.is_found() {
+            return None;
+        }
 
-            stats.increment();
+        stats.increment();
 
-            if try_password(&cip_pri_key, password) {
-                stats.mark_found();
-                stats.stop();
-                Some(password.clone())
-            } else {
-                None
-            }
-        });
+        if try_password(&cip_pri_key, password) {
+            stats.mark_found();
+            stats.stop();
+            Some(password.clone())
+        } else {
+            None
+        }
+    });
 
     stats.stop();
     monitor_handle.join().ok();
@@ -323,7 +324,12 @@ fn try_password(cip_pri_key: &[u8], password: &str) -> bool {
 ///
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
-fn dictionary_attack(cip_pri_key: Arc<Vec<u8>>, wordlist_path: &Path, container_path: &Path, stats: Arc<Stats>) -> Option<String> {
+fn dictionary_attack(
+    cip_pri_key: Arc<Vec<u8>>,
+    wordlist_path: &Path,
+    veil_path: &Path,
+    stats: Arc<Stats>,
+) -> Option<String> {
     println!("\n🔍 字典攻击模式（多线程）");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("单词表: {}", wordlist_path.display());
@@ -349,7 +355,7 @@ fn dictionary_attack(cip_pri_key: Arc<Vec<u8>>, wordlist_path: &Path, container_
     let original_count = passwords.len();
     println!("密码总数: {}", original_count);
 
-    let history = load_history(container_path);
+    let history = load_history(veil_path);
     if !history.is_empty() {
         passwords.retain(|p| !history.contains(p));
         let filtered = original_count - passwords.len();
@@ -391,27 +397,25 @@ fn dictionary_attack(cip_pri_key: Arc<Vec<u8>>, wordlist_path: &Path, container_
     });
 
     // 找到结果后通过共享原子状态通知其他 Rayon 任务停止。
-    let result = passwords
-        .par_iter()
-        .find_map_any(|password| {
-            if !stats.is_running() || stats.is_found() {
-                return None;
-            }
+    let result = passwords.par_iter().find_map_any(|password| {
+        if !stats.is_running() || stats.is_found() {
+            return None;
+        }
 
-            stats.increment();
+        stats.increment();
 
-            if try_password(&cip_pri_key, password) {
-                stats.mark_found();
-                stats.stop();
-                Some(password.clone())
-            } else {
-                None
-            }
-        });
+        if try_password(&cip_pri_key, password) {
+            stats.mark_found();
+            stats.stop();
+            Some(password.clone())
+        } else {
+            None
+        }
+    });
 
     stats.stop();
 
-    save_to_history(container_path, &passwords);
+    save_to_history(veil_path, &passwords);
     monitor_handle.join().ok();
 
     result
@@ -572,23 +576,21 @@ fn charset_attack(
         let combinations = generate_all_combinations(&chars, length);
         println!("  组合数: {}", combinations.len());
 
-        let found = combinations
-            .par_iter()
-            .find_map_any(|password| {
-                if !stats.is_running() || stats.is_found() {
-                    return None;
-                }
+        let found = combinations.par_iter().find_map_any(|password| {
+            if !stats.is_running() || stats.is_found() {
+                return None;
+            }
 
-                stats.increment();
+            stats.increment();
 
-                if try_password(&cip_pri_key, password) {
-                    stats.mark_found();
-                    stats.stop();
-                    Some(password.clone())
-                } else {
-                    None
-                }
-            });
+            if try_password(&cip_pri_key, password) {
+                stats.mark_found();
+                stats.stop();
+                Some(password.clone())
+            } else {
+                None
+            }
+        });
 
         if let Some(password) = found {
             result = Some(password);
@@ -794,7 +796,11 @@ fn get_preset_charset() -> Option<(String, usize, usize)> {
     let max_len = if input.trim().is_empty() {
         default_max
     } else {
-        input.trim().parse::<usize>().unwrap_or(default_max).max(min_len)
+        input
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(default_max)
+            .max(min_len)
     };
 
     Some((charset, min_len, max_len))
@@ -841,12 +847,22 @@ fn generate_permutations(
 }
 
 /// 生成不允许重复选择单词的排列组合。
-fn generate_word_combinations_no_repeat(words: &[String], min_words: usize, max_words: usize) -> Vec<String> {
+fn generate_word_combinations_no_repeat(
+    words: &[String],
+    min_words: usize,
+    max_words: usize,
+) -> Vec<String> {
     let mut results = Vec::new();
 
     // 不允许重复时，每个长度使用独立的 used 标记数组。
     for num_words in min_words..=max_words.min(words.len()) {
-        generate_permutations_no_repeat(words, num_words, &mut Vec::new(), &mut vec![false; words.len()], &mut results);
+        generate_permutations_no_repeat(
+            words,
+            num_words,
+            &mut Vec::new(),
+            &mut vec![false; words.len()],
+            &mut results,
+        );
     }
 
     results
@@ -910,7 +926,8 @@ fn word_combination_attack(
     min_words: usize,
     max_words: usize,
     allow_repeat: bool,
-    container_path: &Path, stats: Arc<Stats>,
+    veil_path: &Path,
+    stats: Arc<Stats>,
 ) -> Option<String> {
     println!("\n🔤 组词攻击模式（多线程）");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -927,11 +944,10 @@ fn word_combination_attack(
         generate_word_combinations_no_repeat(&words, min_words, max_words)
     };
 
-
     let original_count = combinations.len();
     println!("组合总数: {}", original_count);
 
-    let history = load_history(container_path);
+    let history = load_history(veil_path);
     if !history.is_empty() {
         combinations.retain(|p| !history.contains(p));
         let filtered = original_count - combinations.len();
@@ -1026,27 +1042,25 @@ fn word_combination_attack(
     });
 
     // Rayon 在首个命中后返回，停止标志让其他已启动任务跳过剩余候选。
-    let result = combinations
-        .par_iter()
-        .find_map_any(|password| {
-            if !stats.is_running() || stats.is_found() {
-                return None;
-            }
+    let result = combinations.par_iter().find_map_any(|password| {
+        if !stats.is_running() || stats.is_found() {
+            return None;
+        }
 
-            stats.increment();
+        stats.increment();
 
-            if try_password(&cip_pri_key, password) {
-                stats.mark_found();
-                stats.stop();
-                Some(password.clone())
-            } else {
-                None
-            }
-        });
+        if try_password(&cip_pri_key, password) {
+            stats.mark_found();
+            stats.stop();
+            Some(password.clone())
+        } else {
+            None
+        }
+    });
 
     stats.stop();
 
-    save_to_history(container_path, &combinations);
+    save_to_history(veil_path, &combinations);
     monitor_handle.join().ok();
 
     result
@@ -1068,10 +1082,7 @@ fn get_word_combination_config() -> Option<(Vec<String>, usize, usize, bool)> {
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok();
-    let words: Vec<String> = input
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let words: Vec<String> = input.split_whitespace().map(|s| s.to_string()).collect();
 
     // 空单词列表无法生成候选，直接取消本次攻击配置。
     if words.is_empty() {
@@ -1141,7 +1152,12 @@ fn configure_threads() {
     let num_threads = if input.trim().is_empty() {
         cpu_count
     } else {
-        input.trim().parse::<usize>().unwrap_or(cpu_count).max(1).min(cpu_count * 2)
+        input
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(cpu_count)
+            .max(1)
+            .min(cpu_count * 2)
     };
 
     // build_global 只能成功一次；已初始化时保留现有线程池并继续运行。
@@ -1176,14 +1192,14 @@ fn main() {
     println!();
 
     // 命令行路径优先，否则进入交互式输入循环。
-    let mut container_path_str = if args.len() >= 2 {
+    let mut veil_path_str = if args.len() >= 2 {
         args[1].clone()
     } else {
         String::new()
     };
 
     loop {
-        if container_path_str.is_empty() {
+        if veil_path_str.is_empty() {
             print!("请输入容器文件路径（或输入 'q' 退出）: ");
             io::stdout().flush().ok();
 
@@ -1201,26 +1217,26 @@ fn main() {
                 break;
             }
 
-            container_path_str = path;
+            veil_path_str = path;
         }
 
-        let container_path = Path::new(&container_path_str);
-        if !container_path.exists() {
-            eprintln!("\n❌ 容器文件不存在: {}", container_path.display());
+        let veil_path = Path::new(&veil_path_str);
+        if !veil_path.exists() {
+            eprintln!("\n❌ 容器文件不存在: {}", veil_path.display());
             eprintln!();
             eprintln!("提示:");
             eprintln!("  1. 检查路径是否正确");
             eprintln!("  2. 使用绝对路径或相对于当前目录的路径");
-            eprintln!("  3. 先创建测试容器: cargo run --example create_container --release -- test.veil password");
+            eprintln!("  3. 先创建测试容器: cargo run --example create_veil --release -- test.veil password");
             eprintln!();
 
-            container_path_str.clear();
+            veil_path_str.clear();
             continue;
         }
 
         println!("\n📖 读取容器密文私钥...");
         // 攻击只需要 Header 中的受保护私钥，无需解密整个容器。
-        let cip_pri_key = match File::open(container_path) {
+        let cip_pri_key = match File::open(veil_path) {
             Ok(mut f) => match format::read_header(&mut f) {
                 Ok(header) => {
                     println!("✅ 密文私钥大小: {} 字节", header.cip_pri_key.len());
@@ -1228,22 +1244,22 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("❌ 读取 Header 失败: {e}");
-                    container_path_str.clear();
+                    veil_path_str.clear();
                     continue;
                 }
             },
             Err(e) => {
                 eprintln!("❌ 打开容器失败: {e}");
-                container_path_str.clear();
+                veil_path_str.clear();
                 continue;
             }
         };
 
-        println!("✅ 容器: {}", container_path.display());
+        println!("✅ 容器: {}", veil_path.display());
         println!("✅ CPU 核心数: {}", num_cpus::get());
         println!("✅ 默认线程数: {}", rayon::current_num_threads());
 
-        show_history_stats(container_path);
+        show_history_stats(veil_path);
 
         // 当前容器的攻击菜单循环；切换容器时跳出并重新读取 Header。
         loop {
@@ -1259,7 +1275,12 @@ fn main() {
                 "1" => {
                     if let Some(wordlist_path) = get_wordlist_path() {
                         let stats = Arc::new(Stats::new());
-                        let result = dictionary_attack(Arc::clone(&cip_pri_key), Path::new(&wordlist_path), container_path, stats);
+                        let result = dictionary_attack(
+                            Arc::clone(&cip_pri_key),
+                            Path::new(&wordlist_path),
+                            veil_path,
+                            stats,
+                        );
                         print_result(result);
                     }
                 }
@@ -1267,7 +1288,13 @@ fn main() {
                 "2" => {
                     if let Some((charset, min_len, max_len)) = get_custom_charset() {
                         let stats = Arc::new(Stats::new());
-                        let result = charset_attack(Arc::clone(&cip_pri_key), &charset, min_len, max_len, stats);
+                        let result = charset_attack(
+                            Arc::clone(&cip_pri_key),
+                            &charset,
+                            min_len,
+                            max_len,
+                            stats,
+                        );
                         print_result(result);
                     }
                 }
@@ -1275,13 +1302,21 @@ fn main() {
                 "3" => {
                     if let Some((charset, min_len, max_len)) = get_preset_charset() {
                         let stats = Arc::new(Stats::new());
-                        let result = charset_attack(Arc::clone(&cip_pri_key), &charset, min_len, max_len, stats);
+                        let result = charset_attack(
+                            Arc::clone(&cip_pri_key),
+                            &charset,
+                            min_len,
+                            max_len,
+                            stats,
+                        );
                         print_result(result);
                     }
                 }
                 // 4：按单词排列生成组合密码。
                 "4" => {
-                    if let Some((words, min_words, max_words, allow_repeat)) = get_word_combination_config() {
+                    if let Some((words, min_words, max_words, allow_repeat)) =
+                        get_word_combination_config()
+                    {
                         let stats = Arc::new(Stats::new());
                         let result = word_combination_attack(
                             Arc::clone(&cip_pri_key),
@@ -1289,7 +1324,7 @@ fn main() {
                             min_words,
                             max_words,
                             allow_repeat,
-                            container_path,
+                            veil_path,
                             stats,
                         );
                         print_result(result);
@@ -1310,7 +1345,7 @@ fn main() {
                     let path = input.trim().to_string();
 
                     if !path.is_empty() {
-                        container_path_str = path;
+                        veil_path_str = path;
                         break;
                     } else {
                         println!("❌ 未输入路径，保持当前容器");
@@ -1319,7 +1354,8 @@ fn main() {
                 // 7：重新尝试历史文件中已记录过的密码。
                 "7" => {
                     let stats = Arc::new(Stats::new());
-                    let result = retry_history_passwords(Arc::clone(&cip_pri_key), container_path, stats);
+                    let result =
+                        retry_history_passwords(Arc::clone(&cip_pri_key), veil_path, stats);
                     print_result(result);
                 }
                 _ => {

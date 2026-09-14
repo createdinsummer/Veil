@@ -1,46 +1,46 @@
 //! Veil 子命令实现及命令层公共辅助函数。
 //!
 //! 本模块把全局配置解析、密码输入、链接路径生成和提示展示组合到各子命令中。
-//! 命令实现只负责用户交互与流程编排，容器加密、元数据和文件访问由
+//! 命令实现只负责用户交互与流程编排，Veil 加密、元数据和文件访问由
 //! `veil-core` 提供。
 
 pub mod add;
 pub mod config;
 pub mod ex;
-pub mod exists_workspace;
+pub mod exists_veil;
 pub mod info;
 pub mod init;
 pub mod link;
 pub mod rm;
 
-// 工作区架构命令。
-pub mod free_workspace;
-pub mod list_workspace;
-pub mod mv_workspace;
-pub mod pack_workspace;
-pub mod passwd_workspace;
-pub mod shell_workspace;
-pub mod unpack_workspace;
+// Veil 命令。
+pub mod free_veil;
+pub mod list_veil;
+pub mod mv_veil;
+pub mod pack_veil;
+pub mod passwd_veil;
+pub mod shell_veil;
+pub mod unpack_veil;
 
 use std::path::PathBuf;
-use veil_core::config::{GlobalConfig, ResolvedContainer};
-use veil_core::workspace_ops::WorkspaceManager;
+use veil_core::config::{GlobalConfig, ResolvedVeil};
+use veil_core::veil_ops::VeilManager;
 
 use crate::error::Result;
 
-/// 所有需要选择已有容器的命令都必须经过这里。
+/// 所有需要选择已有 Veil 的命令都必须经过这里。
 ///
-/// 普通命令支持显式 `.veil-link` 路径、唯一容器名称和唯一 `veil_id`。工作区目录
+/// 普通命令支持显式 `.veil-link` 路径、唯一 Veil 名称和唯一 `veil_id`。`veil_dir`
 /// 仅由 [`resolve_link_target`] 用于恢复链接。无论输入形式如何，返回前都会读取
 /// `.veil-meta` 确认真实 `veil_id`。
 ///
 /// 从配置缓存恢复链接后会展示恢复提示。
 ///
 /// # 错误
-/// 全局配置加载或 [`GlobalConfig::resolve_container`] 失败时返回错误。
-pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
+/// 全局配置加载或 [`GlobalConfig::resolve_veil`] 失败时返回错误。
+pub fn resolve_veil(input: &str) -> Result<ResolvedVeil> {
     let mut config = GlobalConfig::load()?;
-    let resolved = config.resolve_container(input)?;
+    let resolved = config.resolve_veil(input)?;
 
     // 已恢复的链接需要提示用户。
     if resolved.recovered_link
@@ -52,8 +52,8 @@ pub fn resolve_container(input: &str) -> Result<ResolvedContainer> {
     Ok(resolved)
 }
 
-/// 解析 `veil link` 的目标，支持容器名、ID、链接路径和工作区目录。
-pub fn resolve_link_target(input: &str) -> Result<ResolvedContainer> {
+/// 解析 `veil link` 的目标，支持 Veil 名、ID、链接路径和 `veil_dir`。
+pub fn resolve_link_target(input: &str) -> Result<ResolvedVeil> {
     let mut config = GlobalConfig::load()?;
     let resolved = config.resolve_link_target(input)?;
 
@@ -66,18 +66,18 @@ pub fn resolve_link_target(input: &str) -> Result<ResolvedContainer> {
     Ok(resolved)
 }
 
-/// 为解析结果创建工作区管理器，并绑定已经确认的稳定容器 ID。
-pub fn workspace_manager(resolved: &ResolvedContainer) -> WorkspaceManager {
-    WorkspaceManager::for_container(resolved.workspace_path.clone(), resolved.veil_id.clone())
+/// 为解析结果创建 Veil 管理器，并绑定已经确认的稳定 Veil ID。
+pub fn veil_manager(resolved: &ResolvedVeil) -> VeilManager {
+    VeilManager::for_veil(resolved.veil_dir.clone(), resolved.veil_id.clone())
 }
 
-/// 返回当前目录下默认的 `<容器名>.veil-link` 路径。
+/// 返回当前目录下默认的 `<veil_name>.veil-link` 路径。
 ///
 /// 当前目录不可读取时以 `.` 作为回退目录；函数不检查该路径是否已存在。
-pub fn default_link_path(container_name: &str) -> PathBuf {
+pub fn default_link_path(veil_name: &str) -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(format!("{}.veil-link", container_name))
+        .join(format!("{}.veil-link", veil_name))
 }
 
 /// 当前本地时间，精确到秒，用于重名时生成后缀。
@@ -86,15 +86,15 @@ pub fn creation_timestamp() -> String {
 }
 
 /// 为重名容器分配不会覆盖现有文件的默认链接路径。
-pub fn default_link_path_for_time(container_name: &str, creation_time: &str) -> PathBuf {
+pub fn default_link_path_for_time(veil_name: &str, creation_time: &str) -> PathBuf {
     // 默认名称未冲突时直接使用，保持日常路径最简短。
-    let default_path = default_link_path(container_name);
+    let default_path = default_link_path(veil_name);
     if !default_path.exists() {
         return default_path;
     }
 
     // 冲突后加入创建时间，尽量让不同批次生成的链接保持可读顺序。
-    let base_name = veil_core::workspace::container_name_with_suffix(container_name, creation_time);
+    let base_name = veil_core::work::veil_name_with_suffix(veil_name, creation_time);
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // 同一秒内继续重名时追加递增序号，直到找到不存在的路径。

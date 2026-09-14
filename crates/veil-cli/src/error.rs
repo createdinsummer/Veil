@@ -19,7 +19,7 @@ pub enum ErrorCode {
     ArgumentConflict = 1002,
     ArgumentConflictSingle = 1003,
     InvalidArguments = 1004,
-    MissingContainer = 1005,
+    MissingVeil = 1005,
     MissingInputPath = 1006,
     MissingDeletePath = 1007,
     MissingSourceDestination = 1008,
@@ -35,17 +35,17 @@ pub enum ErrorCode {
     AddDirectoryReadFailed = 3004,
     ConfigInvalidLevel = 4001,
 
-    InitConflictingWorkspaceOptions = 5001,
-    InitDedicatedRequiresWorkspacePath = 5002,
-    InitPortableConflictsWorkspace = 5003,
+    InitConflictingWorkOptions = 5001,
+    InitDedicatedRequiresWorkPath = 5002,
+    InitPortableConflictsWork = 5003,
     InitInvalidLinkName = 5004,
-    InitInvalidContainerName = 5005,
+    InitInvalidVeilName = 5005,
     InitInvalidLinkExtension = 5006,
-    InitWorkspaceNotFound = 5007,
-    InitContainerExists = 5008,
+    InitWorkNotFound = 5007,
+    InitVeilExists = 5008,
     InitDedicatedPathNotEmpty = 5009,
     InitLinkRegistrationFailed = 5010,
-    InitWorkspaceCreateFailed = 5011,
+    InitWorkCreateFailed = 5011,
 
     LinkOutputExists = 6001,
     LinkMissingVeilId = 6002,
@@ -53,9 +53,9 @@ pub enum ErrorCode {
 
     ExportPathRequired = 7001,
     PackOutputExists = 7002,
-    UnpackContainerNotFound = 7003,
+    UnpackVeilNotFound = 7003,
     UnpackNameExtractFailed = 7004,
-    UnpackWorkspaceNotFound = 7005,
+    UnpackWorkNotFound = 7005,
     UnpackMissingVeilId = 7006,
     UnpackDirectoryExists = 7007,
     UnpackInvalidLinkExtension = 7010,
@@ -67,9 +67,9 @@ pub enum ErrorCode {
     Decrypt = 9003,
     Serialize = 9004,
     Format = 9005,
-    Workspace = 9006,
+    Work = 9006,
     Config = 9007,
-    ContainerNotFound = 9008,
+    VeilNotFound = 9008,
     InvalidFormat = 9009,
     Serialization = 9010,
     Encryption = 9011,
@@ -78,8 +78,9 @@ pub enum ErrorCode {
     FileNotFound = 9014,
     FileAlreadyExists = 9015,
     VolumeUnavailable = 9016,
-    ContainerIdConflict = 9017,
-    ContainerNameAmbiguous = 9018,
+    VeilIdConflict = 9017,
+    VeilNameAmbiguous = 9018,
+    Lock = 9019,
 }
 
 /// 错误码对应的模板和进程退出码。
@@ -114,9 +115,7 @@ impl ErrorCode {
             Self::InvalidArguments => {
                 Self::define(value, "INVALID_ARGUMENTS", "error.invalid_arguments", 2)
             }
-            Self::MissingContainer => {
-                Self::define(value, "MISSING_CONTAINER", "error.require_container", 2)
-            }
+            Self::MissingVeil => Self::define(value, "MISSING_CONTAINER", "error.require_veil", 2),
             Self::MissingInputPath => {
                 Self::define(value, "MISSING_INPUT_PATH", "error.require_input_path", 2)
             }
@@ -158,31 +157,31 @@ impl ErrorCode {
             Self::ConfigInvalidLevel => {
                 Self::define(value, "CONFIG_INVALID_LEVEL", "config.invalid_level", 1)
             }
-            Self::InitConflictingWorkspaceOptions => Self::define(
+            Self::InitConflictingWorkOptions => Self::define(
                 value,
                 "INIT_CONFLICTING_WORKSPACE_OPTIONS",
-                "init.conflicting_workspace_options",
+                "init.conflicting_work_options",
                 1,
             ),
-            Self::InitDedicatedRequiresWorkspacePath => Self::define(
+            Self::InitDedicatedRequiresWorkPath => Self::define(
                 value,
                 "INIT_DEDICATED_REQUIRES_WORKSPACE_PATH",
-                "init.dedicated_requires_workspace_path",
+                "init.dedicated_requires_work_root",
                 1,
             ),
-            Self::InitPortableConflictsWorkspace => Self::define(
+            Self::InitPortableConflictsWork => Self::define(
                 value,
                 "INIT_PORTABLE_CONFLICTS_WORKSPACE",
-                "init.portable_conflicts_workspace",
+                "init.portable_conflicts_work",
                 1,
             ),
             Self::InitInvalidLinkName => {
                 Self::define(value, "INIT_INVALID_LINK_NAME", "init.invalid_link_name", 1)
             }
-            Self::InitInvalidContainerName => Self::define(
+            Self::InitInvalidVeilName => Self::define(
                 value,
                 "INIT_INVALID_CONTAINER_NAME",
-                "init.invalid_container_name",
+                "init.invalid_veil_name",
                 1,
             ),
             Self::InitInvalidLinkExtension => Self::define(
@@ -191,15 +190,10 @@ impl ErrorCode {
                 "init.invalid_link_extension",
                 1,
             ),
-            Self::InitWorkspaceNotFound => Self::define(
-                value,
-                "INIT_WORKSPACE_NOT_FOUND",
-                "init.workspace_not_found",
-                1,
-            ),
-            Self::InitContainerExists => {
-                Self::define(value, "INIT_CONTAINER_EXISTS", "init.exists", 1)
+            Self::InitWorkNotFound => {
+                Self::define(value, "INIT_WORKSPACE_NOT_FOUND", "init.work_not_found", 1)
             }
+            Self::InitVeilExists => Self::define(value, "INIT_CONTAINER_EXISTS", "init.exists", 1),
             Self::InitDedicatedPathNotEmpty => Self::define(
                 value,
                 "INIT_DEDICATED_PATH_NOT_EMPTY",
@@ -212,10 +206,10 @@ impl ErrorCode {
                 "init.link_registration_failed",
                 1,
             ),
-            Self::InitWorkspaceCreateFailed => Self::define(
+            Self::InitWorkCreateFailed => Self::define(
                 value,
                 "INIT_WORKSPACE_CREATE_FAILED",
-                "init.workspace_create_failed",
+                "init.work_create_failed",
                 1,
             ),
             Self::LinkOutputExists => {
@@ -233,10 +227,10 @@ impl ErrorCode {
             Self::PackOutputExists => {
                 Self::define(value, "PACK_OUTPUT_EXISTS", "pack.output_exists", 1)
             }
-            Self::UnpackContainerNotFound => Self::define(
+            Self::UnpackVeilNotFound => Self::define(
                 value,
                 "UNPACK_CONTAINER_NOT_FOUND",
-                "unpack.container_not_found",
+                "unpack.veil_not_found",
                 1,
             ),
             Self::UnpackNameExtractFailed => Self::define(
@@ -245,10 +239,10 @@ impl ErrorCode {
                 "unpack.name_extract_failed",
                 1,
             ),
-            Self::UnpackWorkspaceNotFound => Self::define(
+            Self::UnpackWorkNotFound => Self::define(
                 value,
                 "UNPACK_WORKSPACE_NOT_FOUND",
-                "unpack.workspace_not_found",
+                "unpack.work_not_found",
                 1,
             ),
             Self::UnpackMissingVeilId => {
@@ -275,14 +269,11 @@ impl ErrorCode {
             Self::Decrypt => Self::define(value, "DECRYPT", "error.core_decrypt", 1),
             Self::Serialize => Self::define(value, "SERIALIZE", "error.core_serialize", 1),
             Self::Format => Self::define(value, "FORMAT", "error.core_format", 1),
-            Self::Workspace => Self::define(value, "WORKSPACE", "error.core_workspace", 1),
+            Self::Work => Self::define(value, "WORKSPACE", "error.core_work", 1),
             Self::Config => Self::define(value, "CONFIG", "error.core_config", 1),
-            Self::ContainerNotFound => Self::define(
-                value,
-                "CONTAINER_NOT_FOUND",
-                "error.core_container_not_found",
-                1,
-            ),
+            Self::VeilNotFound => {
+                Self::define(value, "CONTAINER_NOT_FOUND", "error.core_veil_not_found", 1)
+            }
             Self::InvalidFormat => {
                 Self::define(value, "INVALID_FORMAT", "error.core_invalid_format", 1)
             }
@@ -309,18 +300,19 @@ impl ErrorCode {
                 "error.core_volume_unavailable",
                 1,
             ),
-            Self::ContainerIdConflict => Self::define(
+            Self::VeilIdConflict => Self::define(
                 value,
                 "CONTAINER_ID_CONFLICT",
-                "error.core_container_id_conflict",
+                "error.core_veil_id_conflict",
                 1,
             ),
-            Self::ContainerNameAmbiguous => Self::define(
+            Self::VeilNameAmbiguous => Self::define(
                 value,
                 "CONTAINER_NAME_AMBIGUOUS",
-                "error.core_container_name_ambiguous",
+                "error.core_veil_name_ambiguous",
                 1,
             ),
+            Self::Lock => Self::define(value, "LOCK", "error.core_lock", 1),
         }
     }
 
@@ -456,9 +448,9 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::Decrypt(error) => (ErrorCode::Decrypt, error.to_string()),
             VeilError::Serialize(error) => (ErrorCode::Serialize, error.to_string()),
             VeilError::Format(error) => (ErrorCode::Format, error),
-            VeilError::WorkspaceError(error) => (ErrorCode::Workspace, error),
+            VeilError::WorkError(error) => (ErrorCode::Work, error),
             VeilError::ConfigError(error) => (ErrorCode::Config, error),
-            VeilError::ContainerNotFound(error) => (ErrorCode::ContainerNotFound, error),
+            VeilError::VeilNotFound(error) => (ErrorCode::VeilNotFound, error),
             VeilError::InvalidFormat(error) => (ErrorCode::InvalidFormat, error),
             VeilError::SerializationError(error) => (ErrorCode::Serialization, error),
             VeilError::EncryptionError(error) => (ErrorCode::Encryption, error),
@@ -467,8 +459,9 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::FileNotFound(error) => (ErrorCode::FileNotFound, error),
             VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error),
             VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
-            VeilError::ContainerIdConflict(error) => (ErrorCode::ContainerIdConflict, error),
-            VeilError::ContainerNameAmbiguous(error) => (ErrorCode::ContainerNameAmbiguous, error),
+            VeilError::VeilIdConflict(error) => (ErrorCode::VeilIdConflict, error),
+            VeilError::VeilNameAmbiguous(error) => (ErrorCode::VeilNameAmbiguous, error),
+            VeilError::LockError(error) => (ErrorCode::Lock, error),
         };
 
         Self::coded(code).param("error", detail)

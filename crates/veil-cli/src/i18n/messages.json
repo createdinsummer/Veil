@@ -1,8 +1,8 @@
 {
 
-  "opening_container": {
+  "opening_veil": {
     "zh": "正在打开容器...",
-    "en": "Opening container..."
+    "en": "Opening veil..."
   },
   "common.empty": {
     "zh": "(空)",
@@ -50,7 +50,7 @@
   },
   "mv.opening_named": {
     "zh": "正在打开容器 '{name}'...",
-    "en": "Opening container '{name}'..."
+    "en": "Opening veil '{name}'..."
   },
   "mv.renamed": {
     "zh": "✓ 已重命名: {from} -> {to}",
@@ -58,15 +58,15 @@
   },
   "shell.opening_named": {
     "zh": "打开容器 '{name}'...",
-    "en": "Opening container '{name}'..."
+    "en": "Opening veil '{name}'..."
   },
   "shell.opened_named": {
     "zh": "✓ 容器已打开",
-    "en": "✓ Container opened"
+    "en": "✓ Veil opened"
   },
   "shell.title_named": {
     "zh": "Veil Shell - 容器: {name}",
-    "en": "Veil Shell - Container: {name}"
+    "en": "Veil Shell - Veil: {name}"
   },
   "shell.command_hint": {
     "zh": "输入命令 (ls/add/rm/ex/info/help/exit):",
@@ -134,15 +134,15 @@
   },
   "shell.help_info": {
     "zh": "显示容器信息",
-    "en": "Show container information"
+    "en": "Show veil information"
   },
   "shell.help_add": {
     "zh": "添加文件到容器",
-    "en": "Add a file to the container"
+    "en": "Add a file to the veil"
   },
   "shell.help_rm": {
     "zh": "从容器删除文件",
-    "en": "Delete a file from the container"
+    "en": "Delete a file from the veil"
   },
   "shell.help_ex": {
     "zh": "导出文件",
@@ -156,29 +156,29 @@
     "zh": "退出 shell",
     "en": "Exit the shell"
   },
-  "info.container_name": {
+  "info.veil_name": {
     "zh": "  容器名称: {name}",
-    "en": "  Container name: {name}"
+    "en": "  Veil name: {name}"
   },
   "info.veil_id": {
     "zh": "  容器 ID: {id}",
-    "en": "  Container ID: {id}"
+    "en": "  Veil ID: {id}"
   },
-  "info.workspace_path": {
-    "zh": "  工作区路径: {path}",
-    "en": "  Workspace path: {path}"
+  "info.veil_dir": {
+    "zh": "  Veil 目录: {path}",
+    "en": "  Veil directory: {path}"
   },
-  "info.workspace_type": {
-    "zh": "  工作区类型: {workspace_type}",
-    "en": "  Workspace type: {workspace_type}"
+  "info.work_type": {
+    "zh": "  工作区类型: {work_type}",
+    "en": "  Work type: {work_type}"
   },
   "info.created_at": {
     "zh": "  创建时间: {time}",
     "en": "  Created at: {time}"
   },
-  "list.workspace_title": {
+  "list.veil_title": {
     "zh": "容器 '{name}' 包含 {count} 个文件:",
-    "en": "Container '{name}' contains {count} files:"
+    "en": "Veil '{name}' contains {count} files:"
   },
   "list.total_size": {
     "zh": "总大小: {size}",
@@ -237,9 +237,9 @@
     "en": "Print version"
   },
 
-  "prompt.container_password": {
+  "prompt.veil_password": {
     "zh": "请输入容器密码: ",
-    "en": "Enter container password: "
+    "en": "Enter veil password: "
   },
   "prompt.current_password": {
     "zh": "请输入当前密码: ",
@@ -278,9 +278,9 @@
     "zh": "参数无效",
     "en": "Invalid arguments"
   },
-  "error.require_container": {
+  "error.require_veil": {
     "zh": "请指定容器名称、veil_id 或 .veil-link 路径",
-    "en": "Please specify a container name, veil_id, or .veil-link path"
+    "en": "Please specify a veil name, veil_id, or .veil-link path"
   },
   "error.require_input_path": {
     "zh": "请指定输入路径（位置参数或 -i）",
@@ -300,7 +300,7 @@
   },
   "error.require_check_path": {
     "zh": "请指定要检查的容器内路径",
-    "en": "Please specify the path to check inside the container"
+    "en": "Please specify the path to check inside the veil"
   },
   "error.display": {
     "zh": "❌ 错误 [{code}]: {message}",
@@ -328,19 +328,19 @@
   },
   "error.core_format": {
     "zh": "容器格式错误: {error}",
-    "en": "Container format error: {error}"
+    "en": "Veil format error: {error}"
   },
-  "error.core_workspace": {
+  "error.core_work": {
     "zh": "工作区错误: {error}",
-    "en": "Workspace error: {error}"
+    "en": "Work error: {error}"
   },
   "error.core_config": {
     "zh": "配置错误: {error}",
     "en": "Configuration error: {error}"
   },
-  "error.core_container_not_found": {
+  "error.core_veil_not_found": {
     "zh": "容器未找到: {error}",
-    "en": "Container not found: {error}"
+    "en": "Veil not found: {error}"
   },
   "error.core_invalid_format": {
     "zh": "无效格式: {error}",
@@ -374,46 +374,50 @@
     "zh": "卷不可用: {error}",
     "en": "Volume unavailable: {error}"
   },
-  "error.core_container_id_conflict": {
+  "error.core_veil_id_conflict": {
     "zh": "容器 ID 冲突: {error}",
-    "en": "Container ID conflict: {error}"
+    "en": "Veil ID conflict: {error}"
   },
-  "error.core_container_name_ambiguous": {
+  "error.core_veil_name_ambiguous": {
     "zh": "容器名称不唯一: {error}",
-    "en": "Container name is ambiguous: {error}"
+    "en": "Veil name is ambiguous: {error}"
+  },
+  "error.core_lock": {
+    "zh": "锁错误: {error}",
+    "en": "Lock error: {error}"
   },
 
   "init.exists": {
     "zh": "容器文件已存在: {path}",
-    "en": "Container file already exists: {path}"
+    "en": "Veil file already exists: {path}"
   },
-  "init.conflicting_workspace_options": {
-    "zh": "--workspace 与 --workspace-path 不能同时使用",
-    "en": "--workspace and --workspace-path cannot be used together"
+  "init.conflicting_work_options": {
+    "zh": "--work 与 --work-root 不能同时使用",
+    "en": "--work and --work-root cannot be used together"
   },
-  "init.dedicated_requires_workspace_path": {
-    "zh": "--dedicated 必须与 --workspace-path 一起使用",
-    "en": "--dedicated must be used with --workspace-path"
+  "init.dedicated_requires_work_root": {
+    "zh": "--dedicated 必须与 --work-root 一起使用",
+    "en": "--dedicated must be used with --work-root"
   },
-  "init.portable_conflicts_workspace": {
-    "zh": "--portable 不能与 --workspace 或 --workspace-path 同时使用",
-    "en": "--portable cannot be combined with --workspace or --workspace-path"
+  "init.portable_conflicts_work": {
+    "zh": "--portable 不能与 --work 或 --work-root 同时使用",
+    "en": "--portable cannot be combined with --work or --work-root"
   },
-  "init.workspace_not_found": {
+  "init.work_not_found": {
     "zh": "命名工作区不存在: {name}",
-    "en": "Named workspace does not exist: {name}"
+    "en": "Named work does not exist: {name}"
   },
   "init.dedicated_path_not_empty": {
     "zh": "专属工作区路径必须为空目录: {path}",
-    "en": "Dedicated workspace path must be an empty directory: {path}"
+    "en": "Dedicated work path must be an empty directory: {path}"
   },
   "init.link_registration_failed": {
     "zh": "链接注册失败: {path} ({error})",
     "en": "Link registration failed: {path} ({error})"
   },
-  "init.workspace_create_failed": {
+  "init.work_create_failed": {
     "zh": "工作区创建失败: {path} ({error})",
-    "en": "Workspace creation failed: {path} ({error})"
+    "en": "Work creation failed: {path} ({error})"
   },
   "init.invalid_link_extension": {
     "zh": "链接文件必须以 .veil-link 结尾: {path}",
@@ -421,11 +425,11 @@
   },
   "init.creating": {
     "zh": "创建新容器...",
-    "en": "Creating new container..."
+    "en": "Creating new veil..."
   },
   "init.created": {
     "zh": "✓ 创建容器成功: {path}",
-    "en": "✓ Container created successfully: {path}"
+    "en": "✓ Veil created successfully: {path}"
   },
 
   "add.source_not_found": {
@@ -538,7 +542,7 @@
 
   "free.title": {
     "zh": "容器内容:",
-    "en": "Container content:"
+    "en": "Veil content:"
   },
   "free.stats_title": {
     "zh": "统计信息:",
@@ -555,7 +559,7 @@
 
   "info.title": {
     "zh": "容器信息:",
-    "en": "Container info:"
+    "en": "Veil info:"
   },
   "info.path": {
     "zh": "  路径: {path}",
@@ -565,9 +569,9 @@
     "zh": "  创建版本: {version}",
     "en": "  Created with version: {version}"
   },
-  "info.container_size": {
+  "info.veil_size": {
     "zh": "  容器大小: {bytes} 字节 ({mb} MB)",
-    "en": "  Container size: {bytes} bytes ({mb} MB)"
+    "en": "  Veil size: {bytes} bytes ({mb} MB)"
   },
   "info.content_title": {
     "zh": "内容统计:",
@@ -622,7 +626,7 @@
 
   "shell.opened": {
     "zh": "✓ 容器已打开，进入交互模式",
-    "en": "✓ Container opened, entering interactive mode"
+    "en": "✓ Veil opened, entering interactive mode"
   },
   "shell.hint": {
     "zh": "输入 'help' 查看可用命令，'exit' 退出",
@@ -658,7 +662,7 @@
   },
   "shell.help": {
     "zh": "\n可用命令:\n\n  文件操作:\n    add <source> [dest]      - 添加文件/目录到容器\n                                source: 本地文件路径\n                                dest: 容器内路径（可选）\n\n    rm <path>               - 删除容器内的文件\n                                path: 容器内路径\n\n    mv <from> <to>          - 移动/重命名文件\n                                from: 源路径（容器内）\n                                to: 目标路径（容器内）\n\n    ex <input> <output>      - 导出文件到本地\n    （别名: export）\n                                input: 容器内路径\n                                output: 本地路径\n\n  查看信息:\n    free                       - 树状显示容器内容\n    （别名: ls）\n\n    info                       - 显示容器详细信息\n                                （大小、文件数、类型分布）\n\n  其他:\n    help                       - 显示此帮助信息\n\n    exit                       - 退出 shell 模式\n    quit                       - 退出 shell 模式（别名）\n\n  示例:\n    veil> add photo.jpg photos/vacation.jpg\n    veil> free\n    veil> mv old.txt archive/old.txt\n    veil> ex archive/old.txt ./backup.txt\n    veil> rm archive/old.txt\n    veil> exit\n",
-    "en": "\nAvailable commands:\n\n  File operations:\n    add <source> [dest]      - Add files/directories to container\n                                source: Local file path\n                                dest: Virtual path in container (optional)\n\n    rm <path>               - Delete files from container\n                                path: Virtual path in container\n\n    mv <from> <to>          - Move/rename files\n                                from: Source path (in container)\n                                to: Destination path (in container)\n\n    ex <input> <output>      - Export files to local filesystem\n    (alias: export)\n                                input: Virtual path in container\n                                output: Local path\n\n  View information:\n    free                       - Display container content as tree\n    (alias: ls)\n\n    info                       - Display container details\n                                (size, file count, type distribution)\n\n  Other:\n    help                       - Show this help message\n\n    exit                       - Exit shell mode\n    quit                       - Exit shell mode (alias)\n\n  Examples:\n    veil> add photo.jpg photos/vacation.jpg\n    veil> free\n    veil> mv old.txt archive/old.txt\n    veil> ex archive/old.txt ./backup.txt\n    veil> rm archive/old.txt\n    veil> exit\n"
+    "en": "\nAvailable commands:\n\n  File operations:\n    add <source> [dest]      - Add files/directories to veil\n                                source: Local file path\n                                dest: Virtual path in veil (optional)\n\n    rm <path>               - Delete files from veil\n                                path: Virtual path in veil\n\n    mv <from> <to>          - Move/rename files\n                                from: Source path (in veil)\n                                to: Destination path (in veil)\n\n    ex <input> <output>      - Export files to local filesystem\n    (alias: export)\n                                input: Virtual path in veil\n                                output: Local path\n\n  View information:\n    free                       - Display veil content as tree\n    (alias: ls)\n\n    info                       - Display veil details\n                                (size, file count, type distribution)\n\n  Other:\n    help                       - Show this help message\n\n    exit                       - Exit shell mode\n    quit                       - Exit shell mode (alias)\n\n  Examples:\n    veil> add photo.jpg photos/vacation.jpg\n    veil> free\n    veil> mv old.txt archive/old.txt\n    veil> ex archive/old.txt ./backup.txt\n    veil> rm archive/old.txt\n    veil> exit\n"
   },
 
   "pb.dir_template": {
@@ -668,11 +672,11 @@
 
   "clap.about": {
     "zh": "Veil v{version} - 一个简单、安全、高效的文件加密容器工具",
-    "en": "Veil v{version} - A simple, secure, efficient file encryption container tool"
+    "en": "Veil v{version} - A simple, secure, efficient file encryption veil tool"
   },
   "clap.long_about": {
     "zh": "Veil v{version}\n一个简单、安全、高效的文件加密容器工具",
-    "en": "Veil v{version}\nA simple, secure, efficient file encryption container tool"
+    "en": "Veil v{version}\nA simple, secure, efficient file encryption veil tool"
   },
   "clap.help_template": {
     "zh": "{about-with-newline}\n用法: {usage}\n\n命令:\n{subcommands}\n\n选项:\n{options}\n",
@@ -685,63 +689,63 @@
 
   "cmd.init.about": {
     "zh": "创建新容器",
-    "en": "Create a new container"
+    "en": "Create a new veil"
   },
   "cmd.init.usage": {
-    "zh": "veil init <容器名称> [密码] [--workspace <已注册工作区> | --workspace-path <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
-    "en": "veil init <container-name> [password] [--workspace <registered-workspace> | --workspace-path <workspace-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
+    "zh": "veil init <容器名称> [密码] [--work <已注册工作区> | --work-root <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
+    "en": "veil init <veil-name> [password] [--work <registered-work> | --work-root <work-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
   },
   "cmd.init.usage_opt": {
-    "zh": "veil init <容器名称> [-p <密码>] [--workspace <已注册工作区> | --workspace-path <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
-    "en": "veil init <container-name> [-p <password>] [--workspace <registered-workspace> | --workspace-path <workspace-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
+    "zh": "veil init <容器名称> [-p <密码>] [--work <已注册工作区> | --work-root <工作区根路径（自动注册）> [--dedicated] | --portable] [--link <链接文件>]",
+    "en": "veil init <veil-name> [-p <password>] [--work <registered-work> | --work-root <work-root (auto-registered)> [--dedicated] | --portable] [--link <link-file>]"
   },
   "cmd.add.about": {
     "zh": "添加文件或目录到容器",
-    "en": "Add files or directories to container"
+    "en": "Add files or directories to veil"
   },
   "cmd.add.usage": {
     "zh": "veil add <容器名称、ID 或链接> [源路径] [目标路径] [密码]",
-    "en": "veil add <container-name, ID, or link> [source] [destination] [password]"
+    "en": "veil add <veil-name, ID, or link> [source] [destination] [password]"
   },
   "cmd.add.usage_opt": {
     "zh": "veil add <容器名称、ID 或链接> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil add <container-name, ID, or link> -i <source> -o <destination> [-p <password>]"
+    "en": "veil add <veil-name, ID, or link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.rm.about": {
     "zh": "从容器删除文件或目录",
-    "en": "Delete files or directories from container"
+    "en": "Delete files or directories from veil"
   },
   "cmd.rm.usage": {
     "zh": "veil rm <容器名称、ID 或链接> <路径> [密码]",
-    "en": "veil rm <container-name, ID, or link> <path> [password]"
+    "en": "veil rm <veil-name, ID, or link> <path> [password]"
   },
   "cmd.rm.usage_opt": {
     "zh": "veil rm <容器名称、ID 或链接> <路径> [-p <密码>]",
-    "en": "veil rm <container-name, ID, or link> <path> [-p <password>]"
+    "en": "veil rm <veil-name, ID, or link> <path> [-p <password>]"
   },
   "cmd.mv.about": {
     "zh": "移动/重命名容器内的文件",
-    "en": "Move/rename files in container"
+    "en": "Move/rename files in veil"
   },
   "cmd.mv.usage": {
     "zh": "veil mv <容器名称、ID 或链接> <源路径> <目标路径> [密码]",
-    "en": "veil mv <container-name, ID, or link> <source> <destination> [password]"
+    "en": "veil mv <veil-name, ID, or link> <source> <destination> [password]"
   },
   "cmd.mv.usage_opt": {
     "zh": "veil mv <容器名称、ID 或链接> -i <源路径> -o <目标路径> [-p <密码>]",
-    "en": "veil mv <container-name, ID, or link> -i <source> -o <destination> [-p <password>]"
+    "en": "veil mv <veil-name, ID, or link> -i <source> -o <destination> [-p <password>]"
   },
   "cmd.free.about": {
     "zh": "树状显示容器内容",
-    "en": "Display container content as tree"
+    "en": "Display veil content as tree"
   },
   "cmd.free.usage": {
     "zh": "veil free <容器名称、ID 或链接> [密码]",
-    "en": "veil free <container-name, ID, or link> [password]"
+    "en": "veil free <veil-name, ID, or link> [password]"
   },
   "cmd.free.usage_opt": {
     "zh": "veil free <容器名称、ID 或链接> [-p <密码>]",
-    "en": "veil free <container-name, ID, or link> [-p <password>]"
+    "en": "veil free <veil-name, ID, or link> [-p <password>]"
   },
   "cmd.ex.about": {
     "zh": "导出文件或目录",
@@ -749,55 +753,55 @@
   },
   "cmd.ex.usage": {
     "zh": "veil ex <容器名称、ID 或链接> [输入路径] [输出路径] [密码]",
-    "en": "veil ex <container-name, ID, or link> [input-path] [output-path] [password]"
+    "en": "veil ex <veil-name, ID, or link> [input-path] [output-path] [password]"
   },
   "cmd.ex.usage_opt": {
     "zh": "veil ex <容器名称、ID 或链接> -i <输入路径> -o <输出路径> [-p <密码>]",
-    "en": "veil ex <container-name, ID, or link> -i <input-path> -o <output-path> [-p <password>]"
+    "en": "veil ex <veil-name, ID, or link> -i <input-path> -o <output-path> [-p <password>]"
   },
   "cmd.info.about": {
     "zh": "显示容器信息",
-    "en": "Display container information"
+    "en": "Display veil information"
   },
   "cmd.info.usage": {
     "zh": "veil info <容器名称、ID 或链接> [密码]",
-    "en": "veil info <container-name, ID, or link> [password]"
+    "en": "veil info <veil-name, ID, or link> [password]"
   },
   "cmd.info.usage_opt": {
     "zh": "veil info <容器名称、ID 或链接> [-p <密码>]",
-    "en": "veil info <container-name, ID, or link> [-p <password>]"
+    "en": "veil info <veil-name, ID, or link> [-p <password>]"
   },
   "cmd.list.about": {
     "zh": "列出容器中的文件",
-    "en": "List files in a container"
+    "en": "List files in a veil"
   },
   "cmd.list.usage": {
     "zh": "veil list <容器名称、ID 或链接> [-p <密码>]",
-    "en": "veil list <container-name, ID, or link> [-p <password>]"
+    "en": "veil list <veil-name, ID, or link> [-p <password>]"
   },
   "cmd.exists.about": {
     "zh": "判断容器内文件或目录是否存在",
-    "en": "Check whether a file or directory exists in a container"
+    "en": "Check whether a file or directory exists in a veil"
   },
   "cmd.exists.usage": {
     "zh": "veil exists <容器名称、ID 或链接> <容器内路径> [密码]",
-    "en": "veil exists <container-name, ID, or link> <container-path> [password]"
+    "en": "veil exists <veil-name, ID, or link> <veil-path> [password]"
   },
   "cmd.exists.usage_opt": {
     "zh": "veil exists <容器名称、ID 或链接> <容器内路径> [-p <密码>]",
-    "en": "veil exists <container-name, ID, or link> <container-path> [-p <password>]"
+    "en": "veil exists <veil-name, ID, or link> <veil-path> [-p <password>]"
   },
   "cmd.passwd.about": {
     "zh": "修改容器密码（默认只重保护元数据）",
-    "en": "Change container password (metadata-only by default)"
+    "en": "Change veil password (metadata-only by default)"
   },
   "cmd.passwd.usage": {
     "zh": "veil passwd <容器名称、ID 或链接> [旧密码] [新密码] [--full]",
-    "en": "veil passwd <container-name, ID, or link> [old-password] [new-password] [--full]"
+    "en": "veil passwd <veil-name, ID, or link> [old-password] [new-password] [--full]"
   },
   "cmd.passwd.usage_opt": {
     "zh": "veil passwd <容器名称、ID 或链接> [-p <旧密码>] [-n <新密码>] [--full]",
-    "en": "veil passwd <container-name, ID, or link> [-p <old-password>] [-n <new-password>] [--full]"
+    "en": "veil passwd <veil-name, ID, or link> [-p <old-password>] [-n <new-password>] [--full]"
   },
   "cmd.shell.about": {
     "zh": "交互式 shell 模式（批处理）",
@@ -805,16 +809,16 @@
   },
   "cmd.shell.usage": {
     "zh": "veil shell <容器名称、ID 或链接> [密码]",
-    "en": "veil shell <container-name, ID, or link> [password]"
+    "en": "veil shell <veil-name, ID, or link> [password]"
   },
   "cmd.shell.usage_opt": {
     "zh": "veil shell <容器名称、ID 或链接> [-p <密码>]",
-    "en": "veil shell <container-name, ID, or link> [-p <password>]"
+    "en": "veil shell <veil-name, ID, or link> [-p <password>]"
   },
 
-  "arg.container": {
+  "arg.veil": {
     "zh": "容器名称、veil_id 或链接",
-    "en": "container name, ID, or link"
+    "en": "veil name, ID, or link"
   },
   "arg.password": {
     "zh": "密码",
@@ -862,7 +866,7 @@
   },
   "arg.target": {
     "zh": "容器名、ID、链接或工作区路径",
-    "en": "container name, ID, link, or workspace path"
+    "en": "veil name, ID, link, or work path"
   },
   "arg.link_file": {
     "zh": "链接文件",
@@ -872,13 +876,13 @@
     "zh": "主题",
     "en": "topic"
   },
-  "arg.workspace": {
+  "arg.work": {
     "zh": "工作区名称",
-    "en": "workspace-name"
+    "en": "work-name"
   },
-  "arg.container_name": {
+  "arg.veil_name": {
     "zh": "容器名称",
-    "en": "container-name"
+    "en": "veil-name"
   },
   "arg.output_file": {
     "zh": "输出文件",
@@ -889,57 +893,57 @@
     "en": "package-file"
   },
 
-  "help.init.container": {
+  "help.init.veil": {
     "zh": "容器名称（如 photos）",
-    "en": "Container name (e.g. photos)"
+    "en": "Veil name (e.g. photos)"
   },
   "help.init.password": {
     "zh": "容器密码（位置参数或 -p 选项）",
-    "en": "Container password (positional argument or -p option)"
+    "en": "Veil password (positional argument or -p option)"
   },
   "help.init.password_opt": {
     "zh": "容器密码（选项方式）",
-    "en": "Container password (via option)"
+    "en": "Veil password (via option)"
   },
   "help.init.link": {
     "zh": "自定义 .veil-link 输出路径",
     "en": "Custom .veil-link output path"
   },
-  "help.init.workspace": {
+  "help.init.work": {
     "zh": "使用已注册的命名工作区（名称，不是路径）",
-    "en": "Use a registered named workspace (name, not a path)"
+    "en": "Use a registered named work (name, not a path)"
   },
-  "help.init.workspace_path": {
+  "help.init.work_root": {
     "zh": "使用指定工作区根路径并自动注册给当前容器（不会新增命名工作区）",
-    "en": "Use a workspace root and auto-register it for this container (does not create a named workspace)"
+    "en": "Use a work root and auto-register it for this veil (does not create a named work)"
   },
   "help.init.dedicated": {
-    "zh": "工作区由该容器独占（需配合 --workspace-path）",
-    "en": "Give this container a dedicated workspace (requires --workspace-path)"
+    "zh": "工作区由该容器独占（需配合 --work-root）",
+    "en": "Give this veil a dedicated work (requires --work-root)"
   },
   "help.init.portable": {
     "zh": "强制将工作区放在链接文件所在的卷（不能与工作区选项同用）",
-    "en": "Force the workspace onto the link file's volume (cannot be combined with workspace options)"
+    "en": "Force the work onto the link file's volume (cannot be combined with work options)"
   },
-  "help.container": {
+  "help.veil": {
     "zh": "容器名称、veil_id 或 .veil-link 路径",
-    "en": "Container name, veil_id, or .veil-link path"
+    "en": "Veil name, veil_id, or .veil-link path"
   },
   "help.password_pos": {
     "zh": "容器密码（位置参数，可选）",
-    "en": "Container password (positional argument, optional)"
+    "en": "Veil password (positional argument, optional)"
   },
   "help.password_opt": {
     "zh": "容器密码（选项方式）",
-    "en": "Container password (via option)"
+    "en": "Veil password (via option)"
   },
   "help.add.input_pos": {
     "zh": "源文件或目录路径（容器外部，位置参数或 -i）",
-    "en": "Source file or directory path (outside container, positional or -i)"
+    "en": "Source file or directory path (outside veil, positional or -i)"
   },
   "help.add.output_pos": {
     "zh": "容器内的目标路径（位置参数或 -o，可选）",
-    "en": "Destination path in container (positional or -o, optional)"
+    "en": "Destination path in veil (positional or -o, optional)"
   },
   "help.add.input": {
     "zh": "源文件或目录路径（选项方式）",
@@ -947,7 +951,7 @@
   },
   "help.add.output": {
     "zh": "容器内的目标路径（选项方式）",
-    "en": "Destination path in container (via option)"
+    "en": "Destination path in veil (via option)"
   },
   "help.rm.path": {
     "zh": "要删除的虚拟路径",
@@ -955,27 +959,27 @@
   },
   "help.exists.path": {
     "zh": "要检查的容器内文件或目录路径",
-    "en": "File or directory path to check inside the container"
+    "en": "File or directory path to check inside the veil"
   },
   "help.mv.from_pos": {
     "zh": "源路径（位置参数或 -i，容器内）",
-    "en": "Source path (positional or -i, inside container)"
+    "en": "Source path (positional or -i, inside veil)"
   },
   "help.mv.to_pos": {
     "zh": "目标路径（位置参数或 -o，容器内）",
-    "en": "Destination path (positional or -o, inside container)"
+    "en": "Destination path (positional or -o, inside veil)"
   },
   "help.mv.input": {
     "zh": "源路径（选项方式，容器内）",
-    "en": "Source path (via option, inside container)"
+    "en": "Source path (via option, inside veil)"
   },
   "help.mv.output": {
     "zh": "目标路径（选项方式，容器内）",
-    "en": "Destination path (via option, inside container)"
+    "en": "Destination path (via option, inside veil)"
   },
   "help.ex.input_pos": {
     "zh": "容器内的虚拟路径（位置参数或 -i，支持通配符）",
-    "en": "Virtual path in container (positional or -i, supports wildcards)"
+    "en": "Virtual path in veil (positional or -i, supports wildcards)"
   },
   "help.ex.output_pos": {
     "zh": "导出到的目标路径（位置参数或 -o）",
@@ -983,7 +987,7 @@
   },
   "help.ex.input": {
     "zh": "容器内的虚拟路径（选项方式，支持通配符）",
-    "en": "Virtual path in container (via option, supports wildcards)"
+    "en": "Virtual path in veil (via option, supports wildcards)"
   },
   "help.ex.output": {
     "zh": "导出到的目标路径（选项方式）",
@@ -1059,37 +1063,37 @@
     "zh": "✓ 已生成链接: {path}",
     "en": "✓ Link created: {path}"
   },
-  "init.workspace_path": {
+  "init.work_root": {
     "zh": "  工作区: {path}",
-    "en": "  Workspace: {path}"
+    "en": "  Work: {path}"
   },
   "init.invalid_link_name": {
     "zh": "无效的链接文件名",
     "en": "Invalid link filename"
   },
-  "init.invalid_container_name": {
+  "init.invalid_veil_name": {
     "zh": "无效的容器名称",
-    "en": "Invalid container name"
+    "en": "Invalid veil name"
   },
-  "init.creating_workspace": {
+  "init.creating_work": {
     "zh": "正在创建加密工作区...",
-    "en": "Creating encrypted workspace..."
+    "en": "Creating encrypted work..."
   },
   "init.type_dedicated": {
     "zh": "  类型: 专属工作区",
-    "en": "  Type: dedicated workspace"
+    "en": "  Type: dedicated work"
   },
   "init.type_shared": {
-    "zh": "  类型: 共享工作区 ({workspace})",
-    "en": "  Type: shared workspace ({workspace})"
+    "zh": "  类型: 共享工作区 ({work})",
+    "en": "  Type: shared work ({work})"
   },
-  "init.portable_workspace": {
+  "init.portable_work": {
     "zh": "便携模式：工作区将创建在: {path}",
-    "en": "Portable mode: workspace will be created at: {path}"
+    "en": "Portable mode: work will be created at: {path}"
   },
-  "init.external_workspace": {
+  "init.external_work": {
     "zh": "检测到外接卷，工作区将创建在: {path}",
-    "en": "External volume detected. Workspace will be created at: {path}"
+    "en": "External volume detected. Work will be created at: {path}"
   },
   "pack.output_exists": {
     "zh": "输出文件已存在: {path}",
@@ -1097,7 +1101,7 @@
   },
   "pack.in_progress": {
     "zh": "正在打包容器...",
-    "en": "Packing container..."
+    "en": "Packing veil..."
   },
   "pack.created": {
     "zh": "✓ 已打包到: {path}",
@@ -1107,25 +1111,25 @@
     "zh": "  文件数: {count}  大小: {size}",
     "en": "  Files: {count}  Size: {size}"
   },
-  "unpack.container_not_found": {
+  "unpack.veil_not_found": {
     "zh": "容器文件不存在: {path}",
-    "en": "Container file not found: {path}"
+    "en": "Veil file not found: {path}"
   },
   "unpack.name_extract_failed": {
     "zh": "无法从文件名提取容器名称",
-    "en": "Could not derive a container name from the filename"
+    "en": "Could not derive a veil name from the filename"
   },
   "unpack.missing_veil_id": {
     "zh": "打包文件缺少容器身份",
-    "en": "Package file is missing the container identity"
+    "en": "Package file is missing the veil identity"
   },
   "unpack.already_exists": {
     "zh": "容器 '{name}' 已存在，请使用不同的名称或先删除现有容器",
-    "en": "Container '{name}' already exists. Use another name or remove the existing container first"
+    "en": "Veil '{name}' already exists. Use another name or remove the existing veil first"
   },
-  "unpack.workspace_not_found": {
+  "unpack.work_not_found": {
     "zh": "工作区 '{name}' 不存在",
-    "en": "Workspace '{name}' does not exist"
+    "en": "Work '{name}' does not exist"
   },
   "unpack.directory_exists": {
     "zh": "目录已存在: {path}",
@@ -1133,7 +1137,7 @@
   },
   "unpack.in_progress": {
     "zh": "正在解包容器...",
-    "en": "Unpacking container..."
+    "en": "Unpacking veil..."
   },
   "unpack.kdf_failed": {
     "zh": "密钥派生失败: {error}",
@@ -1145,11 +1149,11 @@
   },
   "unpack.created": {
     "zh": "✓ 已解包容器 '{name}'",
-    "en": "✓ Container '{name}' unpacked"
+    "en": "✓ Veil '{name}' unpacked"
   },
   "unpack.stats": {
     "zh": "  文件数: {count}  工作区: {path}",
-    "en": "  Files: {count}  Workspace: {path}"
+    "en": "  Files: {count}  Work: {path}"
   },
   "config.title": {
     "zh": "当前配置:",
@@ -1175,21 +1179,21 @@
     "zh": "off (关闭提示)",
     "en": "off"
   },
-  "config.default_workspace": {
+  "config.default_work": {
     "zh": "默认工作区: {path}",
-    "en": "Default workspace: {path}"
+    "en": "Default work: {path}"
   },
-  "config.custom_workspace_count": {
+  "config.custom_work_count": {
     "zh": "自定义工作区数量: {count}",
-    "en": "Custom workspace count: {count}"
+    "en": "Custom work count: {count}"
   },
-  "config.custom_workspace": {
+  "config.custom_work": {
     "zh": "  {name}: {path}",
     "en": "  {name}: {path}"
   },
-  "config.container_count": {
+  "config.veil_count": {
     "zh": "容器数量: {count}",
-    "en": "Containers: {count}"
+    "en": "Veils: {count}"
   },
   "config.volume_count": {
     "zh": "已知磁盘卷: {count}",
@@ -1233,19 +1237,19 @@
   },
   "hints.init.storage_line": {
     "zh": "数据保存在工作区：",
-    "en": "Data is stored in the workspace:"
+    "en": "Data is stored in the work:"
   },
   "hints.init.pack_title": {
     "zh": "提取打包容器",
-    "en": "Extract and pack container"
+    "en": "Extract and pack veil"
   },
   "hints.init.pack_command": {
-    "zh": "veil pack {container}",
-    "en": "veil pack {container}"
+    "zh": "veil pack {veil}",
+    "en": "veil pack {veil}"
   },
   "hints.init.unpack_title": {
     "zh": "导入外部容器",
-    "en": "Import external container"
+    "en": "Import external veil"
   },
   "hints.init.unpack_command": {
     "zh": "veil unpack <file.veil>",
@@ -1277,7 +1281,7 @@
   },
   "hints.pack.link_desc": {
     "zh": "  ↳ 快捷方式，指向本地工作区\n  ↳ 只能在这台电脑上使用",
-    "en": "  ↳ Shortcut to the local workspace\n  ↳ For use on this computer"
+    "en": "  ↳ Shortcut to the local work\n  ↳ For use on this computer"
   },
   "hints.pack.output_line": {
     "zh": "📦 {path} ({size_mb} MB)",
@@ -1293,7 +1297,7 @@
   },
   "hints.unpack.body": {
     "zh": "• 数据包已解包到本地工作区\n• 之后请使用 {link} 操作文件\n• 工作区包含 {count} 个文件",
-    "en": "• The package is unpacked into the local workspace\n• Use {link} for future operations\n• The workspace contains {count} files"
+    "en": "• The package is unpacked into the local work\n• Use {link} for future operations\n• The work contains {count} files"
   },
   "hints.link_recovery.title": {
     "zh": "💡 .veil-link 只是快捷方式",
@@ -1301,7 +1305,7 @@
   },
   "hints.link_recovery.body": {
     "zh": "• 删除链接不会影响工作区数据\n• 已为你重建 {path}",
-    "en": "• Deleting the link does not affect workspace data\n• Recreated {path} for you"
+    "en": "• Deleting the link does not affect work data\n• Recreated {path} for you"
   },
   "link.created": {
     "zh": "✓ 已创建链接: {path}",
@@ -1313,7 +1317,7 @@
   },
   "link.missing_veil_id": {
     "zh": "链接文件缺少容器身份",
-    "en": "Link file is missing the container identity"
+    "en": "Link file is missing the veil identity"
   },
   "link.invalid_extension": {
     "zh": "链接文件必须以 .veil-link 结尾: {path}",
@@ -1321,15 +1325,15 @@
   },
   "cmd.link.about": {
     "zh": "根据工作区、容器名或 ID 重建 .veil-link",
-    "en": "Rebuild a .veil-link from a workspace, container name, or ID"
+    "en": "Rebuild a .veil-link from a work, veil name, or ID"
   },
   "cmd.link.usage": {
     "zh": "veil link <容器名、ID、链接或工作区路径> [-o <链接文件>]",
-    "en": "veil link <container-name, ID, link, or workspace-path> [-o <link-file>]"
+    "en": "veil link <veil-name, ID, link, or work-path> [-o <link-file>]"
   },
   "help.link.target": {
     "zh": "容器名称、ID、现有链接或工作区目录",
-    "en": "Container name, ID, existing link, or workspace directory"
+    "en": "Veil name, ID, existing link, or work directory"
   },
   "help.link.output": {
     "zh": "链接文件输出路径",
@@ -1337,11 +1341,11 @@
   },
   "cmd.pack.about": {
     "zh": "将工作区打包为 .veil 文件",
-    "en": "Pack a workspace into a .veil file"
+    "en": "Pack a work into a .veil file"
   },
   "cmd.pack.usage": {
     "zh": "veil pack <容器名称、ID 或链接> [-o <输出文件>] [-p <密码>]",
-    "en": "veil pack <container-name, ID, or link> [-o <output-file>] [-p <password>]"
+    "en": "veil pack <veil-name, ID, or link> [-o <output-file>] [-p <password>]"
   },
   "help.pack.output": {
     "zh": "输出文件路径（默认 <名称>.vault.veil）",
@@ -1349,23 +1353,23 @@
   },
   "cmd.unpack.about": {
     "zh": "将 .veil 文件解包到工作区并生成 .veil-link",
-    "en": "Unpack a .veil file into a workspace and create a .veil-link"
+    "en": "Unpack a .veil file into a work and create a .veil-link"
   },
   "cmd.unpack.usage": {
     "zh": "veil unpack <文件.veil> [-n <容器名>] [-w <工作区>] [--link <链接文件>] [-p <密码>]",
-    "en": "veil unpack <file.veil> [-n <name>] [-w <workspace>] [--link <link-file>] [-p <password>]"
+    "en": "veil unpack <file.veil> [-n <name>] [-w <work>] [--link <link-file>] [-p <password>]"
   },
   "help.unpack.name": {
     "zh": "容器名称（默认从文件名提取）",
-    "en": "Container name (derived from filename by default)"
+    "en": "Veil name (derived from filename by default)"
   },
   "help.unpack.file": {
     "zh": "要解包的 .veil 文件",
     "en": "The .veil package file to unpack"
   },
-  "help.unpack.workspace": {
+  "help.unpack.work": {
     "zh": "目标命名工作区（已注册名称，不是路径）",
-    "en": "Destination named workspace (registered name, not a path)"
+    "en": "Destination named work (registered name, not a path)"
   },
   "help.unpack.link": {
     "zh": "解包后生成的 .veil-link 路径",
@@ -1405,7 +1409,7 @@
   },
   "help.files.content": {
     "zh": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n大小      < 1KB              与数据量相同\n作用      指向本地工作区      完整数据包\n用途      日常操作            分享/备份/传输\n删除后    数据不丢失          数据丢失（除非工作区还在）\n可分享    否                  是\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n类比：\n  .veil-link  ←→  快捷方式 / 书签\n  .veil       ←→  ZIP 压缩包",
-    "en": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSize      < 1 KB             Same as data size\nRole      Points to workspace  Complete package\nUse       Daily operations    Share/backup/transfer\nDeleted   Data remains        Data is lost unless workspace remains\nShareable No                  Yes\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nAnalogy:\n  .veil-link  ←→  Shortcut / bookmark\n  .veil       ←→  ZIP archive"
+    "en": "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n          📌 .veil-link      📦 .veil\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSize      < 1 KB             Same as data size\nRole      Points to work  Complete package\nUse       Daily operations    Share/backup/transfer\nDeleted   Data remains        Data is lost unless work remains\nShareable No                  Yes\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nAnalogy:\n  .veil-link  ←→  Shortcut / bookmark\n  .veil       ←→  ZIP archive"
   },
   "help.files.unknown_topic": {
     "zh": "未知帮助主题: {topic}",

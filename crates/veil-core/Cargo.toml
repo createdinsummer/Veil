@@ -22,3 +22,6 @@ tempfile = "3.8"
 thiserror = "2.0.18"
 toml = "0.8"
 zeroize = "1.9.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

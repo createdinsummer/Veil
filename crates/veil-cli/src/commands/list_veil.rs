@@ -7,14 +7,13 @@ use colored::Colorize;
 ///
 /// # 错误
 /// 容器解析、密码读取或元数据解密失败时返回错误。
-pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+pub fn run_veil(veil_name: &str, password: Option<String>) -> Result<()> {
     // list 只读取容器元数据，不需要打开每个文件 blob。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
-    let display_name = resolved.name;
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
+    let display_name = resolved.veil_name;
 
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -26,7 +25,7 @@ pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<(
     crate::outln!(
         "\n{}",
         crate::i18n::t2(
-            "list.workspace_title",
+            "list.veil_title",
             "name",
             &display_name,
             "count",

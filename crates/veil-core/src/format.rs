@@ -160,7 +160,9 @@ pub fn read_footer<R: Read + Seek>(reader: &mut R) -> Result<(u64, u64)> {
     let index_offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
     let index_len = u64::from_le_bytes(buf[8..16].try_into().unwrap());
     if &buf[16..24] != FOOTER_MAGIC {
-        return Err(VeilError::Format("Footer magic 不匹配（文件损坏？）".into()));
+        return Err(VeilError::Format(
+            "Footer magic 不匹配（文件损坏？）".into(),
+        ));
     }
     Ok((index_offset, index_len))
 }
@@ -179,7 +181,8 @@ mod tests {
 
         let fake_cip_pri_key = b"pretend-this-is-cip-pri-key";
         let cli_version = "1.1.0";
-        let header_len = write_header(&mut buf, cli_version, fake_cip_pri_key, KdfType::Argon2id).unwrap();
+        let header_len =
+            write_header(&mut buf, cli_version, fake_cip_pri_key, KdfType::Argon2id).unwrap();
         write_footer(&mut buf, 111, 222).unwrap();
         println!("header 长度 = {header_len} 字节");
 

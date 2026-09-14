@@ -3,7 +3,7 @@
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::workspace_ops::AddFileSpec;
+use veil_core::veil_ops::AddFileSpec;
 use walkdir::WalkDir;
 
 /// 添加本地文件或目录到容器（工作区架构）。
@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 /// 单文件可使用目标路径覆盖容器内名称；目录会递归添加并保持相对目录结构。
 ///
 /// # 参数
-/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
+/// - `veil_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `source`: 本地源文件或目录。
 /// - `dest`: 可选的容器内目标路径。目录作为目标时表示目标前缀。
 /// - `password`: 容器密码（`None` 则交互式输入）。
@@ -27,14 +27,14 @@ use walkdir::WalkDir;
 /// veil add photos ~/Pictures
 /// ```
 pub fn run(
-    container_name: &str,
+    veil_name: &str,
     source: &str,
     dest: Option<&str>,
     password: Option<String>,
 ) -> Result<()> {
     // 先解析容器身份，后续所有操作都绑定确认后的 veil_id。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
     // 提前收集所有源路径和目标路径，避免密码输入后才发现路径无效。
     let source_path = Path::new(source);
@@ -48,9 +48,8 @@ pub fn run(
         return Ok(());
     }
 
-    crate::outln!("{}", crate::i18n::t("opening_container").cyan());
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    crate::outln!("{}", crate::i18n::t("opening_veil").cyan());
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -88,7 +87,7 @@ fn collect_add_specs(source: &Path, dest: Option<&str>) -> Result<Vec<AddFileSpe
         let source_name = file_name(source)?;
         let target = match dest {
             Some(dest) if is_directory_target(dest) => {
-                join_container_path(dest.trim_end_matches(['/', '\\']), &source_name)?
+                join_veil_dir(dest.trim_end_matches(['/', '\\']), &source_name)?
             }
             Some(dest) => dest.to_string(),
             None => source_name,
@@ -129,11 +128,11 @@ fn collect_add_specs(source: &Path, dest: Option<&str>) -> Result<Vec<AddFileSpe
                 "error" => error
             )
         })?;
-        let relative = path_to_container_path(relative)?;
+        let relative = path_to_veil_dir(relative)?;
         let target = if target_root.is_empty() {
             relative
         } else {
-            join_container_path(&target_root, &relative)?
+            join_veil_dir(&target_root, &relative)?
         };
 
         specs.push(AddFileSpec::new(entry.path(), target));
@@ -156,7 +155,7 @@ fn is_directory_target(path: &str) -> bool {
 }
 
 /// 拼接容器内路径，统一使用 `/`。
-fn join_container_path(prefix: &str, suffix: &str) -> Result<String> {
+fn join_veil_dir(prefix: &str, suffix: &str) -> Result<String> {
     let prefix = prefix.trim_matches('/');
     let suffix = suffix.trim_matches('/');
     let target = match (prefix.is_empty(), suffix.is_empty()) {
@@ -174,7 +173,7 @@ fn join_container_path(prefix: &str, suffix: &str) -> Result<String> {
 }
 
 /// 把本地相对路径转换为统一的容器内路径。
-fn path_to_container_path(path: &Path) -> Result<String> {
+fn path_to_veil_dir(path: &Path) -> Result<String> {
     let mut parts = Vec::new();
     for component in path.components() {
         let part = component
@@ -184,5 +183,5 @@ fn path_to_container_path(path: &Path) -> Result<String> {
         parts.push(part);
     }
 
-    join_container_path("", &parts.join("/"))
+    join_veil_dir("", &parts.join("/"))
 }

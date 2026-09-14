@@ -5,13 +5,13 @@ use colored::Colorize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// 显示容器详细信息（工作区架构）。
+/// 显示 Veil 详细信息。
 ///
-/// 输出容器的元数据和内容统计。
+/// 输出 Veil 的元数据和内容统计。
 ///
 /// # 参数
-/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
-/// - `password`: 容器密码（`None` 则交互式输入）
+/// - `veil_name`: Veil 名称、`veil_id` 或 `.veil-link` 路径。
+/// - `password`: Veil 密码（`None` 则交互式输入）
 ///
 /// # 返回
 /// - `Ok(())`: 成功显示信息
@@ -21,14 +21,13 @@ use std::path::Path;
 /// ```bash
 /// veil info photos
 /// ```
-pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
+pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // info 绑定已确认的 ID，展示名称以加密元数据中的值为准。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
-    let workspace_path = manager.workspace_path.clone();
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
+    let veil_dir = manager.veil_dir.clone();
 
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
@@ -39,7 +38,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     crate::outln!("\n{}", crate::i18n::t("info.title").cyan().bold());
     crate::outln!(
         "{}",
-        crate::i18n::t1("info.container_name", "name", &metadata.container_name)
+        crate::i18n::t1("info.veil_name", "name", &metadata.veil_name)
     );
     crate::outln!(
         "{}",
@@ -47,19 +46,11 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     );
     crate::outln!(
         "{}",
-        crate::i18n::t1(
-            "info.workspace_path",
-            "path",
-            &workspace_path.display().to_string()
-        )
+        crate::i18n::t1("info.veil_dir", "path", &veil_dir.display().to_string())
     );
     crate::outln!(
         "{}",
-        crate::i18n::t1(
-            "info.workspace_type",
-            "workspace_type",
-            &metadata.workspace_type
-        )
+        crate::i18n::t1("info.work_type", "work_type", &metadata.work_type)
     );
     crate::outln!(
         "{}",
@@ -69,7 +60,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     // 文件数量来自已解密清单，总大小在内存中累加，不扫描磁盘密文。
     let file_count = metadata.files.len();
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
-    let container_size = directory_size(&workspace_path)?;
+    let veil_size = directory_size(&veil_dir)?;
 
     crate::outln!("\n{}", crate::i18n::t("info.content_title").cyan());
     crate::outln!(
@@ -89,11 +80,11 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     crate::outln!(
         "{}",
         crate::i18n::t2(
-            "info.container_size",
+            "info.veil_size",
             "bytes",
-            &container_size.to_string(),
+            &veil_size.to_string(),
             "mb",
-            &format!("{:.2}", container_size as f64 / 1_048_576.0)
+            &format!("{:.2}", veil_size as f64 / 1_048_576.0)
         )
     );
 
@@ -138,7 +129,7 @@ pub fn run(container_name: &str, password: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// 递归统计工作区目录中实际占用的文件字节数。
+/// 递归统计 `veil_dir` 中实际占用的文件字节数。
 fn directory_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     for entry in std::fs::read_dir(path)? {

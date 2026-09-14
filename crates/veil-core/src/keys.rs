@@ -14,8 +14,8 @@
 use age::secrecy::{ExposeSecret, SecretString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     ChaCha20Poly1305, Nonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use std::io::{Read, Write};
 use zeroize::Zeroize;
@@ -46,8 +46,7 @@ pub fn encrypt_pri_key(
 
     // 每次封装使用独立盐值，避免相同密码产生可复用的派生密钥。
     let mut salt = [0u8; 16];
-    getrandom::getrandom(&mut salt)
-        .map_err(|e| VeilError::Io(std::io::Error::other(e)))?;
+    getrandom::getrandom(&mut salt).map_err(|e| VeilError::Io(std::io::Error::other(e)))?;
 
     // 密码到加密密钥只经过这里一次，后续文件读写复用解出的 x25519 身份。
     let params = runtime_params();

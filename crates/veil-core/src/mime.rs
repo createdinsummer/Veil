@@ -62,7 +62,10 @@ mod tests {
     fn guesses_common_types() {
         // 大小写不敏感、能从多级路径取扩展名
         assert_eq!(guess_mime("a.JPG").as_deref(), Some("image/jpeg"));
-        assert_eq!(guess_mime("photos/2024/clip.mp4").as_deref(), Some("video/mp4"));
+        assert_eq!(
+            guess_mime("photos/2024/clip.mp4").as_deref(),
+            Some("video/mp4")
+        );
         assert_eq!(guess_mime("song.flac").as_deref(), Some("audio/flac"));
         // 无扩展名 / 未知扩展名 → None
         assert_eq!(guess_mime("README"), None);

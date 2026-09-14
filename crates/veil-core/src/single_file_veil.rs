@@ -50,7 +50,7 @@ use crate::keys::{decrypt_bytes, decrypt_pri_key, encrypt_bytes, encrypt_pri_key
 use crate::slice_reader::SliceReader;
 
 /// 已解密、可在内存中读取和更新的单文件容器句柄。
-pub struct Container {
+pub struct SingleFileVeil {
     /// 容器文件路径。
     path: PathBuf,
     /// 用于解密 blob 和目录索引的 x25519 身份。
@@ -63,7 +63,7 @@ pub struct Container {
     // 因此不需要在内存中单独维护 blob 区末尾位置。
 }
 
-impl Container {
+impl SingleFileVeil {
     /// 新建一个空容器并写入磁盘。
     ///
     /// # 参数
@@ -71,9 +71,13 @@ impl Container {
     /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`）
     /// - `cli_version`: CLI 版本字符串（如 "1.1.0"）
     /// # 返回
-    /// - `Ok(Container)`：已写入磁盘的空容器句柄。
+    /// - `Ok(SingleFileVeil)`：已写入磁盘的空容器句柄。
     /// - `Err(VeilError)`：私钥保护、Header 写入、空索引提交或文件同步失败。
-    pub fn create(path: impl AsRef<Path>, passphrase: impl Into<SecretString>, cli_version: &str) -> Result<Container> {
+    pub fn create(
+        path: impl AsRef<Path>,
+        passphrase: impl Into<SecretString>,
+        cli_version: &str,
+    ) -> Result<SingleFileVeil> {
         let passphrase = passphrase.into();
         let final_path = path.as_ref().to_path_buf();
         let parent = final_path
@@ -89,23 +93,28 @@ impl Container {
         let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
         {
             let mut writer = BufWriter::new(temp_file.as_file_mut());
-            format::write_header(&mut writer, cli_version, &cip_pri_key, crate::kdf::KdfType::Argon2id)?;
+            format::write_header(
+                &mut writer,
+                cli_version,
+                &cip_pri_key,
+                crate::kdf::KdfType::Argon2id,
+            )?;
             writer.flush()?;
         }
 
-        let mut container = Container {
+        let mut veil = SingleFileVeil {
             path: temp_file.path().to_path_buf(),
             key_pair,
             root: Tree::new(),
             cli_version: cli_version.to_string(),
         };
-        container.commit()?;
+        veil.commit()?;
         temp_file
             .persist_noclobber(&final_path)
             .map_err(|error| VeilError::Io(error.error))?;
-        container.path = final_path;
-        crate::fsutil::sync_parent(&container.path)?;
-        Ok(container)
+        veil.path = final_path;
+        crate::fsutil::sync_parent(&veil.path)?;
+        Ok(veil)
     }
 
     /// 打开已存在的容器：用密码解密私钥，再恢复目录树。
@@ -114,9 +123,12 @@ impl Container {
     /// - `path`:       容器文件路径
     /// - `passphrase`: 用户密码（`impl Into<SecretString>`，可直接传 `String`；错误则解密失败）
     /// # 返回
-    /// - `Ok(Container)`：解密后可读写的容器句柄（含目录树）
+    /// - `Ok(SingleFileVeil)`：解密后可读写的容器句柄（含目录树）
     /// - `Err(VeilError)`：密码错误、文件损坏、格式不符或找不到有效索引。
-    pub fn open(path: impl AsRef<Path>, passphrase: impl Into<SecretString>) -> Result<Container> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        passphrase: impl Into<SecretString>,
+    ) -> Result<SingleFileVeil> {
         let passphrase = passphrase.into();
         let path = path.as_ref().to_path_buf();
 
@@ -131,7 +143,7 @@ impl Container {
 
         let root = recover_index(&path, &key_pair)?;
 
-        Ok(Container {
+        Ok(SingleFileVeil {
             path,
             key_pair,
             root,
@@ -193,20 +205,16 @@ impl Container {
     ///
     /// # 示例
     /// ```no_run
-    /// # use veil_core::container::Container;
+    /// # use veil_core::single_file_veil::SingleFileVeil;
     /// # use std::fs::File;
     /// # fn example() -> veil_core::error::Result<()> {
-    /// let mut container = Container::open("data.veil", "password")?;
+    /// let mut veil = SingleFileVeil::open("data.veil", "password")?;
     /// let file = File::open("large_video.mp4")?;
-    /// container.add_file_streaming("videos/vacation.mp4", file)?;
+    /// veil.add_file_streaming("videos/vacation.mp4", file)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn add_file_streaming(
-        &mut self,
-        virtual_path: &str,
-        mut reader: impl Read,
-    ) -> Result<()> {
+    pub fn add_file_streaming(&mut self, virtual_path: &str, mut reader: impl Read) -> Result<()> {
         const CHUNK_SIZE: usize = 64 * 1024;
 
         // 新 blob 从当前 EOF 追加，旧数据不会被覆盖。
@@ -214,8 +222,12 @@ impl Container {
         let blob_offset = file.seek(SeekFrom::End(0))?;
 
         let recipient = self.key_pair.to_public();
-        let encryptor = age::Encryptor::with_recipients([Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
-            .expect("failed to create encryptor");
+        let encryptor = age::Encryptor::with_recipients(
+            [Box::new(recipient) as Box<dyn age::Recipient>]
+                .iter()
+                .map(|r| r.as_ref()),
+        )
+        .expect("failed to create encryptor");
         let mut writer = encryptor.wrap_output(&mut file)?;
 
         // 读、哈希、加密共享同一块缓冲区，内存占用只与 CHUNK_SIZE 有关。
@@ -292,18 +304,30 @@ impl Container {
         let old_header = format::read_header(&mut source)?;
 
         let mut new_header_bytes = Vec::new();
-        format::write_header(&mut new_header_bytes, &old_header.cli_version, &new_cip_pri_key, crate::kdf::KdfType::Argon2id)?;
+        format::write_header(
+            &mut new_header_bytes,
+            &old_header.cli_version,
+            &new_cip_pri_key,
+            crate::kdf::KdfType::Argon2id,
+        )?;
 
         let old_header_len = {
             let mut temp_file = File::open(&self.path)?;
             let header = format::read_header(&mut temp_file)?;
             let mut old_bytes = Vec::new();
-            format::write_header(&mut old_bytes, &header.cli_version, &header.cip_pri_key, header.kdf_type)?;
+            format::write_header(
+                &mut old_bytes,
+                &header.cli_version,
+                &header.cip_pri_key,
+                header.kdf_type,
+            )?;
             old_bytes.len()
         };
 
         if new_header_bytes.len() != old_header_len {
-            return Err(VeilError::Format("密文私钥长度变化，无法安全修改密码".into()));
+            return Err(VeilError::Format(
+                "密文私钥长度变化，无法安全修改密码".into(),
+            ));
         }
 
         let parent = self
@@ -397,7 +421,12 @@ impl Container {
             for (index, (abs_path, virtual_path)) in files.into_iter().enumerate() {
                 let file_size = abs_path.metadata()?.len();
                 progress_callback(index, total_files, &abs_path, file_size); // 开始处理当前文件
-                self.stage_blob_streaming(&mut file, &mut offset, &virtual_path, File::open(&abs_path)?)?;
+                self.stage_blob_streaming(
+                    &mut file,
+                    &mut offset,
+                    &virtual_path,
+                    File::open(&abs_path)?,
+                )?;
             }
             file.sync_all()?; // 所有 blob 一次性落盘（崩溃安全的前提）
         }
@@ -419,8 +448,12 @@ impl Container {
 
         // age 流式加密器
         let recipient = self.key_pair.to_public();
-        let encryptor = age::Encryptor::with_recipients([Box::new(recipient) as Box<dyn age::Recipient>].iter().map(|r| r.as_ref()))
-            .expect("failed to create encryptor");
+        let encryptor = age::Encryptor::with_recipients(
+            [Box::new(recipient) as Box<dyn age::Recipient>]
+                .iter()
+                .map(|r| r.as_ref()),
+        )
+        .expect("failed to create encryptor");
         let mut writer = encryptor.wrap_output(&mut *file)?;
 
         // 边读边 hash 边加密
@@ -495,21 +528,18 @@ impl Container {
     ///
     /// # 示例
     /// ```no_run
-    /// # use veil_core::container::Container;
+    /// # use veil_core::single_file_veil::SingleFileVeil;
     /// # use std::io::{Read, copy};
     /// # use std::fs::File;
     /// # fn example() -> veil_core::error::Result<()> {
-    /// let container = Container::open("data.veil", "password")?;
-    /// let mut reader = container.open_file_reader("videos/vacation.mp4")?;
+    /// let veil = SingleFileVeil::open("data.veil", "password")?;
+    /// let mut reader = veil.open_file_reader("videos/vacation.mp4")?;
     /// let mut output = File::create("vacation.mp4")?;
     /// std::io::copy(&mut reader, &mut output)?;  // 流式复制，内存占用恒定
     /// # Ok(())
     /// # }
     /// ```
-    pub fn open_file_reader(
-        &self,
-        virtual_path: &str,
-    ) -> Result<impl Read + Seek> {
+    pub fn open_file_reader(&self, virtual_path: &str) -> Result<impl Read + Seek> {
         let meta = self.file_meta(virtual_path)?;
         self.open_blob_reader(meta)
     }
@@ -689,7 +719,7 @@ impl Container {
     ///
     /// # 示例
     /// ```text
-    /// let paths = container.find_files("**/*.jpg")?;
+    /// let paths = veil.find_files("**/*.jpg")?;
     /// ```
     pub fn find_files(&self, pattern: &str) -> Result<Vec<String>> {
         let matched = index::match_files(&self.root, pattern)?;
@@ -700,7 +730,7 @@ impl Container {
     ///
     /// # 示例
     /// ```text
-    /// let deleted = container.remove_matched("temp/*")?;
+    /// let deleted = veil.remove_matched("temp/*")?;
     /// ```
     pub fn remove_matched(&mut self, pattern: &str) -> Result<Vec<String>> {
         // 先固定匹配结果再删除，避免边遍历边修改树。
@@ -723,7 +753,7 @@ impl Container {
     ///
     /// # 示例
     /// ```text
-    /// container.extract_matched("photos/**/*.jpg", "./output")?;
+    /// veil.extract_matched("photos/**/*.jpg", "./output")?;
     /// ```
     pub fn extract_matched(&self, pattern: &str, out_dir: impl AsRef<Path>) -> Result<()> {
         // 匹配结果仍使用容器内完整路径，导出时据此重建目录层级。
@@ -881,7 +911,7 @@ fn try_footer_end(
     }
 }
 
-/// 递归收集 `dir` 下的所有文件，算出各自在容器里的虚拟路径（供 [`Container::add_dir`] 用）。
+/// 递归收集 `dir` 下的所有文件，算出各自在容器里的虚拟路径（供 [`SingleFileVeil::add_dir`] 用）。
 fn collect_files(
     base: &Path,
     dir: &Path,
@@ -923,7 +953,11 @@ fn render_tree(dir: &Tree, prefix: &str, out: &mut String) {
         // 最后一个子节点使用空格续行，其余节点保留竖线连接后续层级。
         let is_last = i == count - 1;
         let branch = if is_last { "└── " } else { "├── " };
-        let slash = if matches!(node, Node::Dir(_)) { "/" } else { "" };
+        let slash = if matches!(node, Node::Dir(_)) {
+            "/"
+        } else {
+            ""
+        };
         out.push_str(&format!("{prefix}{branch}{name}{slash}\n"));
         // 目录递归渲染时，父级连字符决定子级缩进前缀。
         if let Node::Dir(children) = node {
@@ -957,7 +991,7 @@ mod tests {
     }
 
     /// 容器里的文件总数（辅助断言）。
-    fn file_count(c: &Container) -> usize {
+    fn file_count(c: &SingleFileVeil) -> usize {
         index::list_files(c.root()).len()
     }
 
@@ -965,9 +999,9 @@ mod tests {
     #[test]
     fn create_open_empty() {
         let path = temp_path("empty.veil");
-        Container::create(&path, pass(), test_cli_version()).unwrap();
-        let container = Container::open(&path, pass()).unwrap();
-        assert!(container.root().is_empty());
+        SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        let veil = SingleFileVeil::open(&path, pass()).unwrap();
+        assert!(veil.root().is_empty());
         std::fs::remove_file(&path).ok();
     }
 
@@ -977,7 +1011,7 @@ mod tests {
         let path = temp_path("existing.veil");
         std::fs::write(&path, b"sentinel").unwrap();
 
-        assert!(Container::create(&path, pass(), test_cli_version()).is_err());
+        assert!(SingleFileVeil::create(&path, pass(), test_cli_version()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"sentinel");
 
         std::fs::remove_file(&path).ok();
@@ -987,15 +1021,18 @@ mod tests {
     #[test]
     fn add_read_roundtrip() {
         let path = temp_path("rt.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("a.txt", b"hello").unwrap();
-        container.add_file("dir/b.bin", &[0u8, 1, 2, 255]).unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("a.txt", b"hello").unwrap();
+        veil.add_file("dir/b.bin", &[0u8, 1, 2, 255]).unwrap();
 
-        assert_eq!(container.read_file("a.txt").unwrap(), b"hello");
+        assert_eq!(veil.read_file("a.txt").unwrap(), b"hello");
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(file_count(&reopened), 2);
-        assert_eq!(reopened.read_file("dir/b.bin").unwrap(), vec![0u8, 1, 2, 255]);
+        assert_eq!(
+            reopened.read_file("dir/b.bin").unwrap(),
+            vec![0u8, 1, 2, 255]
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -1004,8 +1041,8 @@ mod tests {
     #[test]
     fn wrong_passphrase_fails() {
         let path = temp_path("wp.veil");
-        Container::create(&path, pass(), test_cli_version()).unwrap();
-        assert!(Container::open(&path, SecretString::from("nope".to_owned())).is_err());
+        SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        assert!(SingleFileVeil::open(&path, SecretString::from("nope".to_owned())).is_err());
         std::fs::remove_file(&path).ok();
     }
 
@@ -1013,13 +1050,13 @@ mod tests {
     #[test]
     fn remove_then_missing() {
         let path = temp_path("rm.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("keep.txt", b"1").unwrap();
-        container.add_file("gone.txt", b"2").unwrap();
-        container.remove_file("gone.txt").unwrap();
-        assert!(container.remove_file("nope.txt").is_err());
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("keep.txt", b"1").unwrap();
+        veil.add_file("gone.txt", b"2").unwrap();
+        veil.remove_file("gone.txt").unwrap();
+        assert!(veil.remove_file("nope.txt").is_err());
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(file_count(&reopened), 1);
         assert_eq!(reopened.read_file("keep.txt").unwrap(), b"1");
         assert!(reopened.read_file("gone.txt").is_err());
@@ -1031,8 +1068,8 @@ mod tests {
     #[test]
     fn read_missing_file_errors() {
         let path = temp_path("miss.veil");
-        let container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        assert!(container.read_file("nope.txt").is_err());
+        let veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        assert!(veil.read_file("nope.txt").is_err());
         std::fs::remove_file(&path).ok();
     }
 
@@ -1040,12 +1077,15 @@ mod tests {
     #[test]
     fn add_file_fills_mime() {
         let path = temp_path("mime.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("a.jpg", b"x").unwrap();
-        container.add_file("notes", b"y").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("a.jpg", b"x").unwrap();
+        veil.add_file("notes", b"y").unwrap();
 
-        let reopened = Container::open(&path, pass()).unwrap();
-        assert_eq!(reopened.get_file("a.jpg").unwrap().mime.as_deref(), Some("image/jpeg"));
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
+        assert_eq!(
+            reopened.get_file("a.jpg").unwrap().mime.as_deref(),
+            Some("image/jpeg")
+        );
         assert_eq!(reopened.get_file("notes").unwrap().mime, None);
 
         std::fs::remove_file(&path).ok();
@@ -1055,14 +1095,14 @@ mod tests {
     #[test]
     fn add_file_overwrites_same_path() {
         let path = temp_path("overwrite.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("a.txt", b"first").unwrap();
-        container.add_file("a.txt", b"second-longer").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("a.txt", b"first").unwrap();
+        veil.add_file("a.txt", b"second-longer").unwrap();
 
-        assert_eq!(file_count(&container), 1);
-        assert_eq!(container.read_file("a.txt").unwrap(), b"second-longer");
+        assert_eq!(file_count(&veil), 1);
+        assert_eq!(veil.read_file("a.txt").unwrap(), b"second-longer");
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(file_count(&reopened), 1);
         assert_eq!(reopened.read_file("a.txt").unwrap(), b"second-longer");
 
@@ -1073,14 +1113,15 @@ mod tests {
     #[test]
     fn change_password_works() {
         let path = temp_path("chpw.veil");
-        let mut container = Container::create(&path, "old-pass".to_string(), test_cli_version()).unwrap();
-        container.add_file("f.txt", b"data").unwrap();
+        let mut veil =
+            SingleFileVeil::create(&path, "old-pass".to_string(), test_cli_version()).unwrap();
+        veil.add_file("f.txt", b"data").unwrap();
         let size_before = std::fs::metadata(&path).unwrap().len();
-        container.change_password("new-pass".to_string()).unwrap();
+        veil.change_password("new-pass".to_string()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size_before);
 
-        assert!(Container::open(&path, "old-pass".to_string()).is_err());
-        let reopened = Container::open(&path, "new-pass".to_string()).unwrap();
+        assert!(SingleFileVeil::open(&path, "old-pass".to_string()).is_err());
+        let reopened = SingleFileVeil::open(&path, "new-pass".to_string()).unwrap();
         assert_eq!(reopened.read_file("f.txt").unwrap(), b"data");
 
         std::fs::remove_file(&path).ok();
@@ -1090,17 +1131,20 @@ mod tests {
     #[test]
     fn rename_file_works() {
         let path = temp_path("rename.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("a.txt", b"hi").unwrap();
-        container.rename_file("a.txt", "sub/b.md").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("a.txt", b"hi").unwrap();
+        veil.rename_file("a.txt", "sub/b.md").unwrap();
 
-        container.add_file("keep.txt", b"x").unwrap();
-        assert!(container.rename_file("keep.txt", "sub/b.md").is_err());
+        veil.add_file("keep.txt", b"x").unwrap();
+        assert!(veil.rename_file("keep.txt", "sub/b.md").is_err());
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert!(reopened.read_file("a.txt").is_err());
         assert_eq!(reopened.read_file("sub/b.md").unwrap(), b"hi");
-        assert_eq!(reopened.get_file("sub/b.md").unwrap().mime.as_deref(), Some("text/markdown"));
+        assert_eq!(
+            reopened.get_file("sub/b.md").unwrap().mime.as_deref(),
+            Some("text/markdown")
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -1109,13 +1153,13 @@ mod tests {
     #[test]
     fn extract_dir_subtree() {
         let path = temp_path("exdir.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("photos/2024/a.txt", b"A").unwrap();
-        container.add_file("photos/b.txt", b"B").unwrap();
-        container.add_file("docs/c.txt", b"C").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("photos/2024/a.txt", b"A").unwrap();
+        veil.add_file("photos/b.txt", b"B").unwrap();
+        veil.add_file("docs/c.txt", b"C").unwrap();
 
         let out = temp_path("exdir_out");
-        container.extract_dir("photos", &out).unwrap();
+        veil.extract_dir("photos", &out).unwrap();
         assert_eq!(std::fs::read(out.join("2024/a.txt")).unwrap(), b"A");
         assert_eq!(std::fs::read(out.join("b.txt")).unwrap(), b"B");
         assert!(!out.join("c.txt").exists());
@@ -1133,12 +1177,15 @@ mod tests {
         std::fs::write(src.join("nested/deep.bin"), b"deep").unwrap();
 
         let path = temp_path("adddir.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_dir(&src, "imported").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_dir(&src, "imported").unwrap();
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(reopened.read_file("imported/top.txt").unwrap(), b"top");
-        assert_eq!(reopened.read_file("imported/nested/deep.bin").unwrap(), b"deep");
+        assert_eq!(
+            reopened.read_file("imported/nested/deep.bin").unwrap(),
+            b"deep"
+        );
 
         std::fs::remove_dir_all(&src).ok();
         std::fs::remove_file(&path).ok();
@@ -1148,12 +1195,12 @@ mod tests {
     #[test]
     fn extract_to_temp_and_auto_cleanup() {
         let path = temp_path("tmp.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("clip.mp4", b"fake video bytes").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("clip.mp4", b"fake video bytes").unwrap();
 
         let temp_file_path;
         {
-            let tmp = container.extract_to_temp("clip.mp4").unwrap();
+            let tmp = veil.extract_to_temp("clip.mp4").unwrap();
             temp_file_path = tmp.path().to_path_buf();
             assert!(temp_file_path.exists());
             assert_eq!(std::fs::read(&temp_file_path).unwrap(), b"fake video bytes");
@@ -1167,10 +1214,10 @@ mod tests {
     #[test]
     fn read_range_random_access() {
         let path = temp_path("range.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("data.bin", b"0123456789ABCDEF").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("data.bin", b"0123456789ABCDEF").unwrap();
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(reopened.read_range("data.bin", 4, 5).unwrap(), b"45678");
         assert_eq!(reopened.read_range("data.bin", 14, 10).unwrap(), b"EF");
         assert_eq!(reopened.read_file("data.bin").unwrap(), b"0123456789ABCDEF");
@@ -1182,10 +1229,10 @@ mod tests {
     #[test]
     fn crash_recovery_truncates_garbage() {
         let path = temp_path("crash.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("a.txt", b"hello").unwrap();
-        container.add_file("b.txt", b"world").unwrap();
-        drop(container);
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("a.txt", b"hello").unwrap();
+        veil.add_file("b.txt", b"world").unwrap();
+        drop(veil);
 
         // 模拟崩溃：在文件末尾追加一段"未提交的垃圾"（写 blob/Index 写到一半崩了）
         {
@@ -1195,7 +1242,7 @@ mod tests {
         }
 
         // open 应自动恢复到上一个有效 Footer，内容完好
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(reopened.read_file("a.txt").unwrap(), b"hello");
         assert_eq!(reopened.read_file("b.txt").unwrap(), b"world");
 
@@ -1206,16 +1253,20 @@ mod tests {
     #[test]
     fn verify_all_detects_corruption() {
         let path = temp_path("verify.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("good.txt", b"ok").unwrap();
-        container.add_file("bad.txt", b"will be tampered").unwrap();
-        assert!(container.verify_all().is_empty()); // 全好
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("good.txt", b"ok").unwrap();
+        veil.add_file("bad.txt", b"will be tampered").unwrap();
+        assert!(veil.verify_all().is_empty()); // 全好
 
         // 篡改 bad.txt 的 blob 中间一字节
-        let meta = container.get_file("bad.txt").unwrap();
+        let meta = veil.get_file("bad.txt").unwrap();
         let flip_at = meta.blob_offset + meta.blob_len / 2;
         {
-            let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let mut f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             f.seek(SeekFrom::Start(flip_at)).unwrap();
             let mut b = [0u8; 1];
             f.read_exact(&mut b).unwrap();
@@ -1224,7 +1275,7 @@ mod tests {
             f.write_all(&b).unwrap();
         }
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert_eq!(reopened.verify_all(), vec!["bad.txt".to_owned()]);
         assert_eq!(reopened.read_file("good.txt").unwrap(), b"ok"); // 好文件不受影响
 
@@ -1235,14 +1286,18 @@ mod tests {
     #[test]
     fn tamper_is_detected() {
         let path = temp_path("tamper.veil");
-        let mut container = Container::create(&path, pass(), test_cli_version()).unwrap();
-        container.add_file("secret.txt", b"top secret content").unwrap();
+        let mut veil = SingleFileVeil::create(&path, pass(), test_cli_version()).unwrap();
+        veil.add_file("secret.txt", b"top secret content").unwrap();
 
-        let meta = container.get_file("secret.txt").unwrap();
+        let meta = veil.get_file("secret.txt").unwrap();
         let flip_at = meta.blob_offset + meta.blob_len / 2;
 
         {
-            let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
             file.seek(SeekFrom::Start(flip_at)).unwrap();
             let mut byte = [0u8; 1];
             file.read_exact(&mut byte).unwrap();
@@ -1251,7 +1306,7 @@ mod tests {
             file.write_all(&byte).unwrap();
         }
 
-        let reopened = Container::open(&path, pass()).unwrap();
+        let reopened = SingleFileVeil::open(&path, pass()).unwrap();
         assert!(reopened.read_file("secret.txt").is_err());
 
         std::fs::remove_file(&path).ok();

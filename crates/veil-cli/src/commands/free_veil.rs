@@ -16,13 +16,12 @@ enum TreeNode {
 ///
 /// # 错误
 /// 容器解析、密码读取或元数据解密失败时返回错误。
-pub fn run_workspace(container_name: &str, password: Option<String>) -> Result<()> {
+pub fn run_veil(veil_name: &str, password: Option<String>) -> Result<()> {
     // 解析后绑定稳定 ID，展示名称以实际元数据为准。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();

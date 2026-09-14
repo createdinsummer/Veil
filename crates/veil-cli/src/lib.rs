@@ -5,6 +5,6 @@
 
 pub mod commands;
 pub mod error;
-pub mod i18n;
 pub mod hints;
+pub mod i18n;
 pub mod output_encoding;

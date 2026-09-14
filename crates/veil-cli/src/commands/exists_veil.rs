@@ -2,20 +2,19 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::workspace_ops::normalize_container_path;
+use veil_core::veil_ops::normalize_veil_dir;
 
 /// 判断容器内路径是否存在。
 ///
 /// 返回 `true` 表示文件或目录存在，返回 `false` 表示路径不存在。两种结果都会输出
 /// 可读信息，调用方可以同时使用退出码和输出进行脚本判断。
-pub fn run_workspace(container_name: &str, path: &str, password: Option<String>) -> Result<bool> {
-    let resolved = super::resolve_container(container_name)?;
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+pub fn run_veil(veil_name: &str, path: &str, password: Option<String>) -> Result<bool> {
+    let resolved = super::resolve_veil(veil_name)?;
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();
-    let manager = super::workspace_manager(&resolved);
+    let manager = super::veil_manager(&resolved);
     let metadata = manager.read_meta(password)?;
 
     // 根路径代表容器本身，始终是存在的目录。
@@ -27,7 +26,7 @@ pub fn run_workspace(container_name: &str, path: &str, password: Option<String>)
         return Ok(true);
     }
 
-    let normalized = normalize_container_path(path)?;
+    let normalized = normalize_veil_dir(path)?;
     if metadata.find_file(&normalized).is_some() {
         crate::outln!(
             "{}",

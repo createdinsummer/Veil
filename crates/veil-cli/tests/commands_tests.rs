@@ -10,7 +10,7 @@ use predicates::prelude::*;
 
 /// 验证初始化会创建工作区和可解析的链接文件。
 #[test]
-fn init_creates_workspace_and_link() {
+fn init_creates_work_and_link() {
     let env = TestEnv::new("test-password");
 
     env.command()
@@ -24,14 +24,14 @@ fn init_creates_workspace_and_link() {
 
     let content = std::fs::read_to_string(link).unwrap();
     assert!(content.contains("veil_id = \"veil-"));
-    assert!(content.contains("container_name = \"photos\""));
+    assert!(content.contains("veil_name = \"photos\""));
     assert!(content.contains("volume_id = "));
     assert!(content.contains("volume_label = "));
 }
 
 /// 验证同名容器使用不同 ID、目录和链接，且内容互相隔离。
 #[test]
-fn duplicate_container_names_use_distinct_directories_and_links() {
+fn duplicate_veil_names_use_distinct_directories_and_links() {
     let env = TestEnv::new("test-password");
     let first_link = env.init("photos");
 
@@ -74,14 +74,14 @@ fn duplicate_container_names_use_distinct_directories_and_links() {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("photos-"))
     );
-    let first_workspace = std::fs::read_to_string(&first_link).unwrap();
-    let second_workspace = std::fs::read_to_string(&second_link).unwrap();
-    assert_ne!(first_workspace, second_workspace);
-    assert!(first_workspace.contains("/workspaces/default/veil-"));
-    assert!(second_workspace.contains("/workspaces/default/veil-"));
+    let first_work = std::fs::read_to_string(&first_link).unwrap();
+    let second_work = std::fs::read_to_string(&second_link).unwrap();
+    assert_ne!(first_work, second_work);
+    assert!(first_work.contains("/works/default/veil-"));
+    assert!(second_work.contains("/works/default/veil-"));
 
     // 只向第二个容器写入文件，第一个容器应继续为空。
-    let source = env.write_file("duplicate-name.txt", "second container");
+    let source = env.write_file("duplicate-name.txt", "second veil");
     env.command()
         .args(["add", &env.path(&second_link), &env.path(&source)])
         .assert()
@@ -180,7 +180,7 @@ fn info_reports_identity_size_and_mime_distribution() {
 
 /// 验证 list 使用容器展示名称并按虚拟路径稳定排序。
 #[test]
-fn list_uses_container_name_and_stable_order() {
+fn list_uses_veil_name_and_stable_order() {
     let env = TestEnv::new("test-password");
     let link = env.init("ordered");
     let z = env.write_file("z.txt", "z");
@@ -225,7 +225,7 @@ fn list_uses_container_name_and_stable_order() {
 
 /// 验证重命名和删除会更新工作区元数据。
 #[test]
-fn rename_and_remove_use_workspace_metadata() {
+fn rename_and_remove_use_work_metadata() {
     let env = TestEnv::new("test-password");
     let link = env.init("archive");
     let source = env.write_file("old.txt", "content");
@@ -521,6 +521,28 @@ fn export_round_trip() {
     assert_eq!(std::fs::read_to_string(output).unwrap(), "original content");
 }
 
+/// 验证导出会自动创建缺失的输出父目录。
+#[test]
+fn export_creates_missing_parent_directories() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("export-parent");
+    let source = env.write_file("source.txt", "nested output");
+    let output = env.work.path().join("nested/exported.txt");
+
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["ex", &env.path(&link), "source.txt", &env.path(&output)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("文件已导出"));
+
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "nested output");
+}
+
 /// 验证错误密码会使容器访问失败。
 #[test]
 fn wrong_password_is_rejected() {
@@ -566,7 +588,7 @@ fn change_password_default_updates_metadata_only() {
 
 /// 验证 `--full` 会轮换数据密钥并保持文件可读。
 #[test]
-fn passwd_full_reencrypts_workspace() {
+fn passwd_full_reencrypts_work() {
     let env = TestEnv::new("old-password");
     let link = env.init("full-rekey");
     let source = env.write_file("secret.txt", "secret");
@@ -762,7 +784,7 @@ fn unpack_failures_roll_back_artifacts() {
         .success();
 
     let package = env.work.path().join("package-source.vault.veil");
-    let before_count = default_container_count(&env);
+    let before_count = default_veil_count(&env);
     let unpack_home = tempfile::TempDir::new().unwrap();
 
     let wrong_link = env.work.path().join("wrong.veil-link");
@@ -780,7 +802,7 @@ fn unpack_failures_roll_back_artifacts() {
         .failure()
         .stderr(predicate::str::contains("[9012]"));
     assert!(!wrong_link.exists());
-    assert_eq!(default_container_count(&env), before_count);
+    assert_eq!(default_veil_count(&env), before_count);
 
     let mut damaged = std::fs::read(&package).unwrap();
     damaged.pop();
@@ -800,7 +822,7 @@ fn unpack_failures_roll_back_artifacts() {
         .assert()
         .failure();
     assert!(!damaged_link.exists());
-    assert_eq!(default_container_count(&env), before_count);
+    assert_eq!(default_veil_count(&env), before_count);
 }
 
 /// 验证目标路径支持覆盖容器内名称。
@@ -1010,7 +1032,7 @@ fn exists_reports_file_directory_and_missing_path() {
 
 /// 验证不存在的容器会以失败状态退出并给出明确提示。
 #[test]
-fn nonexistent_container_fails_cleanly() {
+fn nonexistent_veil_fails_cleanly() {
     let env = TestEnv::new("test-password");
 
     env.command()
@@ -1022,8 +1044,8 @@ fn nonexistent_container_fails_cleanly() {
 
 /// 统计默认工作区中单个容器的密文文件数量。
 fn encrypted_file_count(env: &TestEnv) -> usize {
-    let workspace_root = env.home.path().join(".veil/workspaces/default");
-    std::fs::read_dir(workspace_root)
+    let work_root = env.home.path().join(".veil/works/default");
+    std::fs::read_dir(work_root)
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -1045,9 +1067,9 @@ fn encrypted_file_count(env: &TestEnv) -> usize {
 }
 
 /// 统计默认工作区中的容器目录数量。
-fn default_container_count(env: &TestEnv) -> usize {
-    let workspace_root = env.home.path().join(".veil/workspaces/default");
-    let Ok(entries) = std::fs::read_dir(workspace_root) else {
+fn default_veil_count(env: &TestEnv) -> usize {
+    let work_root = env.home.path().join(".veil/works/default");
+    let Ok(entries) = std::fs::read_dir(work_root) else {
         return 0;
     };
     entries

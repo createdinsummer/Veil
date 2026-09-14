@@ -9,7 +9,7 @@ use std::path::Path;
 /// 从容器中解密并导出文件到本地文件系统。
 ///
 /// # 参数
-/// - `container_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
+/// - `veil_name`: 容器名称、`veil_id` 或 `.veil-link` 路径。
 /// - `file_name`: 要提取的文件名（`None` 则需要指定）
 /// - `output`: 导出到的本地路径
 /// - `password`: 容器密码（`None` 则交互式输入）
@@ -23,21 +23,20 @@ use std::path::Path;
 /// veil ex photos vacation.jpg -o ./vacation.jpg
 /// ```
 pub fn run(
-    container_name: &str,
+    veil_name: &str,
     file_name: Option<&str>,
     output: &str,
     password: Option<String>,
 ) -> Result<()> {
     // 链接只负责定位，实际操作绑定到确认后的稳定 ID。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;
 
-    crate::outln!("{}", crate::i18n::t("opening_container").cyan());
-    let password_str =
-        super::prompt_password(crate::i18n::t("prompt.container_password"), password)?;
+    crate::outln!("{}", crate::i18n::t("opening_veil").cyan());
+    let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
     use age::secrecy::ExposeSecret;
     let password = password_str.expose_secret();

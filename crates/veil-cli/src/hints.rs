@@ -97,7 +97,7 @@ fn should_show_once(hint_type: HintType) -> bool {
 }
 
 /// 展示首次创建容器后的链接、工作区和打包/解包说明。
-pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_path: &Path) {
+pub fn show_first_init_hint(veil_name: &str, link_path: &Path, veil_dir: &Path) {
     if !allowed(HintType::FirstInit, current_level()) {
         return;
     }
@@ -107,18 +107,18 @@ pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_pa
         .file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{}.veil-link", container_name));
+        .unwrap_or_else(|| format!("{}.veil-link", veil_name));
 
     crate::outln!();
     crate::outln!("{}", i18n::t1("hints.init.title", "name", &link_name));
     crate::outln!();
     crate::outln!("  {}", i18n::t("hints.init.storage_line"));
-    crate::outln!("    {}", workspace_path.display());
+    crate::outln!("    {}", veil_dir.display());
     crate::outln!();
     crate::outln!("  {}", i18n::t("hints.init.pack_title"));
     crate::outln!(
         "    {}",
-        i18n::t1("hints.init.pack_command", "container", &link_name)
+        i18n::t1("hints.init.pack_command", "veil", &link_name)
     );
     crate::outln!();
     crate::outln!("  {}", i18n::t("hints.init.unpack_title"));
@@ -131,7 +131,7 @@ pub fn show_first_init_hint(container_name: &str, link_path: &Path, workspace_pa
 
 /// 展示首次打包结果中链接与 `.veil` 文件的关系。
 pub fn show_pack_explain_hint(
-    container_name: &str,
+    veil_name: &str,
     link_path: Option<&Path>,
     output_path: &str,
     size: u64,
@@ -143,7 +143,7 @@ pub fn show_pack_explain_hint(
     // 打包可能从链接路径或容器名触发，两种来源都要正确展示。
     let link_display = link_path
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| format!("{}.veil-link", container_name));
+        .unwrap_or_else(|| format!("{}.veil-link", veil_name));
     let size_mb = format!("{:.2}", size as f64 / 1_048_576.0);
 
     print_hint_box(
@@ -165,7 +165,7 @@ pub fn show_pack_explain_hint(
 }
 
 /// 展示首次解包后链接、文件数量和容器名称的对应关系。
-pub fn show_unpack_explain_hint(container_name: &str, link_path: &Path, file_count: usize) {
+pub fn show_unpack_explain_hint(veil_name: &str, link_path: &Path, file_count: usize) {
     if !should_show_once(HintType::FirstUnpack) {
         return;
     }
@@ -175,13 +175,13 @@ pub fn show_unpack_explain_hint(container_name: &str, link_path: &Path, file_cou
         .file_name()
         .and_then(|name| name.to_str())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{}.veil-link", container_name));
+        .unwrap_or_else(|| format!("{}.veil-link", veil_name));
 
     print_hint_box(
         &i18n::t2(
             "hints.unpack.title",
             "package",
-            &format!("{}.veil", container_name),
+            &format!("{}.veil", veil_name),
             "link",
             &link_name,
         ),
@@ -192,7 +192,7 @@ pub fn show_unpack_explain_hint(container_name: &str, link_path: &Path, file_cou
             "count",
             &file_count.to_string(),
             "name",
-            container_name,
+            veil_name,
         )],
     );
 }

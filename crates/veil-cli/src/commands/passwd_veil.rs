@@ -10,15 +10,15 @@ use colored::Colorize;
 ///
 /// # 错误
 /// 容器解析、旧密码验证、新密码确认或重新加密失败时返回错误。
-pub fn run_workspace(
-    container_name: &str,
+pub fn run_veil(
+    veil_name: &str,
     old_password: Option<String>,
     new_password: Option<String>,
     full: bool,
 ) -> Result<()> {
     // 密码修改必须作用于容器工作区，而不是链接文件本身。
-    let resolved = super::resolve_container(container_name)?;
-    let manager = super::workspace_manager(&resolved);
+    let resolved = super::resolve_veil(veil_name)?;
+    let manager = super::veil_manager(&resolved);
 
     crate::outln!("{}", crate::i18n::t("passwd.changing").cyan());
 

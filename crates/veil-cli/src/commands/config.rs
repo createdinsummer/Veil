@@ -63,11 +63,11 @@ fn show_config() -> Result<()> {
         );
     }
 
-    if let Some(ref default_ws) = config.workspace.default {
+    if let Some(ref default_ws) = config.work.default {
         crate::outln!(
             "  {}",
             i18n::t1(
-                "config.default_workspace",
+                "config.default_work",
                 "path",
                 &default_ws.path.display().to_string()
             )
@@ -78,22 +78,22 @@ fn show_config() -> Result<()> {
     crate::outln!(
         "  {}",
         i18n::t1(
-            "config.custom_workspace_count",
+            "config.custom_work_count",
             "count",
-            &config.workspace.custom.len().to_string()
+            &config.work.custom.len().to_string()
         )
     );
-    let mut custom_workspaces: Vec<_> = config.workspace.custom.iter().collect();
-    custom_workspaces.sort_by(|left, right| left.0.cmp(right.0));
-    for (name, workspace) in custom_workspaces {
+    let mut custom_works: Vec<_> = config.work.custom.iter().collect();
+    custom_works.sort_by(|left, right| left.0.cmp(right.0));
+    for (name, work) in custom_works {
         crate::outln!(
             "{}",
             i18n::t2(
-                "config.custom_workspace",
+                "config.custom_work",
                 "name",
                 name,
                 "path",
-                &workspace.path.display().to_string()
+                &work.path.display().to_string()
             )
             .bright_black()
         );
@@ -102,9 +102,9 @@ fn show_config() -> Result<()> {
     crate::outln!(
         "  {}",
         i18n::t1(
-            "config.container_count",
+            "config.veil_count",
             "count",
-            &config.containers.len().to_string()
+            &config.veils.len().to_string()
         )
     );
     crate::outln!(
