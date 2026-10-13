@@ -15,7 +15,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 读取清单成功即表示密码正确，随后即可安全展示文件信息。

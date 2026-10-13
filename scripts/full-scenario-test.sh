@@ -2076,42 +2076,6 @@ run_stress_section() {
     printf '[观察] 并发改密后密码可能是 1 或 2；后续没有用例依赖该状态。\n'
 }
 
-create_single_file_helper() {
-    helper_root=$1
-    mkdir -p "$helper_root/src"
-    cat > "$helper_root/src/main.rs" <<'EOF'
-use veil_core::single_file_veil::SingleFileVeil;
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("usage: helper <output.veil> <password>");
-        std::process::exit(2);
-    }
-    let mut veil = SingleFileVeil::create(&args[1], args[2].clone(), "veil-scenario/1.0")
-        .expect("create single-file veil");
-    veil
-        .add_file("secret.txt", b"veil brute force test\n")
-        .expect("add test file");
-    println!("created {}", args[1]);
-}
-EOF
-
-    rlib=$(ls -t "$PROJECT_ROOT"/target/debug/deps/libveil_core-*.rlib 2>/dev/null | head -n 1)
-    if [ -z "$rlib" ]; then
-        printf '找不到已构建的 veil-core rlib\n' >&2
-        return 1
-    fi
-
-    rustc --edition=2024 \
-        "$helper_root/src/main.rs" \
-        -L "dependency=$PROJECT_ROOT/target/debug/deps" \
-        --extern "veil_core=$rlib" \
-        -o "$helper_root/scenario-helper" || return 1
-
-    HOME="$ORIGINAL_HOME" VEIL_TEST_KDF=fast "$helper_root/scenario-helper" "$2" "$3"
-}
-
 run_brute_force_section() {
     if [ "$RUN_BRUTE" -ne 1 ]; then
         section "BF：密码强度测试工具"
@@ -2123,49 +2087,54 @@ run_brute_force_section() {
     phase "brute"
     RUN_BRUTE=1
 
-    HELPER_ROOT="$RUN_ROOT/brute-helper"
-    SINGLE="$RUN_ROOT/single-file.veil"
-    if ! create_single_file_helper "$HELPER_ROOT" "$SINGLE" "1" || [ ! -s "$SINGLE" ]; then
+    BRUTE_PACKAGE="$RUN_ROOT/brute-package.veil"
+    run_case "BF-fixture-init" 0 "创建密码强度测试 Veil" \
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init brute-fixture
+    run_case "BF-fixture-add" 0 "添加密码强度测试内容" \
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add brute-fixture "$FIXTURES/hello.txt"
+    run_case "BF-fixture-pack" 0 "使用 CLI 打包密码强度测试夹具" \
+        env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" pack brute-fixture --output "$BRUTE_PACKAGE"
+    if [ ! -s "$BRUTE_PACKAGE" ]; then
         ASSERT_FAIL_COUNT=$((ASSERT_FAIL_COUNT + 1))
-        printf '[断言失败] BF 夹具无法创建单文件容器\n'
+        printf '[断言失败] BF 夹具无法创建打包文件\n'
         skip_case "BF" "夹具创建失败，跳过交互式攻击场景"
         return
     fi
-    assert_file_exists "BF-fixture" "single-file veil created" "$SINGLE"
+    assert_file_exists "BF-fixture" "CLI 打包文件已创建" "$BRUTE_PACKAGE"
 
     run_case "BF-01-no-path" 0 "未提供路径时进入交互模式并由 q 退出" \
         sh -c "printf 'q\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
     run_case "BF-02-missing-path" 0 "路径不存在后可重新输入" \
         sh -c "printf 'missing.veil\\nq\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
 
-    PACK_FIXTURE="$RUN_ROOT/not-a-single-file.veil"
+    PACK_FIXTURE="$RUN_ROOT/corrupt-brute-package.veil"
     printf 'not a veil\n' > "$PACK_FIXTURE"
     run_case "BF-02-corrupt-header" 0 "损坏头部后可重新输入" \
         sh -c "printf '$PACK_FIXTURE\\nq\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN'"
 
     run_case "BF-04-dictionary-hit" 0 "字典攻击命中密码 1" \
-        sh -c "printf '1\\n$RUN_ROOT/wordlist-hit.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '1\\n$RUN_ROOT/wordlist-hit.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-05-dictionary-miss" 0 "字典攻击未命中并给出结果" \
-        sh -c "printf '1\\n$RUN_ROOT/wordlist-miss.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '1\\n$RUN_ROOT/wordlist-miss.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-06-dictionary-empty" 0 "空字典处理" \
-        sh -c "printf '1\\n$RUN_ROOT/wordlist-empty.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '1\\n$RUN_ROOT/wordlist-empty.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
 
     run_case "BF-08-custom-charset" 0 "自定义数字字符集命中密码 1" \
-        sh -c "printf '2\\n3\\n1\\n1\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '2\\n3\\n1\\n1\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-09-invalid-range" 0 "非法长度范围被修正并处理" \
-        sh -c "printf '2\\n1\\n9\\n2\\nn\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '2\\n1\\n9\\n2\\nn\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-11-preset" 0 "预设数字攻击命中密码 1" \
-        sh -c "printf '3\\n1\\n1\\n1\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '3\\n1\\n1\\n1\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-12-word-combination" 0 "组词攻击命中密码 1" \
-        sh -c "printf '4\\n1 2\\n1\\n1\\ny\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '4\\n1 2\\n1\\n1\\ny\\ny\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-14-thread-zero" 0 "线程数 0 被修正后处理" \
-        sh -c "printf '5\\n0\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '5\\n0\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-16-switch-veil" 0 "切换容器菜单流程" \
-        sh -c "printf '6\\n$SINGLE\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '6\\n$BRUTE_PACKAGE\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-18-history" 0 "历史记录写入并显示" \
-        sh -c "printf '1\\n$RUN_ROOT/wordlist-miss.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '1\\n$RUN_ROOT/wordlist-miss.txt\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
     run_case "BF-20-retry-cancel" 0 "可取消重试历史密码" \
-        sh -c "printf '7\\nn\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$SINGLE'"
+        sh -c "printf '7\\nn\\n0\\n' | HOME='$PHASE_HOME' VEIL_TEST_KDF=fast '$BRUTE_BIN' '$BRUTE_PACKAGE'"
 
     printf '\n[BF 历史记录]\n'
     find "$PHASE_HOME/.veil_history" -type f -maxdepth 1 -print -exec sed -n '1,80p' {} \; 2>/dev/null || true

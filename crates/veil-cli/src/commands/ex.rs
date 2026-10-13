@@ -38,7 +38,7 @@ pub fn run(
     crate::outln!("{}", crate::i18n::t("opening_veil").cyan());
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 输出路径由调用方决定，core 负责查找、解密和写入。

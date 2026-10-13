@@ -63,9 +63,6 @@ pub enum ErrorCode {
     HelpUnknownTopic = 8001,
     Unexpected = 9000,
     Io = 9001,
-    Encrypt = 9002,
-    Decrypt = 9003,
-    Serialize = 9004,
     Format = 9005,
     Work = 9006,
     Config = 9007,
@@ -264,9 +261,6 @@ impl ErrorCode {
             }
             Self::Unexpected => Self::define(value, "UNEXPECTED", "error.unexpected", 1),
             Self::Io => Self::define(value, "IO", "error.core_io", 1),
-            Self::Encrypt => Self::define(value, "ENCRYPT", "error.core_encrypt", 1),
-            Self::Decrypt => Self::define(value, "DECRYPT", "error.core_decrypt", 1),
-            Self::Serialize => Self::define(value, "SERIALIZE", "error.core_serialize", 1),
             Self::Format => Self::define(value, "FORMAT", "error.core_format", 1),
             Self::Work => Self::define(value, "WORKSPACE", "error.core_work", 1),
             Self::Config => Self::define(value, "CONFIG", "error.core_config", 1),
@@ -442,9 +436,6 @@ impl From<veil_core::error::VeilError> for CommandError {
 
         let (code, detail) = match error {
             VeilError::Io(error) => (ErrorCode::Io, error.to_string()),
-            VeilError::Encrypt(error) => (ErrorCode::Encrypt, error.to_string()),
-            VeilError::Decrypt(error) => (ErrorCode::Decrypt, error.to_string()),
-            VeilError::Serialize(error) => (ErrorCode::Serialize, error.to_string()),
             VeilError::Format(error) => (ErrorCode::Format, error),
             VeilError::WorkError(error) => (ErrorCode::Work, error),
             VeilError::ConfigError(error) => (ErrorCode::Config, error),

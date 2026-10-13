@@ -5,7 +5,7 @@ use colored::Colorize;
 
 /// 移动或重命名文件、目录在容器元数据中的原始路径。
 ///
-/// 密文文件本身不移动；目标路径已存在时由 [`VeilManager::move_path`] 拒绝。
+/// 密文文件本身不移动；目标路径已存在时由 [`veil_core::veil_ops::VeilManager::move_path`] 拒绝。
 ///
 /// # 错误
 /// 容器解析、密码读取、源不存在、目标冲突、目录循环或元数据写回失败时返回错误。
@@ -16,7 +16,7 @@ pub fn run(veil_name: &str, from: &str, to: &str, password: Option<String>) -> R
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let pwd = password_str.expose_secret();
 
     // 尽早显示目标容器，方便用户确认链接解析结果。

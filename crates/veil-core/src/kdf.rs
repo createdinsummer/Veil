@@ -1,6 +1,6 @@
-//! 密钥派生函数类型与参数。
+//! Argon2id 密钥派生与参数。
 //!
-//! 容器把 KDF 标识写入头部 flags，再由本模块解析；实际派生统一走 Argon2id。
+//! Veil 的密码保护密钥统一通过 Argon2id 派生。
 //! 标准参数面向常规存储和交互延迟，测试构建可通过专用开关降低参数，避免每次
 //! 单元测试都承担完整的内存和时间成本。
 
@@ -11,31 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(debug_assertions)]
 static FAST_TEST_KDF: AtomicBool = AtomicBool::new(false);
-
-/// 容器头部可识别的密钥派生算法标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KdfType {
-    /// Argon2id，当前容器格式唯一支持的类型。
-    Argon2id = 0x1,
-}
-
-impl KdfType {
-    /// 从容器 Header 的 flags 低四位解析 KDF 类型。
-    ///
-    /// # 错误
-    /// 低四位为未知值时返回 [`VeilError::Format`]，调用方应停止解析该容器。
-    pub fn from_flags(flags: u16) -> Result<Self> {
-        match flags & 0x0F {
-            0x1 => Ok(Self::Argon2id),
-            n => Err(VeilError::Format(format!("未知的 KDF 类型: 0x{:x}", n))),
-        }
-    }
-
-    /// 将 KDF 类型编码为写入 Header flags 的值。
-    pub fn to_flags(self) -> u16 {
-        self as u16
-    }
-}
 
 /// Argon2id 的内存、迭代和并行度参数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,23 +119,10 @@ pub fn enable_fast_test_kdf() {
     FAST_TEST_KDF.store(true, Ordering::Relaxed);
 }
 
-/// KDF 标志和参数常量的单元测试。
+/// Argon2id 参数常量的单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 验证 KDF 类型编码后能够还原。
-    #[test]
-    fn kdf_type_roundtrip() {
-        let argon2 = KdfType::Argon2id;
-        assert_eq!(KdfType::from_flags(argon2.to_flags()).unwrap(), argon2);
-    }
-
-    /// 验证未知 KDF 标志会被拒绝。
-    #[test]
-    fn unknown_kdf_type() {
-        assert!(KdfType::from_flags(0xFF).is_err());
-    }
 
     /// 验证标准 Argon2id 参数保持预期常量。
     #[test]

@@ -14,7 +14,7 @@
 //!   file_count: u32 (4 bytes)
 //!
 //! [Metadata Section]
-//!   加密的 JSON 元数据（包含文件列表）
+//!   完整 .veil-meta 字节（明文 TLV 头部 + 加密 JSON）
 //!
 //! [File Data Section]
 //!   [File 1 Header]
@@ -29,7 +29,7 @@
 
 use crate::error::VeilError;
 use crate::kdf;
-use crate::metadata::{MetaData, MetaHeader};
+use crate::metadata::{AlgorithmId, MetaData, MetaHeader};
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{
     ChaCha20Poly1305,
@@ -87,8 +87,8 @@ impl VeilPackageHeader {
     /// 从至少 22 字节的输入解析头部并校验魔数。
     ///
     /// # 错误
-    /// 输入不足或魔数不匹配时返回 [`VeilError::InvalidFormat`]。本函数不额外校验
-    /// 版本和 `header_size` 的语义。
+    /// 输入不足、魔数不匹配、版本不支持或头部长度不符合当前打包格式时返回
+    /// [`VeilError::InvalidFormat`]。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, VeilError> {
         if bytes.len() < 22 {
             return Err(VeilError::InvalidFormat("打包文件头部不完整".to_string()));
@@ -118,12 +118,66 @@ impl VeilPackageHeader {
         }
         if header.header_size != 22 {
             return Err(VeilError::InvalidFormat(format!(
-                "不支持的打包文件头部大小: {}",
+                "不支持的打包文件头部大小: {}；仅支持 veil pack 生成的 .veil 包，旧独立单文件需先用旧版本导出内容",
                 header.header_size
             )));
         }
 
         Ok(header)
+    }
+}
+
+/// 缓存包内加密元数据的密码验证器。
+///
+/// 不保存密码或解密后的数据主密钥。读取一次打包文件后即可在线程间共享，
+/// 每次尝试仅派生密码保护密钥并解密元数据，不读取文件密文、不执行解包。
+pub struct VeilPasswordVerifier {
+    header: MetaHeader,
+    encrypted_data: Vec<u8>,
+}
+
+impl VeilPasswordVerifier {
+    fn from_metadata(bytes: &[u8]) -> Result<Self, VeilError> {
+        let header = MetaHeader::from_bytes(bytes)?;
+        if header.algorithm != AlgorithmId::ChaCha20Poly1305 {
+            return Err(VeilError::InvalidFormat(format!(
+                "不支持的元数据加密算法: {}",
+                header.algorithm.as_str()
+            )));
+        }
+        let header_len = MetaHeader::header_len(bytes)?;
+        let encrypted_data = bytes[header_len..].to_vec();
+        if encrypted_data.len() < crate::file_ops::TAG_LEN {
+            return Err(VeilError::InvalidFormat("加密元数据不完整".to_string()));
+        }
+        Ok(Self {
+            header,
+            encrypted_data,
+        })
+    }
+
+    /// 判断候选密码能否解密并解析当前元数据。
+    pub fn matches_password(&self, password: &str) -> bool {
+        self.decrypt_metadata(password).is_ok()
+    }
+
+    fn decrypt_metadata(&self, password: &str) -> Result<MetaData, VeilError> {
+        let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
+        kdf::derive_key(password.as_bytes(), &self.header.salt, &mut *master_key)
+            .map_err(|error| VeilError::KeyDerivationError(error.to_string()))?;
+
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
+        let decrypted = zeroize::Zeroizing::new(
+            cipher
+                .decrypt(
+                    GenericArray::from_slice(&self.header.nonce),
+                    self.encrypted_data.as_slice(),
+                )
+                .map_err(|error| {
+                    VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
+                })?,
+        );
+        MetaData::from_json(decrypted.as_slice())
     }
 }
 
@@ -323,25 +377,17 @@ impl VeilUnpacker {
     /// 该入口不创建目录或写入文件，调用方可以先完成身份验证再开始解包。
     pub fn read_metadata(&self, password: &str) -> Result<(MetaData, Vec<u8>), VeilError> {
         let encrypted_metadata = self.read_encrypted_metadata()?;
-        let header = MetaHeader::from_bytes(&encrypted_metadata)?;
-
-        let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
-        kdf::derive_key(password.as_bytes(), &header.salt, &mut *master_key)
-            .map_err(|error| VeilError::KeyDerivationError(format!("{:?}", error)))?;
-
-        let header_len = MetaHeader::header_len(&encrypted_metadata)?;
-        let encrypted_data = &encrypted_metadata[header_len..];
-        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
-        let decrypted = zeroize::Zeroizing::new(
-            cipher
-                .decrypt(GenericArray::from_slice(&header.nonce), encrypted_data)
-                .map_err(|error| {
-                    VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
-                })?,
-        );
-        let metadata = MetaData::from_json(decrypted.as_slice())?;
+        let metadata =
+            VeilPasswordVerifier::from_metadata(&encrypted_metadata)?.decrypt_metadata(password)?;
 
         Ok((metadata, encrypted_metadata))
+    }
+
+    /// 只读取一次包内元数据，构造可重复使用的密码验证器。
+    ///
+    /// 不创建目录、不写出明文，也不读取包中的文件内容。
+    pub fn read_password_verifier(&self) -> Result<VeilPasswordVerifier, VeilError> {
+        VeilPasswordVerifier::from_metadata(&self.read_encrypted_metadata()?)
     }
 
     /// 将打包文件中的加密条目写入 `veil_dir`。

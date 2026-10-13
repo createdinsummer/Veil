@@ -314,18 +314,6 @@
     "zh": "I/O 错误: {error}",
     "en": "I/O error: {error}"
   },
-  "error.core_encrypt": {
-    "zh": "age 加密失败: {error}",
-    "en": "age encryption failed: {error}"
-  },
-  "error.core_decrypt": {
-    "zh": "age 解密失败: {error}",
-    "en": "age decryption failed: {error}"
-  },
-  "error.core_serialize": {
-    "zh": "索引序列化失败: {error}",
-    "en": "Index serialization failed: {error}"
-  },
   "error.core_format": {
     "zh": "容器格式错误: {error}",
     "en": "Veil format error: {error}"

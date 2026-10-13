@@ -15,18 +15,6 @@ pub enum VeilError {
     #[error("I/O 错误: {0}")]
     Io(#[from] std::io::Error),
 
-    /// age 加密失败。
-    #[error("age 加密失败: {0}")]
-    Encrypt(#[from] age::EncryptError),
-
-    /// age 解密失败，通常表示密码错误或密文损坏。
-    #[error("age 解密失败（密码错误或数据被篡改？）: {0}")]
-    Decrypt(#[from] age::DecryptError),
-
-    /// 目录索引的 postcard 序列化或反序列化失败。
-    #[error("索引序列化失败: {0}")]
-    Serialize(#[from] postcard::Error),
-
     /// 容器字节格式不符合预期。
     #[error("容器格式错误: {0}")]
     Format(String),
@@ -55,7 +43,7 @@ pub enum VeilError {
     #[error("无效的格式: {0}")]
     InvalidFormat(String),
 
-    /// 除目录索引以外的数据序列化失败。
+    /// 元数据、配置或链接的序列化失败。
     #[error("序列化错误: {0}")]
     SerializationError(String),
 

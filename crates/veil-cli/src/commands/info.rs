@@ -29,7 +29,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 读取元数据同时完成密码验证；失败时不会打印任何容器内容。

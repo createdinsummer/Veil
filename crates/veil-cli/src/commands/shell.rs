@@ -24,7 +24,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     );
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let pwd = password_str.expose_secret();
 
     // 入口处先验证密码；失败时直接退出，不进入交互循环。

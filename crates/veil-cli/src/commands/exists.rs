@@ -12,7 +12,7 @@ pub fn run(veil_name: &str, path: &str, password: Option<String>) -> Result<bool
     let resolved = super::resolve_veil(veil_name)?;
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
     let manager = super::veil_manager(&resolved);
     let metadata = manager.read_meta(password)?;

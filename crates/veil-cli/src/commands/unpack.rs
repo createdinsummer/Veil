@@ -87,7 +87,7 @@ pub fn run(
     crate::outln!("{}", crate::i18n::t("unpack.in_progress").cyan());
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 密码验证和元数据解密必须先于任何目录或文件创建。

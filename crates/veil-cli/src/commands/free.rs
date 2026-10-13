@@ -23,7 +23,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 解密清单后即可完整展示树状内容，无需读取文件密文本体。

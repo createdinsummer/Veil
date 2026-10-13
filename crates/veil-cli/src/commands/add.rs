@@ -51,7 +51,7 @@ pub fn run(
     crate::outln!("{}", crate::i18n::t("opening_veil").cyan());
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     let encrypted_names = manager.add_files(&files, password)?;

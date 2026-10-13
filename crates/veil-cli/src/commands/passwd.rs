@@ -28,7 +28,7 @@ pub fn run(
     // 新密码用于重新派生密码保护密钥；完整模式还会轮换数据主密钥。
     let new_pwd = super::prompt_new_password_with_env(new_password, "VEIL_NEW_PASSWORD")?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let old_password_str = old_pwd.expose_secret();
     let new_password_str = new_pwd.expose_secret();
 

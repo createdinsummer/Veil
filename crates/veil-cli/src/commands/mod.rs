@@ -155,20 +155,20 @@ fn prompt_password_adaptive(prompt: &str) -> std::io::Result<String> {
 pub fn prompt_password(
     prompt: &str,
     password_arg: Option<String>,
-) -> Result<age::secrecy::SecretString> {
+) -> Result<secrecy::SecretString> {
     // 显式参数优先级最高，适用于调用方已经获得密码的场景。
     if let Some(pwd) = password_arg {
-        return Ok(age::secrecy::SecretString::from(pwd));
+        return Ok(secrecy::SecretString::from(pwd));
     }
 
     // 环境变量用于脚本和自动化，读取后立即包装为 SecretString。
     if let Ok(password) = std::env::var("VEIL_PASSWORD") {
-        return Ok(age::secrecy::SecretString::from(password));
+        return Ok(secrecy::SecretString::from(password));
     }
 
     // 最后才进入 TTY 读取，rpassword 负责关闭回显。
     let password = prompt_password_adaptive(prompt)?;
-    Ok(age::secrecy::SecretString::from(password))
+    Ok(secrecy::SecretString::from(password))
 }
 
 /// 提示用户输入密码并确认（用于创建容器或修改密码）。
@@ -194,7 +194,7 @@ pub fn prompt_password(
 /// # Ok(())
 /// # }
 /// ```
-pub fn prompt_new_password(password_arg: Option<String>) -> Result<age::secrecy::SecretString> {
+pub fn prompt_new_password(password_arg: Option<String>) -> Result<secrecy::SecretString> {
     prompt_new_password_with_env(password_arg, "VEIL_PASSWORD")
 }
 
@@ -204,15 +204,15 @@ pub fn prompt_new_password(password_arg: Option<String>) -> Result<age::secrecy:
 pub fn prompt_new_password_with_env(
     password_arg: Option<String>,
     env_name: &str,
-) -> Result<age::secrecy::SecretString> {
+) -> Result<secrecy::SecretString> {
     // 显式参数跳过确认，调用方已经负责校验来源。
     if let Some(pwd) = password_arg {
-        return validate_new_password(age::secrecy::SecretString::from(pwd));
+        return validate_new_password(secrecy::SecretString::from(pwd));
     }
 
     // 指定环境变量同样跳过二次输入，便于非交互调用。
     if let Ok(password) = std::env::var(env_name) {
-        return validate_new_password(age::secrecy::SecretString::from(password));
+        return validate_new_password(secrecy::SecretString::from(password));
     }
 
     // 交互模式必须输入两次，不一致时不会向命令层返回任何密码。
@@ -226,21 +226,19 @@ pub fn prompt_new_password_with_env(
 fn validate_password_confirmation(
     password: String,
     confirmation: &str,
-) -> Result<age::secrecy::SecretString> {
+) -> Result<secrecy::SecretString> {
     if password != confirmation {
         crate::cli_bail!(PasswordMismatch);
     }
-    validate_new_password(age::secrecy::SecretString::from(password))
+    validate_new_password(secrecy::SecretString::from(password))
 }
 
 /// 拒绝可用于新容器的空密码。
 ///
 /// 旧容器仍可使用空密码打开，以保持对历史数据的兼容；只有创建或修改密码时
 /// 禁止产生新的无密码容器。
-fn validate_new_password(
-    password: age::secrecy::SecretString,
-) -> Result<age::secrecy::SecretString> {
-    use age::secrecy::ExposeSecret;
+fn validate_new_password(password: secrecy::SecretString) -> Result<secrecy::SecretString> {
+    use secrecy::ExposeSecret;
 
     if password.expose_secret().is_empty() {
         crate::cli_bail!(PasswordEmpty);
@@ -256,7 +254,7 @@ mod tests {
     /// 验证两次交互密码不一致时稳定返回密码错误。
     #[test]
     fn mismatched_password_confirmation_is_rejected() {
-        use age::secrecy::ExposeSecret;
+        use secrecy::ExposeSecret;
 
         let error = validate_password_confirmation("first".to_string(), "second").unwrap_err();
         assert_eq!(error.code(), crate::error::ErrorCode::PasswordMismatch);

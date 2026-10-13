@@ -1,22 +1,17 @@
 //! Veil 核心库。
 //!
-//! 本 crate 提供单文件容器与工作区容器共用的底层能力，包括配置与链接模型、
-//! 元数据格式、密钥派生、加解密、目录索引以及流式读写。上层 CLI 只负责组织
+//! 本 crate 提供目录模型与打包格式的底层能力，包括配置与链接模型、
+//! 元数据格式、密钥派生、加解密、文件清单以及流式读写。上层 CLI 只负责组织
 //! 用户交互和组合这些能力，不直接实现磁盘格式或密码学细节。
 
 pub mod config;
 pub mod error;
 pub mod file_ops;
-pub mod format;
 pub(crate) mod fsutil;
-pub mod index;
 pub mod kdf;
-pub mod keys;
 pub mod link;
 pub mod metadata;
 pub mod mime;
-pub mod single_file_veil;
-pub mod slice_reader;
 pub mod temp;
 pub mod veil_ops;
 pub mod veil_package;

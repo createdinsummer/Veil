@@ -1,4 +1,4 @@
-//! Veil 容器密码恢复工具（交互式多线程版）。
+//! Veil 打包文件密码强度测试工具（交互式多线程版）。
 //!
 //! **仅供教育目的和测试自己创建的容器使用。**
 //!
@@ -24,9 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use age::secrecy::SecretString;
 use rayon::prelude::*;
-use veil_core::{format, keys};
+use veil_core::veil_package::{VeilPasswordVerifier, VeilUnpacker};
 
 /// 版本信息
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -151,7 +150,7 @@ fn show_history_stats(veil_path: &Path) {
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
 fn retry_history_passwords(
-    cip_pri_key: Arc<Vec<u8>>,
+    verifier: Arc<VeilPasswordVerifier>,
     veil_path: &Path,
     stats: Arc<Stats>,
 ) -> Option<String> {
@@ -237,7 +236,7 @@ fn retry_history_passwords(
 
         stats.increment();
 
-        if try_password(&cip_pri_key, password) {
+        if try_password(&verifier, password) {
             stats.mark_found();
             stats.stop();
             Some(password.clone())
@@ -311,11 +310,11 @@ impl Stats {
     }
 }
 
-/// 尝试使用密码解封容器私钥。
+/// 尝试使用候选密码解密包内元数据。
 ///
 /// 只以成功/失败作为候选密码是否可用的判断，不保留错误详情。
-fn try_password(cip_pri_key: &[u8], password: &str) -> bool {
-    keys::decrypt_pri_key(cip_pri_key, SecretString::from(password.to_owned())).is_ok()
+fn try_password(verifier: &VeilPasswordVerifier, password: &str) -> bool {
+    verifier.matches_password(password)
 }
 
 /// 从词表读取密码并并行尝试。
@@ -325,7 +324,7 @@ fn try_password(cip_pri_key: &[u8], password: &str) -> bool {
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
 fn dictionary_attack(
-    cip_pri_key: Arc<Vec<u8>>,
+    verifier: Arc<VeilPasswordVerifier>,
     wordlist_path: &Path,
     veil_path: &Path,
     stats: Arc<Stats>,
@@ -404,7 +403,7 @@ fn dictionary_attack(
 
         stats.increment();
 
-        if try_password(&cip_pri_key, password) {
+        if try_password(&verifier, password) {
             stats.mark_found();
             stats.stop();
             Some(password.clone())
@@ -461,7 +460,7 @@ fn generate_all_combinations(charset: &[char], length: usize) -> Vec<String> {
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
 fn charset_attack(
-    cip_pri_key: Arc<Vec<u8>>,
+    verifier: Arc<VeilPasswordVerifier>,
     charset: &str,
     min_len: usize,
     max_len: usize,
@@ -583,7 +582,7 @@ fn charset_attack(
 
             stats.increment();
 
-            if try_password(&cip_pri_key, password) {
+            if try_password(&verifier, password) {
                 stats.mark_found();
                 stats.stop();
                 Some(password.clone())
@@ -921,7 +920,7 @@ fn calculate_combination_count(n: usize, min: usize, max: usize, allow_repeat: b
 /// # 返回
 /// 找到时返回密码，否则返回 `None`。
 fn word_combination_attack(
-    cip_pri_key: Arc<Vec<u8>>,
+    verifier: Arc<VeilPasswordVerifier>,
     words: Vec<String>,
     min_words: usize,
     max_words: usize,
@@ -1049,7 +1048,7 @@ fn word_combination_attack(
 
         stats.increment();
 
-        if try_password(&cip_pri_key, password) {
+        if try_password(&verifier, password) {
             stats.mark_found();
             stats.stop();
             Some(password.clone())
@@ -1169,9 +1168,9 @@ fn configure_threads() {
     println!("✅ 线程数已设置为: {}", num_threads);
 }
 
-/// 显示安全提示，加载容器私钥并运行交互式攻击菜单。
+/// 显示安全提示，加载打包文件的加密元数据并运行交互式攻击菜单。
 ///
-/// 程序会持续接受攻击模式选择，切换容器时重新读取 Header，退出或输入 `q` 时结束。
+/// 程序会持续接受攻击模式选择，切换容器时重新读取包内元数据，退出或输入 `q` 时结束。
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -1227,29 +1226,25 @@ fn main() {
             eprintln!("提示:");
             eprintln!("  1. 检查路径是否正确");
             eprintln!("  2. 使用绝对路径或相对于当前目录的路径");
-            eprintln!("  3. 先创建测试容器: cargo run --example create_veil --release -- test.veil password");
+            eprintln!(
+                "  3. 先创建自己的 Veil，再用 veil pack <Veil> --output test.veil 生成测试文件"
+            );
             eprintln!();
 
             veil_path_str.clear();
             continue;
         }
 
-        println!("\n📖 读取容器密文私钥...");
-        // 攻击只需要 Header 中的受保护私钥，无需解密整个容器。
-        let cip_pri_key = match File::open(veil_path) {
-            Ok(mut f) => match format::read_header(&mut f) {
-                Ok(header) => {
-                    println!("✅ 密文私钥大小: {} 字节", header.cip_pri_key.len());
-                    Arc::new(header.cip_pri_key)
-                }
-                Err(e) => {
-                    eprintln!("❌ 读取 Header 失败: {e}");
-                    veil_path_str.clear();
-                    continue;
-                }
-            },
-            Err(e) => {
-                eprintln!("❌ 打开容器失败: {e}");
+        println!("\n📖 读取打包文件的加密元数据...");
+        // 元数据只读取一次；并行候选共享验证器，不执行解包或读取文件内容。
+        let verifier = match VeilUnpacker::new(veil_path).read_password_verifier() {
+            Ok(verifier) => {
+                println!("✅ 已加载加密元数据");
+                Arc::new(verifier)
+            }
+            Err(error) => {
+                eprintln!("❌ 读取打包文件失败: {error}");
+                eprintln!("提示: 仅支持 veil pack 生成的 .veil 文件");
                 veil_path_str.clear();
                 continue;
             }
@@ -1261,7 +1256,7 @@ fn main() {
 
         show_history_stats(veil_path);
 
-        // 当前容器的攻击菜单循环；切换容器时跳出并重新读取 Header。
+        // 当前容器的攻击菜单循环；切换容器时跳出并重新读取包内元数据。
         loop {
             let choice = show_menu();
 
@@ -1276,7 +1271,7 @@ fn main() {
                     if let Some(wordlist_path) = get_wordlist_path() {
                         let stats = Arc::new(Stats::new());
                         let result = dictionary_attack(
-                            Arc::clone(&cip_pri_key),
+                            Arc::clone(&verifier),
                             Path::new(&wordlist_path),
                             veil_path,
                             stats,
@@ -1289,7 +1284,7 @@ fn main() {
                     if let Some((charset, min_len, max_len)) = get_custom_charset() {
                         let stats = Arc::new(Stats::new());
                         let result = charset_attack(
-                            Arc::clone(&cip_pri_key),
+                            Arc::clone(&verifier),
                             &charset,
                             min_len,
                             max_len,
@@ -1303,7 +1298,7 @@ fn main() {
                     if let Some((charset, min_len, max_len)) = get_preset_charset() {
                         let stats = Arc::new(Stats::new());
                         let result = charset_attack(
-                            Arc::clone(&cip_pri_key),
+                            Arc::clone(&verifier),
                             &charset,
                             min_len,
                             max_len,
@@ -1319,7 +1314,7 @@ fn main() {
                     {
                         let stats = Arc::new(Stats::new());
                         let result = word_combination_attack(
-                            Arc::clone(&cip_pri_key),
+                            Arc::clone(&verifier),
                             words,
                             min_words,
                             max_words,
@@ -1334,7 +1329,7 @@ fn main() {
                 "5" => {
                     configure_threads();
                 }
-                // 6：清空当前容器状态，跳出菜单后重新读取 Header。
+                // 6：清空当前容器状态，跳出菜单后重新读取包内元数据。
                 "6" => {
                     println!("\n🔄 切换容器文件");
                     print!("请输入新的容器文件路径: ");
@@ -1354,8 +1349,7 @@ fn main() {
                 // 7：重新尝试历史文件中已记录过的密码。
                 "7" => {
                     let stats = Arc::new(Stats::new());
-                    let result =
-                        retry_history_passwords(Arc::clone(&cip_pri_key), veil_path, stats);
+                    let result = retry_history_passwords(Arc::clone(&verifier), veil_path, stats);
                     print_result(result);
                 }
                 _ => {

@@ -31,7 +31,7 @@ pub fn run(veil_name: &str, output_path: Option<&str>, password: Option<String>)
     crate::outln!("{}", crate::i18n::t("pack.in_progress").cyan());
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // 先完成密码验证和清单读取，再读取 .veil-meta 的完整字节。

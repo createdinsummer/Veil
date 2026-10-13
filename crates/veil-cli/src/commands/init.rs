@@ -174,7 +174,7 @@ pub fn run(
     }
     let password_str = super::prompt_new_password(password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     let work_type = if dedicated {

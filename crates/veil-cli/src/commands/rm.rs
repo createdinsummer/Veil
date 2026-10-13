@@ -33,7 +33,7 @@ pub fn run(veil_name: &str, file_name: &str, password: Option<String>) -> Result
     );
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
-    use age::secrecy::ExposeSecret;
+    use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
     // core 会先提交更新后的元数据，再清理失去引用的密文文件。
