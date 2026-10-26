@@ -7,6 +7,7 @@ mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
+use veil_core::link::VeilLink;
 
 /// 验证初始化会创建工作区和可解析的链接文件。
 #[test]
@@ -22,11 +23,14 @@ fn init_creates_work_and_link() {
     let link = env.link_path("photos");
     assert!(link.exists());
 
-    let content = std::fs::read_to_string(link).unwrap();
-    assert!(content.contains("veil_id = \"veil-"));
-    assert!(content.contains("veil_name = \"photos\""));
-    assert!(content.contains("volume_id = "));
-    assert!(content.contains("volume_label = "));
+    let link = veil_core::link::VeilLink::load(&link).unwrap();
+    assert!(link.veil.veil_id.starts_with("veil-"));
+    assert_eq!(link.veil.veil_name, "photos");
+    assert!(
+        env.veil_dir(&env.link_path("photos"))
+            .join(".veil-info")
+            .is_file()
+    );
 }
 
 /// 验证同名容器使用不同 ID、目录和链接，且内容互相隔离。
@@ -74,11 +78,14 @@ fn duplicate_veil_names_use_distinct_directories_and_links() {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("photos-"))
     );
-    let first_work = std::fs::read_to_string(&first_link).unwrap();
-    let second_work = std::fs::read_to_string(&second_link).unwrap();
-    assert_ne!(first_work, second_work);
-    assert!(first_work.contains("/works/default/veil-"));
-    assert!(second_work.contains("/works/default/veil-"));
+    let first = VeilLink::load(&first_link).unwrap();
+    let second = VeilLink::load(&second_link).unwrap();
+    assert_eq!(
+        env.veil_dir(&first_link).parent(),
+        env.veil_dir(&second_link).parent()
+    );
+    assert_ne!(first.veil.veil_id, second.veil.veil_id);
+    assert_ne!(env.veil_dir(&first_link), env.veil_dir(&second_link));
 
     // 只向第二个容器写入文件，第一个容器应继续为空。
     let source = env.write_file("duplicate-name.txt", "second veil");
@@ -710,6 +717,10 @@ fn passwd_uses_separate_new_password_environment_variable() {
 fn pack_and_unpack_create_reusable_links() {
     let env = TestEnv::new("test-password");
     let link = env.init("package");
+    let created_at = veil_core::link::VeilLink::load(&link)
+        .unwrap()
+        .veil
+        .created_at;
     let source = env.write_file("payload.txt", "payload");
 
     env.command()
@@ -758,6 +769,13 @@ fn pack_and_unpack_create_reusable_links() {
 
     let restored_link = env.link_path("restored");
     assert!(restored_link.exists());
+    assert_eq!(
+        veil_core::link::VeilLink::load(&restored_link)
+            .unwrap()
+            .veil
+            .created_at,
+        created_at
+    );
 
     env.command()
         .env("HOME", restored_home.path())
@@ -1039,7 +1057,7 @@ fn nonexistent_veil_fails_cleanly() {
         .args(["free", "missing.veil-link"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("找不到"));
+        .stderr(predicate::str::contains("当前未找到容器"));
 }
 
 /// 统计默认工作区中单个容器的密文文件数量。

@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod file_ops;
 pub(crate) mod fsutil;
+pub mod jsonc;
 pub mod kdf;
 pub mod link;
 pub mod metadata;

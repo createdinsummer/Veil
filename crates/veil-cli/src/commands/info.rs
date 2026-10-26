@@ -50,10 +50,6 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     );
     crate::outln!(
         "{}",
-        crate::i18n::t1("info.work_type", "work_type", &metadata.work_type)
-    );
-    crate::outln!(
-        "{}",
         crate::i18n::t1("info.created_at", "time", &metadata.created_at)
     );
 

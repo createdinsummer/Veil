@@ -5,12 +5,12 @@ use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use veil_core::config::GlobalConfig;
+use veil_core::metadata::VEIL_INFO_FILE;
 use veil_core::veil_ops::VeilManager;
-use veil_core::work::WorkConfig;
 
 /// 创建新的加密 Veil。
 ///
-/// 创建 `veil_dir`，初始化 `.veil-meta` 元数据文件，并登记全局配置。
+/// 创建 `veil_dir`，初始化 `.veil-info` 元数据文件，并登记全局配置。
 /// Veil 中的每个文件拥有独立 `.enc` 密文，身份由启动时生成的稳定 ID 表示。
 ///
 /// # 参数
@@ -18,7 +18,7 @@ use veil_core::work::WorkConfig;
 /// - `password`: 用户密码；`None` 时按命令层规则从环境变量或终端读取。
 /// - `link_output`: 自定义 `.veil-link` 输出路径。
 /// - `work_name`: 可选的已注册命名工作区名称，不是路径。
-/// - `work_root`: 可选的显式工作区根路径，自动登记到当前 Veil，不新增命名 Work。
+/// - `work_root`: 可选的显式工作区根路径，自动登记工作区并关联当前 Veil。
 /// - `dedicated`: 是否让 `work_root` 指定的目录由当前 Veil 独占。
 /// - `portable`: 是否强制把 Veil 目录放在链接文件所在卷。
 ///
@@ -102,62 +102,20 @@ pub fn run(
     let link_dir = absolute_link_path
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    let external_location = is_external_volume(link_dir);
-    // 外部卷或显式 portable 参数会自动把默认工作区放到链接所在卷。
-    let portable_mode =
-        work_name.is_none() && work_root.is_none() && (portable || external_location);
-    let explicit_work_root = work_root.is_some();
-
-    let mut config = GlobalConfig::load()?;
+    let (mut config, work) =
+        GlobalConfig::creation_work(link_dir, work_name, work_root.as_deref(), dedicated)?;
     config.ensure_veil_id_available(&veil_id)?;
-
-    if config.work.default.is_none() {
-        config.work.default = Some(WorkConfig::default_work()?);
-    }
-
-    let work_root = if portable_mode {
-        // 便携模式固定使用链接目录下的隐藏工作区，保证链接与数据一起移动。
-        link_dir.join(".veil/works/default")
-    } else if let Some(path) = work_root {
-        // 显式路径直接使用，并把实际 veil_dir 登记到 Veil 记录；它不会成为新的
-        // work.custom 命名 Work。
-        path
-    } else if let Some(name) = work_name {
-        // 命名工作区只查配置注册表；default 可在首次运行时自动补全，自定义名称
-        // 当前没有 CLI 注册命令，必须预先写入配置。
-        if name == "default" {
-            config.work.default.as_ref().unwrap().path.clone()
-        } else {
-            config
-                .work
-                .custom
-                .get(name)
-                .ok_or_else(|| crate::cli_error!(InitWorkNotFound, "name" => name))?
-                .path
-                .clone()
-        }
-    } else {
-        config.work.default.as_ref().unwrap().path.clone()
-    };
-    let work_root = make_absolute(&work_root)?;
+    let portable_mode = portable || veil_core::volume::volume_for_path(link_dir)?.if_out_volume;
+    let work_root = config.resolve_work_root(&work)?;
     let work_root_existed = work_root.exists();
-
-    // 共享工作区以 veil_id 作为目录名，专属工作区则直接使用 work_root。
-    let veil_dir_name = (!dedicated).then(|| veil_id.clone());
-    let veil_dir = if dedicated {
-        work_root.clone()
-    } else {
-        work_root.join(&veil_id)
-    };
-
+    let dedicated = matches!(work.work_type, veil_core::work::WorkType::Dedicated);
+    if dedicated && work_root_existed && !is_empty_directory(&work_root)? {
+        crate::cli_bail!(InitDedicatedPathNotEmpty, "path" => work_root.display());
+    }
+    let veil_dir = work_root.join(&veil_id);
     let veil_dir_existed = veil_dir.exists();
-    if veil_dir_existed && (!dedicated || !is_empty_directory(&veil_dir)?) {
-        let error = if dedicated {
-            crate::cli_error!(InitDedicatedPathNotEmpty, "path" => veil_dir.display())
-        } else {
-            crate::cli_error!(InitVeilExists, "path" => veil_dir.display())
-        };
-        return Err(error);
+    if veil_dir_existed {
+        crate::cli_bail!(InitVeilExists, "path" => veil_dir.display());
     }
 
     crate::outln!("{}", crate::i18n::t("init.creating").cyan());
@@ -177,19 +135,11 @@ pub fn run(
     use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    let work_type = if dedicated {
-        "dedicated"
-    } else if work_name == Some("default") || work_name.is_none() {
-        "default"
-    } else {
-        "custom"
-    };
-
     let manager = VeilManager::for_veil(veil_dir.clone(), veil_id.clone());
     use veil_core::config::VeilConfig;
     let creation_result = (|| -> Result<()> {
         let metadata = manager
-            .init_veil_with_id(&veil_id, &veil_name, work_type, password)
+            .init_veil_with_id(&veil_id, &veil_name, password)
             .map_err(|error| {
                 crate::cli_error!(
                     InitWorkCreateFailed,
@@ -198,33 +148,12 @@ pub fn run(
                 )
             })?;
 
-        let veil_config = if dedicated {
-            VeilConfig {
-                veil_id: metadata.veil_id.clone(),
-                veil_name: veil_name.clone(),
-                work: None,
-                veil_dir_name: None,
-                veil_dir: Some(work_root.clone()),
-                dedicated_work: true,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                last_accessed: None,
-                links: Vec::new(),
-            }
-        } else {
-            // 显式路径和便携 Work 不来自命名 Work，必须保存实际 veil_dir 供
-            // 链接丢失后的配置恢复使用。
-            let resolved_veil_dir = (explicit_work_root || portable_mode).then(|| veil_dir.clone());
-            VeilConfig {
-                veil_id: metadata.veil_id.clone(),
-                veil_name: veil_name.clone(),
-                work: Some(work_name.unwrap_or("default").to_string()),
-                veil_dir_name,
-                veil_dir: resolved_veil_dir,
-                dedicated_work: false,
-                created_at: chrono::Utc::now().to_rfc3339(),
-                last_accessed: None,
-                links: Vec::new(),
-            }
+        let veil_config = VeilConfig {
+            veil_id: metadata.veil_id.clone(),
+            veil_name: veil_name.clone(),
+            created_at: metadata.created_at.clone(),
+            last_accessed: None,
+            links: Vec::new(),
         };
 
         config.register_veil(veil_config)?;
@@ -262,101 +191,13 @@ pub fn run(
     Ok(())
 }
 
-/// 判断路径是否位于当前平台识别出的外部卷。
-///
-/// 路径不存在时使用最近的已存在祖先进行探测；无法取得设备信息时返回 `false`。
-fn is_external_volume(path: &Path) -> bool {
-    // 目标目录可能尚未创建，因此先找到最近的真实路径再读取卷信息。
-    let probe = nearest_existing_path(path);
-    if probe.as_os_str().is_empty() {
-        return false;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // macOS 约定 /Volumes 下是挂载卷。
-        if probe.starts_with("/Volumes") {
-            return true;
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::path::Component;
-
-        /// 提取路径盘符并转换为字符串。
-        fn root_key(path: &Path) -> Option<String> {
-            match path.components().next()? {
-                Component::Prefix(prefix) => {
-                    Some(prefix.as_os_str().to_string_lossy().into_owned())
-                }
-                _ => None,
-            }
-        }
-
-        // 比较目标盘符与用户主目录盘符，不同盘即视为外部位置。
-        if let (Some(location), Some(home)) = (
-            root_key(&probe),
-            std::env::var_os("USERPROFILE")
-                .map(PathBuf::from)
-                .as_deref()
-                .and_then(root_key),
-        ) {
-            return !location.eq_ignore_ascii_case(&home);
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        // Unix 设备号变化表示跨文件系统，通常对应外部挂载卷。
-        let location_device = std::fs::metadata(&probe).ok().map(|meta| meta.dev());
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let home_device = home
-            .as_deref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.dev());
-
-        if let (Some(location), Some(home)) = (location_device, home_device) {
-            return location != home;
-        }
-    }
-
-    false
-}
-
-/// 返回路径自身或最近的已存在祖先；没有任何可用路径时返回空路径。
-fn nearest_existing_path(path: &Path) -> PathBuf {
-    let mut current = path.to_path_buf();
-    loop {
-        // 返回第一个存在路径，并尽量 canonicalize 去掉符号链接和相对段。
-        if current.exists() {
-            return std::fs::canonicalize(&current).unwrap_or(current);
-        }
-        // pop 到根后仍不存在，说明调用方给出的是无效路径。
-        if !current.pop() {
-            return PathBuf::new();
-        }
-    }
-}
-
-/// 将用户提供的相对工作区路径固定到当前目录。
-fn make_absolute(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
-}
-
 /// 判断路径是否是可直接交给专属容器的空目录。
 fn is_empty_directory(path: &Path) -> Result<bool> {
     if !path.is_dir() {
         return Ok(false);
     }
 
-    Ok(fs::read_dir(path)?.next().is_none())
+    Ok(fs::read_dir(path)?.next().transpose()?.is_none())
 }
 
 /// 初始化失败时移除本次创建的链接、元数据和 `veil_dir`。
@@ -372,7 +213,7 @@ fn cleanup_failed_init(
     let _ = fs::remove_file(link_path);
 
     if veil_dir_existed {
-        let _ = fs::remove_file(veil_dir.join(".veil-meta"));
+        let _ = fs::remove_file(veil_dir.join(VEIL_INFO_FILE));
     } else {
         let _ = fs::remove_dir_all(veil_dir);
     }

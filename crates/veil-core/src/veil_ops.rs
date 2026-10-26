@@ -1,15 +1,15 @@
 //! Veil 的高层读写操作。
 //!
-//! [`VeilManager`] 把 `.veil-meta` 与同目录下的 `.enc` 文件组合成一个 Veil。
-//! 密码和 salt 经 Argon2id 派生出密码保护密钥，只用于加密元数据 JSON；文件内容
+//! [`VeilManager`] 把 `.veil-info` 与同目录下的 `.enc` 文件组合成一个 Veil。
+//! 密码和 salt 经 Argon2id 派生出密码保护密钥，只用于加密元数据 JSONC；文件内容
 //! 使用元数据中的随机数据主密钥按固定大小分块流式加密。两者均使用
-//! ChaCha20-Poly1305，文件各自保存独立 base nonce。`.veil-meta` 中记录对应的
+//! ChaCha20-Poly1305，文件各自保存独立 base nonce。`.veil-info` 中记录对应的
 //! 算法 ID，具体值由 [`MetaHeader`] 持久化。
 
 use crate::error::VeilError;
 use crate::file_ops::{self, DATA_KEY_LEN};
 use crate::kdf;
-use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader};
+use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader, VEIL_INFO_FILE};
 use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit},
@@ -58,7 +58,7 @@ pub enum MovedPathKind {
 
 /// 对单个 Veil 执行初始化和文件操作。
 pub struct VeilManager {
-    /// 包含 `.veil-meta` 和 `.enc` 文件的实际 Veil 目录。
+    /// 包含 `.veil-info` 和 `.enc` 文件的实际 Veil 目录。
     pub veil_dir: PathBuf,
     /// 调用方解析出的预期容器 ID；设置后所有元数据访问都会校验该身份。
     expected_veil_id: Option<String>,
@@ -106,23 +106,13 @@ impl VeilManager {
     ///
     /// # 错误
     /// 目录创建、密钥派生或元数据写入失败时返回错误。
-    pub fn init_veil(
-        &self,
-        veil_name: &str,
-        work_type: &str,
-        password: &str,
-    ) -> Result<MetaData, VeilError> {
-        self.init_veil_with_id(
-            &crate::metadata::generate_veil_id(),
-            veil_name,
-            work_type,
-            password,
-        )
+    pub fn init_veil(&self, veil_name: &str, password: &str) -> Result<MetaData, VeilError> {
+        self.init_veil_with_id(&crate::metadata::generate_veil_id(), veil_name, password)
     }
 
     /// 使用调用方指定的稳定 ID 初始化新 Veil。
     ///
-    /// 方法创建目录和随机盐/nonce，生成初始元数据，并写入加密的 `.veil-meta`。
+    /// 方法创建目录和随机盐/nonce，生成初始元数据，并写入加密的 `.veil-info`。
     ///
     /// # 错误
     /// 目录创建、随机数生成、密钥派生或元数据写入失败时返回错误。
@@ -130,7 +120,6 @@ impl VeilManager {
         &self,
         veil_id: &str,
         veil_name: &str,
-        work_type: &str,
         password: &str,
     ) -> Result<MetaData, VeilError> {
         self.verify_veil_id(veil_id)?;
@@ -142,11 +131,7 @@ impl VeilManager {
         let salt = generate_random_bytes::<32>();
         let nonce = generate_random_bytes::<12>();
 
-        let meta_data = MetaData::with_veil_id(
-            veil_id.to_string(),
-            veil_name.to_string(),
-            work_type.to_string(),
-        );
+        let meta_data = MetaData::with_veil_id(veil_id.to_string(), veil_name.to_string());
 
         let header = MetaHeader::new(
             salt,
@@ -154,7 +139,7 @@ impl VeilManager {
             AlgorithmId::ChaCha20Poly1305,
             meta_data.veil_id.clone(),
             meta_data.veil_name.clone(),
-            meta_data.work_type.clone(),
+            meta_data.created_at.clone(),
         );
 
         let master_key = derive_master_key(password, &salt)?;
@@ -169,7 +154,7 @@ impl VeilManager {
     /// 使用密码读取并解密 Veil 元数据。
     ///
     /// # 错误
-    /// `.veil-meta` 不存在、头部无效、密钥派生失败、密码错误或密文损坏时返回错误。
+    /// `.veil-info` 不存在、头部无效、密钥派生失败、密码错误或密文损坏时返回错误。
     pub fn read_meta(&self, password: &str) -> Result<MetaData, VeilError> {
         Ok(self.read_meta_context(password)?.0)
     }
@@ -179,7 +164,7 @@ impl VeilManager {
         &self,
         password: &str,
     ) -> Result<(MetaData, MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
-        let meta_path = self.veil_dir.join(".veil-meta");
+        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
         if !meta_path.exists() {
             return Err(VeilError::InvalidFormat("元数据文件不存在".to_string()));
         }
@@ -195,7 +180,12 @@ impl VeilManager {
             encrypted_data,
             &header.nonce,
         )?);
-        let meta_data = MetaData::from_json(decrypted.as_slice())?;
+        let meta_data = MetaData::from_jsonc(decrypted.as_slice())?;
+        if meta_data.veil_id != header.veil_id {
+            return Err(VeilError::VeilIdConflict(
+                "元数据明文头与加密正文中的容器 ID 不一致".into(),
+            ));
+        }
 
         self.cleanup_work_state(&meta_data);
 
@@ -205,19 +195,19 @@ impl VeilManager {
     /// 不输入密码，只读取恢复所需的明文身份信息。
     ///
     /// # 错误
-    /// `.veil-meta` 无法读取或头部格式无效时返回错误。
+    /// `.veil-info` 无法读取或头部格式无效时返回错误。
     pub fn read_meta_header(&self) -> Result<MetaHeader, VeilError> {
-        let meta_path = self.veil_dir.join(".veil-meta");
+        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
         let bytes = fs::read(&meta_path).map_err(VeilError::Io)?;
         let header = MetaHeader::from_bytes(&bytes)?;
         self.verify_veil_id(&header.veil_id)?;
         Ok(header)
     }
 
-    /// 编码、加密并原子替换 `.veil-meta`。
+    /// 编码、加密并原子替换 `.veil-info`。
     ///
     /// # 错误
-    /// 头部或 JSON 序列化、内容加密、临时文件写入或重命名失败时返回错误。
+    /// 头部或 JSONC 序列化、内容加密、临时文件写入或重命名失败时返回错误。
     fn write_meta(
         &self,
         header: &MetaHeader,
@@ -226,20 +216,23 @@ impl VeilManager {
     ) -> Result<(), VeilError> {
         self.verify_veil_id(&header.veil_id)?;
         meta_data.primary_data_key()?;
-        let meta_path = self.veil_dir.join(".veil-meta");
+        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
 
         // 每次元数据提交都使用新的 nonce；同一密码保护密钥下不能重复使用
         // ChaCha20-Poly1305
         // nonce，否则会破坏元数据的机密性保证。
         let mut commit_header = header.clone();
         commit_header.nonce = generate_random_bytes::<12>();
+        // 名称查找和无密码重建链接读取明文头，名称、创建时间与正文同步。
+        commit_header.veil_name = meta_data.veil_name.clone();
+        commit_header.created_at = meta_data.created_at.clone();
         let header_bytes = commit_header.to_bytes()?;
 
-        let json_bytes = Zeroizing::new(meta_data.to_json()?);
+        let jsonc_bytes = Zeroizing::new(meta_data.to_jsonc()?);
         let encrypted =
-            encrypt_chacha20poly1305(master_key, json_bytes.as_slice(), &commit_header.nonce)?;
+            encrypt_chacha20poly1305(master_key, jsonc_bytes.as_slice(), &commit_header.nonce)?;
 
-        // .veil-meta 使用“明文 TLV 头部 + 密文 JSON”的连续布局。
+        // .veil-info 使用“明文 TLV 头部 + 密文 JSONC”的连续布局。
         let mut file_data = header_bytes;
         file_data.extend_from_slice(&encrypted);
 
@@ -347,7 +340,7 @@ impl VeilManager {
                 ));
             }
 
-            // 新密文的目录项必须先持久化，之后写出的 .veil-meta 才能安全引用它们。
+            // 新密文的目录项必须先持久化，之后写出的 .veil-info 才能安全引用它们。
             crate::fsutil::sync_directory(&self.veil_dir)?;
 
             for entry in &new_entries {
@@ -484,7 +477,7 @@ impl VeilManager {
     /// 只修改密码保护层，不重新加密文件内容。
     ///
     /// 数据主密钥保持不变，因此所有 `.enc` 文件无需改动；本方法只生成新的 salt、
-    /// 新密码派生密钥和新的元数据 nonce，并原子替换 `.veil-meta`。
+    /// 新密码派生密钥和新的元数据 nonce，并原子替换 `.veil-info`。
     pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), VeilError> {
         if new_password.is_empty() {
             return Err(VeilError::WorkError("新密码不能为空".to_string()));
@@ -595,7 +588,7 @@ impl VeilManager {
             AlgorithmId::ChaCha20Poly1305,
             old_header.veil_id.clone(),
             old_header.veil_name.clone(),
-            old_header.work_type.clone(),
+            old_header.created_at.clone(),
         );
         Ok((new_header, new_master_key))
     }
@@ -905,9 +898,7 @@ mod tests {
         let manager = VeilManager::new(veil_dir.clone());
         let password = "test-password";
 
-        manager
-            .init_veil("mixed-data-keys", "default", password)
-            .unwrap();
+        manager.init_veil("mixed-data-keys", password).unwrap();
         let first = temp_dir.path().join("first.txt");
         let second = temp_dir.path().join("second.txt");
         fs::write(&first, b"first").unwrap();

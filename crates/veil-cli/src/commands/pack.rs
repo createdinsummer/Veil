@@ -3,6 +3,7 @@
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
+use veil_core::metadata::VEIL_INFO_FILE;
 use veil_core::veil_package::VeilPacker;
 
 /// 将 Veil 元数据和所有加密文件封装为可分享的 `.veil` 文件。
@@ -34,10 +35,10 @@ pub fn run(veil_name: &str, output_path: Option<&str>, password: Option<String>)
     use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 先完成密码验证和清单读取，再读取 .veil-meta 的完整字节。
+    // 先完成密码验证和清单读取，再读取 .veil-info 的完整字节。
     let metadata = manager.read_meta(password)?;
 
-    let meta_path = manager.veil_dir.join(".veil-meta");
+    let meta_path = manager.veil_dir.join(VEIL_INFO_FILE);
     let meta_bytes = std::fs::read(&meta_path)?;
 
     // packer 只负责布局，不重新加密元数据或文件内容。

@@ -1,3 +1,4 @@
+// CLI 中英文文案；支持 JSONC 注释，消息键与占位符在各语言间保持一致。
 {
 
   "opening_veil": {
@@ -167,10 +168,6 @@
   "info.veil_dir": {
     "zh": "  Veil 目录: {path}",
     "en": "  Veil directory: {path}"
-  },
-  "info.work_type": {
-    "zh": "  工作区类型: {work_type}",
-    "en": "  Work type: {work_type}"
   },
   "info.created_at": {
     "zh": "  创建时间: {time}",
@@ -906,8 +903,8 @@
     "en": "Give this veil a dedicated work (requires --work-root)"
   },
   "help.init.portable": {
-    "zh": "强制将工作区放在链接文件所在的卷（不能与工作区选项同用）",
-    "en": "Force the work onto the link file's volume (cannot be combined with work options)"
+    "zh": "使用链接所在盘的固定配置和默认工作区（不能与工作区选项同用）",
+    "en": "Use the link volume's fixed config and default work (cannot be combined with work options)"
   },
   "help.veil": {
     "zh": "容器名称、veil_id 或 .veil-link 路径",
@@ -1147,7 +1144,7 @@
     "zh": "配置路径: {path}",
     "en": "Config path: {path}"
   },
-  "config.hints_level": {
+  "config.hint_level": {
     "zh": "提示级别: {level}",
     "en": "Hint level: {level}"
   },
@@ -1178,10 +1175,6 @@
   "config.veil_count": {
     "zh": "容器数量: {count}",
     "en": "Veils: {count}"
-  },
-  "config.volume_count": {
-    "zh": "已知磁盘卷: {count}",
-    "en": "Known volumes: {count}"
   },
   "config.link_count": {
     "zh": "已缓存链接: {count}",

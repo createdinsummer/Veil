@@ -69,6 +69,7 @@ PHASE_WORK="$RUN_ROOT/work"
 CASE_OUT="$RUN_ROOT/.case.out"
 CASE_ERR="$RUN_ROOT/.case.err"
 BLAKE3_HELPER_BIN=""
+JSONC_HELPER_BIN="$RUN_ROOT/jsonc-helper"
 
 log_line() {
     printf '%s\n' "$*"
@@ -183,11 +184,70 @@ file_mode() {
     stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
 }
 
+# 使用项目自己的 JSONC 解析器读取和修改测试夹具，避免按文本排版猜测字段位置。
+jsonc_tool() {
+    if [ ! -x "$JSONC_HELPER_BIN" ]; then
+        jsonc_core_rlib=$(ls -t "$PROJECT_ROOT"/target/debug/deps/libveil_core-*.rlib 2>/dev/null | head -n 1)
+        jsonc_serde_rlib=$(ls -t "$PROJECT_ROOT"/target/debug/deps/libserde_json-*.rlib 2>/dev/null | head -n 1)
+        [ -n "$jsonc_core_rlib" ] && [ -n "$jsonc_serde_rlib" ] || return 1
+        jsonc_helper_source="$RUN_ROOT/jsonc-helper.rs"
+        cat > "$jsonc_helper_source" <<'EOF'
+use serde_json::Value;
+use std::error::Error;
+use std::{env, fs, path::PathBuf};
+use veil_core::config::GlobalConfig;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 4 {
+        return Err("用法：jsonc-helper <get|set|work> <文件> <路径或工作区名> [值]".into());
+    }
+    let path = &args[2];
+    let mut document: Value = veil_core::jsonc::from_str(&fs::read_to_string(path)?)?;
+    match args[1].as_str() {
+        "get" => {
+            let value = document.pointer(&args[3]).ok_or("JSONC 字段不存在")?;
+            match value {
+                Value::String(value) => println!("{value}"),
+                _ => println!("{value}"),
+            }
+            return Ok(());
+        }
+        "resolve" => {
+            let link = veil_core::link::VeilLink::load(std::path::Path::new(path))?;
+            println!("{}", GlobalConfig::load()?.resolve_link_veil_dir(&link, std::path::Path::new(path))?.display());
+            return Ok(());
+        }
+        "set" => {
+            let value = args.get(4).ok_or("缺少字段的新值")?;
+            *document.pointer_mut(&args[3]).ok_or("JSONC 字段不存在")? = Value::String(value.clone());
+        }
+        "work" => {
+            let root = args.get(4).ok_or("缺少工作区根目录")?;
+            let mut config = GlobalConfig::load_from(std::path::Path::new(path))?;
+            config.register_custom_work(args[3].clone(), PathBuf::from(root), None)?;
+            document = serde_json::to_value(config)?;
+        }
+        _ => return Err("未知 JSONC 操作".into()),
+    }
+    fs::write(path, serde_json::to_vec_pretty(&document)?)?;
+    Ok(())
+}
+EOF
+        rustc --edition=2024 "$jsonc_helper_source" \
+            -L "dependency=$PROJECT_ROOT/target/debug/deps" \
+            --extern "veil_core=$jsonc_core_rlib" \
+            --extern "serde_json=$jsonc_serde_rlib" \
+            -o "$JSONC_HELPER_BIN" || return 1
+    fi
+    "$JSONC_HELPER_BIN" "$@"
+}
+
 binary_is_stale() {
     binary=$1
     [ -x "$binary" ] || return 0
     find "$PROJECT_ROOT/crates" "$PROJECT_ROOT/Cargo.toml" "$PROJECT_ROOT/Cargo.lock" \
-        -type f \( -name '*.rs' -o -name 'Cargo.toml' \) \
+        -type f \( -name '*.rs' -o -name '*.jsonc' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) \
         -newer "$binary" -print -quit 2>/dev/null | grep -q .
 }
 
@@ -885,7 +945,7 @@ run_init_section() {
     assert_file_exists "INIT-01-link" "core 链接存在" "$PHASE_WORK/core.veil-link"
     assert_file_exists "INIT-01-meta" "默认工作区包含元数据" \
         "$PHASE_HOME/.veil/works/default"
-    assert_file_exists "INIT-01-config" "全局配置已创建" "$PHASE_HOME/.veil/config.toml"
+    assert_file_exists "INIT-01-config" "全局配置已创建" "$PHASE_HOME/.veil/config.jsonc"
 
     run_case "INIT-02-empty-list" 0 "新建容器列表为空" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list core
@@ -926,13 +986,7 @@ run_init_section() {
 
     CUSTOM_ROOT="$RUN_ROOT/custom-work"
     mkdir -p "$CUSTOM_ROOT"
-    cat >> "$PHASE_HOME/.veil/config.toml" <<EOF
-
-[work.custom.lab]
-path = "$CUSTOM_ROOT"
-work_type = { Custom = "lab" }
-created_at = "2026-01-01T00:00:00+00:00"
-EOF
+    jsonc_tool work "$PHASE_HOME/.veil/config.jsonc" lab "$CUSTOM_ROOT" || return 1
     run_case "INIT-14-named" 0 "使用已注册的命名工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init named-custom \
         --work lab
@@ -942,7 +996,7 @@ EOF
     run_case "INIT-19-dedicated-empty" 0 "使用空目录作为专属工作区" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init dedicated \
         --work-root "$DEDICATED" --dedicated --link "$PHASE_WORK/dedicated.veil-link"
-    assert_file_exists "INIT-19-meta" "专属目录根下直接存在元数据" "$DEDICATED/.veil-meta"
+    assert_file_exists "INIT-19-meta" "专属工作区按 veil_id 保存容器元数据" "$(resolve_work_for_link "$PHASE_WORK/dedicated.veil-link")/.veil-info"
 
     NONEMPTY="$RUN_ROOT/dedicated-nonempty"
     mkdir -p "$NONEMPTY"
@@ -980,8 +1034,8 @@ EOF
     run_case "INIT-26-portable" 0 "显式便携布局" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init portable \
         --portable --link "$PORTABLE/portable.veil-link"
-    assert_file_exists "INIT-26-work" "便携工作区位于链接目录下" \
-        "$PORTABLE/.veil/works/default"
+    assert_file_exists "INIT-26-work" "本机便携选项使用固定默认工作区" \
+        "$PHASE_HOME/.veil/works/default"
 
     REL_ROOT="$RUN_ROOT/relative-work-parent"
     mkdir -p "$REL_ROOT"
@@ -1014,8 +1068,8 @@ EOF
         --link "$BLOCKER/nested.veil-link"
 
     printf '\n[权限] 初始化产物\n'
-    stat -f '%Sp %N' "$PHASE_WORK/core.veil-link" "$PHASE_HOME/.veil/config.toml" 2>/dev/null || \
-        stat -c '%A %n' "$PHASE_WORK/core.veil-link" "$PHASE_HOME/.veil/config.toml" 2>/dev/null || true
+    stat -f '%Sp %N' "$PHASE_WORK/core.veil-link" "$PHASE_HOME/.veil/config.jsonc" 2>/dev/null || \
+        stat -c '%A %n' "$PHASE_WORK/core.veil-link" "$PHASE_HOME/.veil/config.jsonc" 2>/dev/null || true
 }
 
 run_add_view_section() {
@@ -1149,8 +1203,7 @@ resolve_work_for_link() {
     if [ ! -f "$link" ]; then
         return 1
     fi
-    rel=$(awk -F'"' '/^path = / {print $2; exit}' "$link")
-    printf '/%s\n' "$rel"
+    jsonc_tool resolve "$link" ''
 }
 
 run_persistence_artifact_section() {
@@ -1169,46 +1222,40 @@ run_persistence_artifact_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" init artifact-check
 
     ARTIFACT_LINK="$PHASE_WORK/artifact-check.veil-link"
-    ARTIFACT_CONFIG="$PHASE_HOME/.veil/config.toml"
+    ARTIFACT_CONFIG="$PHASE_HOME/.veil/config.jsonc"
     ARTIFACT_WS=$(resolve_work_for_link "$ARTIFACT_LINK")
-    ARTIFACT_META="$ARTIFACT_WS/.veil-meta"
+    ARTIFACT_META="$ARTIFACT_WS/.veil-info"
     LINK_HASH_BEFORE=$(hash_file "$ARTIFACT_LINK")
 
     assert_file_exists "CONF-01" "全局配置存在" "$ARTIFACT_CONFIG"
     assert_file_exists "CONF-01-link" "链接文件存在" "$ARTIFACT_LINK"
     assert_file_exists "CONF-01-meta" "元数据文件存在" "$ARTIFACT_META"
-    assert_contains "CONF-01-version" "配置包含版本" "version =" "$ARTIFACT_CONFIG"
-    assert_contains "CONF-02-veil" "配置包含容器记录" "[veils." "$ARTIFACT_CONFIG"
-    assert_contains "CONF-02-id" "容器记录包含稳定 ID" "veil_id =" "$ARTIFACT_CONFIG"
-    assert_contains "CONF-03-volume" "配置包含卷记录" "[volumes." "$ARTIFACT_CONFIG"
-    assert_contains "CONF-04-link-record" "配置包含链接缓存记录" "raw_hex =" "$ARTIFACT_CONFIG"
-    assert_contains "CONF-04-hash" "配置包含链接内容哈希" "content_hash =" "$ARTIFACT_CONFIG"
+    assert_contains "CONF-01-version" "配置包含版本" '"version":' "$ARTIFACT_CONFIG"
+    assert_contains "CONF-02-veil" "配置包含容器记录" '"veils":' "$ARTIFACT_CONFIG"
+    assert_contains "CONF-02-id" "容器记录包含稳定 ID" '"veil_id":' "$ARTIFACT_CONFIG"
+    assert_not_contains "CONF-03-volume" "配置不保存卷记录" '"volumes":' "$ARTIFACT_CONFIG"
+    assert_contains "CONF-04-link-record" "配置包含独立链接正文" '"link":' "$ARTIFACT_CONFIG"
 
-    LINK_ID=$(awk -F'"' '/^veil_id = / { print $2; exit }' "$ARTIFACT_LINK")
-    LINK_NAME=$(awk -F'"' '/^veil_name = / { print $2; exit }' "$ARTIFACT_LINK")
-    LINK_PATH=$(awk -F'"' '/^path = / { print $2; exit }' "$ARTIFACT_LINK")
+    LINK_ID=$(jsonc_tool get "$ARTIFACT_LINK" /veil/veil_id)
+    LINK_NAME=$(jsonc_tool get "$ARTIFACT_LINK" /veil/veil_name)
     META_STRINGS="$RUN_ROOT/cases/CONF-09-meta-strings.txt"
     strings "$ARTIFACT_META" > "$META_STRINGS"
     META_ID=$(grep -Eo 'veil-[0-9a-f]+' "$META_STRINGS" | head -n 1)
     assert_values_equal "CONF-09-id" "链接与元数据稳定 ID 一致" "$LINK_ID" "$META_ID"
     assert_contains "CONF-09-name" "元数据明文头包含容器名称" "$LINK_NAME" "$META_STRINGS"
-    assert_contains "CONF-09-type" "元数据明文头包含工作区类型" "default" "$META_STRINGS"
-    assert_contains "CONF-07-version" "链接包含版本号" "version = \"1.0\"" "$ARTIFACT_LINK"
-    assert_contains "CONF-07-algorithm" "链接包含加密算法" "ChaCha20-Poly1305" "$ARTIFACT_LINK"
-    assert_contains "CONF-07-kdf" "链接包含 KDF" "Argon2id" "$ARTIFACT_LINK"
+    assert_contains "CONF-09-created-at" "元数据明文头保留容器创建时间" \
+        "$(jsonc_tool get "$ARTIFACT_LINK" /veil/created_at)" "$META_STRINGS"
+    assert_values_equal "CONF-07-version" "链接包含版本号" "1.0" "$(jsonc_tool get "$ARTIFACT_LINK" /version)"
+    assert_not_contains "CONF-07-no-work" "链接不保存工作区" '"work":' "$ARTIFACT_LINK"
+    assert_not_contains "CONF-07-no-work-id" "配置不保存工作区 ID" '"work_id":' "$ARTIFACT_CONFIG"
+    assert_values_equal "CONF-04-link-body" "链接缓存复用完整链接正文" \
+        "$(jsonc_tool get "$ARTIFACT_LINK" '')" "$(jsonc_tool get "$ARTIFACT_CONFIG" /links/0/link)"
+    assert_not_contains "CONF-07-no-encryption" "链接不包含加密方案字段" '"encryption":' "$ARTIFACT_LINK"
+    assert_not_contains "CONF-07-no-metadata" "链接不包含展示元数据字段" '"metadata":' "$ARTIFACT_LINK"
     assert_not_contains "CONF-08-secret" "链接不包含明文密码或内容标记" "$ARTIFACT_SECRET" "$ARTIFACT_LINK"
 
-    case "$LINK_PATH" in
-        /*)
-            printf '[断言失败] %-10s 链接保存了绝对工作区路径（%s）\n' "CONF-08-relative" "$LINK_PATH"
-            CHECK_COUNT=$((CHECK_COUNT + 1))
-            ASSERT_FAIL_COUNT=$((ASSERT_FAIL_COUNT + 1))
-            ;;
-        *)
-            printf '[断言通过] %-10s 链接使用相对卷路径（%s）\n' "CONF-08-relative" "$LINK_PATH"
-            CHECK_COUNT=$((CHECK_COUNT + 1))
-            ;;
-    esac
+    assert_values_equal "CONF-08-relative" "默认工作区相对于配置目录" \
+        "works/default" "$(jsonc_tool get "$ARTIFACT_CONFIG" /work/default/path)"
 
     printf 'VEILMETA' > "$RUN_ROOT/expected-meta-magic.bin"
     dd if="$ARTIFACT_META" of="$RUN_ROOT/actual-meta-magic.bin" bs=1 count=8 2>/dev/null
@@ -1246,7 +1293,7 @@ run_persistence_artifact_section() {
         }
     ')
     printf '%s\n' "$META_TLV_FIELDS" > "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
-    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=4" \
+    assert_contains "CONF-09-version" "元数据 TLV 版本号可解析" "version=6" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
     assert_contains "CONF-09-algorithm" "元数据 TLV 算法标识正确" "algorithm=2" \
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
@@ -1256,24 +1303,10 @@ run_persistence_artifact_section() {
         "$RUN_ROOT/cases/CONF-09-tlv-fields.txt"
     assert_not_contains "CONF-10-meta-secret" "元数据不包含明文内容标记" "$ARTIFACT_SECRET" "$ARTIFACT_META"
 
-    RAW_HEX=$(awk -F'"' '/^raw_hex = / { print $2; exit }' "$ARTIFACT_CONFIG")
-    if [ -n "$RAW_HEX" ] && command -v xxd >/dev/null 2>&1; then
-        printf '%s' "$RAW_HEX" | xxd -r -p > "$RUN_ROOT/decoded-link.bin"
-        assert_file_equals "CONF-05-raw-hex" "配置 raw_hex 解码后与原链接逐字节一致" \
-            "$RUN_ROOT/decoded-link.bin" "$ARTIFACT_LINK"
-    else
-        printf '[断言失败] %-10s 无法验证 raw_hex：缓存为空或缺少 xxd\n' "CONF-05-raw-hex"
-        CHECK_COUNT=$((CHECK_COUNT + 1))
-        ASSERT_FAIL_COUNT=$((ASSERT_FAIL_COUNT + 1))
-    fi
-
-    CONFIG_HASH=$(awk -F'"' '/^content_hash = / { print $2; exit }' "$ARTIFACT_CONFIG")
-    ACTUAL_B3=$(blake3_hex "$ARTIFACT_LINK" 2>/dev/null || true)
-    if [ -n "$ACTUAL_B3" ]; then
-        assert_values_equal "CONF-06-blake3" "配置 content_hash 与链接 BLAKE3 一致" "$CONFIG_HASH" "$ACTUAL_B3"
-    else
-        skip_case "CONF-06" "无法构建或找到 BLAKE3 重算工具"
-    fi
+    assert_values_equal "CONF-05-link-body" "配置链接正文与链接文件全部字段值一致" \
+        "$(jsonc_tool get "$ARTIFACT_CONFIG" /links/0/link)" "$(jsonc_tool get "$ARTIFACT_LINK" '')"
+    assert_not_contains "CONF-06-no-raw" "配置不保存链接原始字节" '"raw_hex":' "$ARTIFACT_CONFIG"
+    assert_not_contains "CONF-06-no-hash" "配置不保存链接内容哈希" '"content_hash":' "$ARTIFACT_CONFIG"
 
     assert_private_mode "CONF-15-config-mode" "全局配置仅当前用户可读写" "$ARTIFACT_CONFIG"
     assert_private_mode "CONF-15-link-mode" "链接文件仅当前用户可读写" "$ARTIFACT_LINK"
@@ -1382,14 +1415,14 @@ run_persistence_artifact_section() {
     assert_values_equal "CONF-11-link-hash" "文件操作不改变链接哈希" "$LINK_HASH_BEFORE" "$CURRENT_LINK_HASH"
 
     META_HASH_BEFORE_ROTATE=$(hash_file "$ARTIFACT_META")
-    CONFIG_ID_BEFORE_ROTATE=$(awk -F'"' '/^veil_id = / { print $2; exit }' "$ARTIFACT_CONFIG")
+    CONFIG_ID_BEFORE_ROTATE=$(jsonc_tool get "$ARTIFACT_CONFIG" "/veils/$LINK_ID/veil_id")
     run_case "CONF-12-rotate" 0 "修改密码以检查三个文件变化" \
         env VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=2 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" passwd artifact-check
     assert_values_not_equal "CONF-12-meta-change" "改密后元数据字节发生变化" \
         "$META_HASH_BEFORE_ROTATE" "$(hash_file "$ARTIFACT_META")"
     assert_values_equal "CONF-12-link-stable" "改密后链接字节保持不变" \
         "$CURRENT_LINK_HASH" "$(hash_file "$ARTIFACT_LINK")"
-    CONFIG_ID_AFTER_ROTATE=$(awk -F'"' '/^veil_id = / { print $2; exit }' "$ARTIFACT_CONFIG")
+    CONFIG_ID_AFTER_ROTATE=$(jsonc_tool get "$ARTIFACT_CONFIG" "/veils/$LINK_ID/veil_id")
     assert_values_equal "CONF-12-id-stable" "改密后配置稳定 ID 保持不变" \
         "$CONFIG_ID_BEFORE_ROTATE" "$CONFIG_ID_AFTER_ROTATE"
     run_case "CONF-12-old-fails" 1 "改密后旧密码不能读取" \
@@ -1470,7 +1503,7 @@ run_mutation_operations_section() {
 
     run_case "PWD-16-no-leak" 0 "改密时密码不出现在输出中" \
         env VEIL_PASSWORD=1 VEIL_NEW_PASSWORD=secret-rotate-value VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" passwd mutate
-    if grep -Fq 'secret-rotate-value' "$RUN_ROOT/cases/PWD-16-no-leak.stdout" "$RUN_ROOT/cases/PWD-16-no-leak.stderr" "$PHASE_HOME/.veil/config.toml"; then
+    if grep -Fq 'secret-rotate-value' "$RUN_ROOT/cases/PWD-16-no-leak.stdout" "$RUN_ROOT/cases/PWD-16-no-leak.stderr" "$PHASE_HOME/.veil/config.jsonc"; then
         printf '[断言失败] PWD-16 密码泄露到可观察输出或配置中\n'
         ASSERT_FAIL_COUNT=$((ASSERT_FAIL_COUNT + 1))
     else
@@ -1632,7 +1665,7 @@ run_config_link_section() {
 
     run_case "CFG-01" 0 "无配置文件的配置查看" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" config
-    assert_file_missing "CFG-01-no-side-effect" "查看配置不应创建配置文件" "$PHASE_HOME/.veil/config.toml"
+    assert_file_missing "CFG-01-no-side-effect" "查看配置不应创建配置文件" "$PHASE_HOME/.veil/config.jsonc"
     run_case "CFG-02" 0 "显式 config show" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" config show
     run_case "CFG-05-full" 0 "设置完整提示级别" \
@@ -1661,27 +1694,27 @@ run_config_link_section() {
 
     cp "$PHASE_WORK/second.veil-link" "$RUN_ROOT/link-original.veil-link"
     rm "$PHASE_WORK/second.veil-link"
-    run_case "RES-13-restore" 0 "从缓存字节恢复已删除链接" \
+    run_case "RES-13-restore" 0 "从缓存正文重新生成已删除链接" \
         env VEIL_PASSWORD=1 VEIL_HINTS=brief VEIL_TEST_KDF=fast "$DEBUG_BIN" list second.veil-link
-    assert_file_equals "RES-13-bytes" "恢复后的链接与原字节一致" \
-        "$PHASE_WORK/second.veil-link" "$RUN_ROOT/link-original.veil-link"
+    assert_values_equal "RES-13-body" "重建后的链接与原正文全部字段值一致" \
+        "$(jsonc_tool get "$PHASE_WORK/second.veil-link" '')" \
+        "$(jsonc_tool get "$RUN_ROOT/link-original.veil-link" '')"
 
-    cp "$PHASE_HOME/.veil/config.toml" "$RUN_ROOT/config-before-corruption.toml"
-    sed 's/raw_hex = "[0-9a-f][0-9a-f]/raw_hex = "zz/' "$RUN_ROOT/config-before-corruption.toml" > "$RUN_ROOT/config-bad-hex.toml"
-    cp "$RUN_ROOT/config-bad-hex.toml" "$PHASE_HOME/.veil/config.toml"
+    cp "$PHASE_HOME/.veil/config.jsonc" "$RUN_ROOT/config-before-corruption.jsonc"
+    jsonc_tool set "$PHASE_HOME/.veil/config.jsonc" /links/1/link/veil/veil_id ../outside || return 1
     rm -f "$PHASE_WORK/second.veil-link"
-    run_case "RES-15-bad-hex" 1 "拒绝损坏的链接缓存十六进制" \
+    run_case "RES-15-unsafe-path" 1 "拒绝缓存正文中的非法容器 ID" \
         env VEIL_PASSWORD=1 VEIL_HINTS=brief VEIL_TEST_KDF=fast "$DEBUG_BIN" list second.veil-link
-    cp "$RUN_ROOT/config-before-corruption.toml" "$PHASE_HOME/.veil/config.toml"
+    assert_true "RES-15-no-file" "无效路径不会写出链接文件" test ! -e "$PHASE_WORK/second.veil-link"
+    cp "$RUN_ROOT/config-before-corruption.jsonc" "$PHASE_HOME/.veil/config.jsonc"
 
-    cp "$PHASE_HOME/.veil/config.toml" "$RUN_ROOT/config-before-hash.toml"
-    sed 's/^content_hash = ".*"/content_hash = "0000000000000000000000000000000000000000000000000000000000000000"/' \
-        "$RUN_ROOT/config-before-hash.toml" > "$RUN_ROOT/config-bad-hash.toml"
-    cp "$RUN_ROOT/config-bad-hash.toml" "$PHASE_HOME/.veil/config.toml"
+    cp "$PHASE_HOME/.veil/config.jsonc" "$RUN_ROOT/config-before-invalid-id.jsonc"
+    jsonc_tool set "$PHASE_HOME/.veil/config.jsonc" /links/1/link/veil/veil_id '' || return 1
     rm -f "$PHASE_WORK/second.veil-link"
-    run_case "RES-14-bad-hash" 1 "拒绝链接缓存哈希不匹配" \
+    run_case "RES-14-empty-id" 1 "拒绝缓存正文中的空容器 ID" \
         env VEIL_PASSWORD=1 VEIL_HINTS=brief VEIL_TEST_KDF=fast "$DEBUG_BIN" list second.veil-link
-    cp "$RUN_ROOT/config-before-hash.toml" "$PHASE_HOME/.veil/config.toml"
+    assert_true "RES-14-no-file" "空容器 ID 不会写出链接文件" test ! -e "$PHASE_WORK/second.veil-link"
+    cp "$RUN_ROOT/config-before-invalid-id.jsonc" "$PHASE_HOME/.veil/config.jsonc"
     run_case "RES-13-restore-again" 0 "修复配置后恢复链接" \
         env VEIL_PASSWORD=1 VEIL_HINTS=brief VEIL_TEST_KDF=fast "$DEBUG_BIN" list second.veil-link
 
@@ -1702,29 +1735,29 @@ run_config_link_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/custom-package.veil"
 
     run_case "RES-28-invalid-link" 1 "拒绝格式损坏的链接" \
-        sh -c "printf 'not toml\\n' > '$PHASE_WORK/broken.veil-link'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/broken.veil-link'"
+        sh -c "printf 'not jsonc\\n' > '$PHASE_WORK/broken.veil-link'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/broken.veil-link'"
 
-    cp "$PHASE_WORK/linked.veil-link" "$RUN_ROOT/link-absolute-source.veil-link"
+    cp "$PHASE_WORK/linked.veil-link" "$PHASE_WORK/absolute.veil-link"
     ws=$(resolve_work_for_link "$PHASE_WORK/linked.veil-link")
-    sed "s#^path = .*#path = \"$ws\"#" "$RUN_ROOT/link-absolute-source.veil-link" > "$PHASE_WORK/absolute.veil-link"
-    run_case "RES-29-absolute-link-path" 1 "链接中的绝对工作区路径应被拒绝或限制" \
+    jsonc_tool set "$PHASE_WORK/absolute.veil-link" /veil/veil_id veil-missing || return 1
+    run_case "RES-29-absolute-link-path" 1 "链接中的未知容器 ID 不按名称回退" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$PHASE_WORK/absolute.veil-link"
 
-    cp "$PHASE_HOME/.veil/config.toml" "$RUN_ROOT/config-good.toml"
-    printf 'this is not valid = toml = at all\n' > "$PHASE_HOME/.veil/config.toml"
+    cp "$PHASE_HOME/.veil/config.jsonc" "$RUN_ROOT/config-good.jsonc"
+    printf 'this is not valid JSONC\n' > "$PHASE_HOME/.veil/config.jsonc"
     run_case "CFG-10-corrupt" 1 "拒绝损坏的配置文件" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" config show
-    cp "$RUN_ROOT/config-good.toml" "$PHASE_HOME/.veil/config.toml"
+    cp "$RUN_ROOT/config-good.jsonc" "$PHASE_HOME/.veil/config.jsonc"
 
     printf '\n[配置] 最终配置:\n'
-    sed -n '1,260p' "$PHASE_HOME/.veil/config.toml"
+    sed -n '1,260p' "$PHASE_HOME/.veil/config.jsonc"
 
     if [ "$RUN_STRESS" -eq 1 ]; then
         run_pair "CFG-17-parallel" "并发写入提示级别配置" \
             "VEIL_HINTS= VEIL_TEST_KDF=fast '$DEBUG_BIN' config --hints full" \
             "VEIL_HINTS= VEIL_TEST_KDF=fast '$DEBUG_BIN' config --hints off"
         printf '[观察] 并发写入后的配置尾部:\n'
-        tail -n 40 "$PHASE_HOME/.veil/config.toml"
+        tail -n 40 "$PHASE_HOME/.veil/config.jsonc"
     else
         skip_case "CFG-17" "并发测试未启用"
     fi
@@ -1778,7 +1811,7 @@ run_corruption_section() {
     run_case "DATA-add-good" 0 "添加正常文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add corrupt "$FIXTURES/hello.txt" good.txt
     WS=$(resolve_work_for_link "$PHASE_WORK/corrupt.veil-link")
-    meta="$WS/.veil-meta"
+    meta="$WS/.veil-info"
     cp "$meta" "$RUN_ROOT/meta-good.bin"
     meta_before=$(hash_file "$meta")
 
@@ -1818,10 +1851,24 @@ run_corruption_section() {
     run_case "DATA-16-missing-cipher" 1 "密文缺失时导出失败" \
         sh -c "cp '$first_enc' '$RUN_ROOT/enc-backup.bin'; rm '$first_enc'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' ex corrupt good.txt '$RUN_ROOT/missing-cipher-export.bin'; rc=\$?; mv '$RUN_ROOT/enc-backup.bin' '$first_enc'; exit \$rc"
 
-    run_case "REC-10-lost-config" 0 "配置丢失后通过显式链接访问" \
-        sh -c "mv '$PHASE_HOME/.veil/config.toml' '$RUN_ROOT/config-lost.toml'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/corrupt.veil-link'; rc=\$?; mv '$RUN_ROOT/config-lost.toml' '$PHASE_HOME/.veil/config.toml'; exit \$rc"
+    run_case "REC-10-lost-config" 1 "配置丢失且无已登记工作区时报告未找到" \
+        sh -c "mv '$PHASE_HOME/.veil/config.jsonc' '$RUN_ROOT/config-lost.jsonc'; VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' list '$PHASE_WORK/corrupt.veil-link'; rc=\$?; mv '$RUN_ROOT/config-lost.jsonc' '$PHASE_HOME/.veil/config.jsonc'; exit \$rc"
     run_case "REC-11-header-link" 0 "根据工作区元数据头重建链接" \
-        sh -c "cp -R '$WS' '$RUN_ROOT/detached-work'; mv '$RUN_ROOT/detached-work' '$RUN_ROOT/detached-work-renamed'; HOME='$REC_11_HOME' VEIL_HINTS=off VEIL_TEST_KDF=fast '$DEBUG_BIN' link '$RUN_ROOT/detached-work-renamed' --output '$RUN_ROOT/detached.veil-link'"
+        sh -c '
+            source=$1
+            original=$2
+            renamed=$3
+            recovery_home=$4
+            binary=$5
+            output=$6
+            veil_id=$(basename "$source")
+            mkdir -p "$original"
+            cp -R "$source" "$original/$veil_id"
+            mv "$original" "$renamed"
+            env HOME="$recovery_home" VEIL_HINTS=off VEIL_TEST_KDF=fast \
+                "$binary" link "$renamed/$veil_id" --output "$output"
+        ' sh "$WS" "$RUN_ROOT/detached-work" "$RUN_ROOT/detached-work-renamed" \
+            "$REC_11_HOME" "$DEBUG_BIN" "$RUN_ROOT/detached.veil-link"
     run_case "REC-11-open" 0 "打开重建的脱离工作区链接" \
         env HOME="$REC_11_HOME" VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" list "$RUN_ROOT/detached.veil-link"
 }
@@ -1930,7 +1977,8 @@ run_external_section() {
         env VEIL_PASSWORD=1 VEIL_HINTS=full VEIL_TEST_KDF=fast "$DEBUG_BIN" init external \
         --link "$EXT/external.veil-link"
     assert_file_exists "INIT-27-link" "外置卷链接存在" "$EXT/external.veil-link"
-    assert_file_exists "INIT-27-portable" "外置卷隐藏工作区存在" "$EXT/.veil/works/default"
+    EXTERNAL_WS=$(resolve_work_for_link "$EXT/external.veil-link")
+    assert_file_exists "INIT-27-portable" "外置卷默认工作区存在" "$EXTERNAL_WS"
 
     run_case "E2E-07-add" 0 "在外置卷添加文件" \
         env VEIL_PASSWORD=1 VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" add "$EXT/external.veil-link" \
@@ -1946,7 +1994,7 @@ run_external_section() {
     run_case "RES-27-local-pointer" 0 "创建本地卷上的外置工作区链接" \
         env VEIL_HINTS=off VEIL_TEST_KDF=fast "$DEBUG_BIN" link "$EXT/external.veil-link" \
         --output "$RUN_ROOT/external-local-pointer.veil-link"
-    EXTERNAL_WS=$(find "$EXT/.veil/works/default" -maxdepth 1 -type d -name 'veil-*' | head -n 1)
+    EXTERNAL_WS=$(resolve_work_for_link "$EXT/external.veil-link")
     EXTERNAL_LINK_HASH_BEFORE=$(hash_file "$RUN_ROOT/external-local-pointer.veil-link")
     EXTERNAL_ENC_BEFORE=$(count_enc_files "$EXTERNAL_WS")
 
@@ -2009,7 +2057,7 @@ run_external_section() {
                 "$EXPECTED_EXTERNAL_ENC" "$(count_enc_files "$EXTERNAL_WS")"
             assert_values_equal "EXTC-07-link-hash" "多轮断连重连后链接哈希保持不变" \
                 "$EXTERNAL_LINK_HASH_BEFORE" "$(hash_file "$RUN_ROOT/external-local-pointer.veil-link")"
-            if ACTUAL_EXTERNAL_B3=$(blake3_hex "$EXTERNAL_WS/.veil-meta" 2>/dev/null); then
+            if ACTUAL_EXTERNAL_B3=$(blake3_hex "$EXTERNAL_WS/.veil-info" 2>/dev/null); then
                 assert_true "EXTC-07-b3sum" "重连后元数据 BLAKE3 可重新计算" \
                     test -n "$ACTUAL_EXTERNAL_B3"
             else
@@ -2022,7 +2070,7 @@ run_external_section() {
 
     printf '\n[观察] 外置测试目录会在最终清理阶段删除。\n'
     if [ "$KEEP_DATA" -eq 0 ]; then
-        rm -rf "$EXT"
+        rm -rf "$EXTERNAL_WS" "$EXT"
     fi
 }
 
@@ -2183,6 +2231,12 @@ main() {
     prepare_fixtures
     prompt_optional_areas
     ensure_binaries
+
+    printf '// JSONC 解析器检查\n{"ready": true,}\n' > "$RUN_ROOT/jsonc-helper-check.jsonc"
+    if ! jsonc_tool get "$RUN_ROOT/jsonc-helper-check.jsonc" /ready >/dev/null; then
+        printf '无法构建或运行 JSONC 测试辅助程序。\n' >&2
+        return 1
+    fi
 
     run_global_help_section "debug" "$DEBUG_BIN"
     run_init_section

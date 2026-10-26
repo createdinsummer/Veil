@@ -11,12 +11,12 @@ use veil_core::veil_package::{VEIL_PACKAGE_MAGIC, VeilPacker, VeilUnpacker};
 fn package_fixture(temp: &TempDir) -> PathBuf {
     veil_core::kdf::enable_fast_test_kdf();
     let manager = VeilManager::new(temp.path().join("work"));
-    manager.init_veil("test", "default", "1").unwrap();
+    manager.init_veil("test", "1").unwrap();
     let source = temp.path().join("secret.txt");
     fs::write(&source, b"package content").unwrap();
     manager.add_file(&source, "1").unwrap();
     let metadata = manager.read_meta("1").unwrap();
-    let bytes = fs::read(manager.veil_dir.join(".veil-meta")).unwrap();
+    let bytes = fs::read(manager.veil_dir.join(".veil-info")).unwrap();
     let package = temp.path().join("test.veil");
     VeilPacker::new(&package)
         .pack(&manager.veil_dir, &metadata, &bytes)

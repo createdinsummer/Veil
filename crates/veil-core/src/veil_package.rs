@@ -14,7 +14,7 @@
 //!   file_count: u32 (4 bytes)
 //!
 //! [Metadata Section]
-//!   完整 .veil-meta 字节（明文 TLV 头部 + 加密 JSON）
+//!   完整 .veil-info 字节（明文 TLV 头部 + 加密 JSONC）
 //!
 //! [File Data Section]
 //!   [File 1 Header]
@@ -29,7 +29,7 @@
 
 use crate::error::VeilError;
 use crate::kdf;
-use crate::metadata::{AlgorithmId, MetaData, MetaHeader};
+use crate::metadata::{AlgorithmId, MetaData, MetaHeader, VEIL_INFO_FILE};
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{
     ChaCha20Poly1305,
@@ -177,7 +177,7 @@ impl VeilPasswordVerifier {
                     VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
                 })?,
         );
-        MetaData::from_json(decrypted.as_slice())
+        MetaData::from_jsonc(decrypted.as_slice())
     }
 }
 
@@ -269,9 +269,9 @@ impl VeilPacker {
     /// 元数据长度与文件数量的头部。
     ///
     /// # 参数
-    /// - `veil_dir`：包含 `.veil-meta` 和 `.enc` 文件的 Veil 目录。
+    /// - `veil_dir`：包含 `.veil-info` 和 `.enc` 文件的 Veil 目录。
     /// - `metadata`：解密后的清单，用于确定文件顺序和原始名称。
-    /// - `encrypted_metadata`：Veil 的 `.veil-meta` 完整字节，包含明文头。
+    /// - `encrypted_metadata`：Veil 的 `.veil-info` 完整字节，包含明文头。
     ///
     /// # 错误
     /// 输出文件创建、条目读取、写入或头部回填失败时返回 I/O 错误。
@@ -282,7 +282,7 @@ impl VeilPacker {
         encrypted_metadata: &[u8],
     ) -> Result<(), VeilError> {
         let veil_dir = veil_dir.as_ref();
-        let current_metadata = std::fs::read(veil_dir.join(".veil-meta"))?;
+        let current_metadata = std::fs::read(veil_dir.join(VEIL_INFO_FILE))?;
         if current_metadata != encrypted_metadata {
             return Err(VeilError::WorkError(
                 "元数据在打包前发生变化，请重新执行打包".to_string(),
@@ -393,7 +393,7 @@ impl VeilUnpacker {
     /// 将打包文件中的加密条目写入 `veil_dir`。
     ///
     /// 条目以元数据中的原始名称落盘，调用方随后需依据解密后的清单将其重命名为
-    /// 加密文件名。方法最后返回 `.veil-meta` 的完整字节。
+    /// 加密文件名。方法最后返回 `.veil-info` 的完整字节。
     ///
     /// # 错误
     /// 目录创建、条目解析、内容读取或文件写入失败时返回错误。

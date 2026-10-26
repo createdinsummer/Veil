@@ -41,7 +41,6 @@ pub enum ErrorCode {
     InitInvalidLinkName = 5004,
     InitInvalidVeilName = 5005,
     InitInvalidLinkExtension = 5006,
-    InitWorkNotFound = 5007,
     InitVeilExists = 5008,
     InitDedicatedPathNotEmpty = 5009,
     InitLinkRegistrationFailed = 5010,
@@ -55,7 +54,6 @@ pub enum ErrorCode {
     PackOutputExists = 7002,
     UnpackVeilNotFound = 7003,
     UnpackNameExtractFailed = 7004,
-    UnpackWorkNotFound = 7005,
     UnpackMissingVeilId = 7006,
     UnpackDirectoryExists = 7007,
     UnpackInvalidLinkExtension = 7010,
@@ -186,9 +184,6 @@ impl ErrorCode {
                 "init.invalid_link_extension",
                 1,
             ),
-            Self::InitWorkNotFound => {
-                Self::define(value, "INIT_WORKSPACE_NOT_FOUND", "init.work_not_found", 1)
-            }
             Self::InitVeilExists => Self::define(value, "INIT_CONTAINER_EXISTS", "init.exists", 1),
             Self::InitDedicatedPathNotEmpty => Self::define(
                 value,
@@ -233,12 +228,6 @@ impl ErrorCode {
                 value,
                 "UNPACK_NAME_EXTRACT_FAILED",
                 "unpack.name_extract_failed",
-                1,
-            ),
-            Self::UnpackWorkNotFound => Self::define(
-                value,
-                "UNPACK_WORKSPACE_NOT_FOUND",
-                "unpack.work_not_found",
                 1,
             ),
             Self::UnpackMissingVeilId => {

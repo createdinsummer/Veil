@@ -1,56 +1,73 @@
-//! 磁盘卷识别与稳定标识。
-//!
-//! `.veil-link` 根据卷 ID 判断目标工作区是否仍位于同一设备，因此这里需要把路径
-//! 归一化为卷根，并生成跨进程稳定的卷描述。Unix 使用设备号，Windows 使用盘符；
-//! `is_external` 只用于判断工作区是否可移动，不参与加密身份。
+//! 运行时枚举挂载卷、识别路径所属卷；卷信息不写入配置或链接。
 
 use crate::error::VeilError;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// 路径所在磁盘卷的可持久化描述。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// 当前挂载卷的运行时描述。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeInfo {
-    /// 平台相关的稳定卷 ID。
-    pub volume_id: String,
-    /// 用于展示和恢复提示的卷名称。
-    pub volume_label: String,
-    /// 当前系统上的卷根路径。
-    pub mount_path: PathBuf,
-    /// 是否被识别为外部或可移动卷。
-    pub is_external: bool,
+    pub volume_name: String,
+    pub root_path: PathBuf,
+    pub if_out_volume: bool,
 }
 
-/// 识别给定路径所在的磁盘卷。
-///
-/// 路径不存在时先向上寻找最近的已存在祖先，因此可在目标目录创建前完成卷探测。
-///
-/// # 错误
-/// 路径无法解析、最近祖先不存在，或平台卷信息读取失败时返回错误。
+/// 枚举实际挂载的外部卷，不扫描普通目录，也不创建任何配置。
+pub fn mounted_volumes() -> Result<Vec<VolumeInfo>, VeilError> {
+    Ok(mount_roots()?
+        .into_iter()
+        .filter(|root| is_external_mount(root))
+        .map(|root_path| VolumeInfo {
+            volume_name: root_path
+                .file_name()
+                .unwrap_or(root_path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            root_path,
+            if_out_volume: true,
+        })
+        .collect())
+}
+
+/// 选择最长匹配的挂载点，支持嵌套挂载和同设备的绑定挂载。
 pub fn volume_for_path(path: &Path) -> Result<VolumeInfo, VeilError> {
     let probe = nearest_existing_path(path)?;
-    volume_for_existing_path(&probe)
+    let root_path = mount_roots()?
+        .into_iter()
+        .filter(|root| probe.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .ok_or_else(|| VeilError::ConfigError(format!("无法识别路径所属卷: {}", path.display())))?;
+    Ok(VolumeInfo {
+        volume_name: root_path
+            .file_name()
+            .unwrap_or(root_path.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
+        if_out_volume: is_external_mount(&root_path),
+        root_path,
+    })
 }
 
-/// 返回路径自身或其最近的已存在祖先。
-///
-/// 相对路径先基于当前工作目录展开；找到路径后会尝试 canonicalize，规范化失败时
-/// 保留原路径。
-///
-/// # 错误
-/// 当前目录不可访问，或向上遍历到文件系统根后仍不存在可用路径时返回错误。
+/// 路径尚未创建时，用最近的已存在祖先识别所在卷。
 pub fn nearest_existing_path(path: &Path) -> Result<PathBuf, VeilError> {
-    // 相对路径先固定到当前工作目录，后续才能可靠地逐级 pop。
-    let mut current = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-
+    let mut current = std::path::absolute(path)?;
     loop {
-        // 第一个存在路径即可用于探测卷，创建目标目录前也可安全调用。
-        if current.exists() {
-            return Ok(std::fs::canonicalize(&current).unwrap_or(current));
+        match std::fs::canonicalize(&current) {
+            Ok(path) => {
+                #[cfg(windows)]
+                if let Some(std::path::Component::Prefix(prefix)) = path.components().next()
+                    && let std::path::Prefix::VerbatimDisk(letter) = prefix.kind()
+                {
+                    let mut normalized =
+                        PathBuf::from(format!("{}:\\", (letter as char).to_ascii_uppercase()));
+                    for part in path.components().skip(2) {
+                        normalized.push(part.as_os_str());
+                    }
+                    return Ok(normalized);
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         if !current.pop() {
             return Err(VeilError::ConfigError(format!(
@@ -61,95 +78,124 @@ pub fn nearest_existing_path(path: &Path) -> Result<PathBuf, VeilError> {
     }
 }
 
-#[cfg(unix)]
-/// 在 Unix 上按设备号识别卷，并将挂载路径归约到同一设备的根目录。
-fn volume_for_existing_path(path: &Path) -> Result<VolumeInfo, VeilError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = std::fs::metadata(path)?;
-    let device = metadata.dev();
-    let mut mount_path = path.to_path_buf();
-
-    // 同一设备内向上归约；父目录设备号变化处就是挂载点边界。
-    while let Some(parent) = mount_path.parent() {
-        let parent_device = std::fs::metadata(parent).ok().map(|meta| meta.dev());
-        if parent_device != Some(device) {
-            break;
-        }
-        mount_path = parent.to_path_buf();
+#[cfg(target_os = "macos")]
+fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
+    use std::os::unix::ffi::OsStrExt;
+    // getfsstat 写入调用方拥有的缓冲区，避免 getmntinfo 的共享静态缓冲区竞争。
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
-
-    // 根文件系统使用固定标签，其他挂载点使用目录名作为展示标签。
-    let root = Path::new("/");
-    let is_external = mount_path != root && is_external_mount(&mount_path);
-    let volume_label = if mount_path == root {
-        "local-system".to_string()
-    } else {
-        mount_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("external-volume")
-            .to_string()
+    let mut mounts = Vec::<libc::statfs>::with_capacity(count as usize + 16);
+    let count = unsafe {
+        libc::getfsstat(
+            mounts.as_mut_ptr(),
+            (mounts.capacity() * std::mem::size_of::<libc::statfs>()) as _,
+            libc::MNT_NOWAIT,
+        )
     };
-
-    Ok(VolumeInfo {
-        volume_id: format!("fs:{:x}", device),
-        volume_label,
-        mount_path,
-        is_external,
-    })
+    if count < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // 系统最多写入缓冲区容量个完整结构体。
+    unsafe {
+        mounts.set_len((count as usize).min(mounts.capacity()));
+    }
+    Ok(mounts
+        .iter()
+        .map(|mount| {
+            let name = unsafe { std::ffi::CStr::from_ptr(mount.f_mntonname.as_ptr()) };
+            PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()))
+        })
+        .collect())
 }
 
-#[cfg(unix)]
-/// 判断 Unix 挂载路径是否属于本实现认定的外部卷位置。
-fn is_external_mount(mount_path: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        // macOS 外接卷通常挂载在 /Volumes 下。
-        mount_path.starts_with("/Volumes")
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Linux 常见外部挂载由发行版放在 media、mnt 或 run/media。
-        mount_path.starts_with("/media")
-            || mount_path.starts_with("/mnt")
-            || mount_path.starts_with("/run/media")
-    }
+#[cfg(target_os = "linux")]
+fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
+    use std::os::unix::ffi::OsStringExt;
+    // mountinfo 的第 5 列是挂载点；空格等字节使用八进制转义。
+    let content = std::fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(content
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .map(|field| {
+            let mut bytes = Vec::new();
+            let raw = field.as_bytes();
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i] == b'\\'
+                    && i + 3 < raw.len()
+                    && raw[i + 1..i + 4].iter().all(|b| (b'0'..=b'7').contains(b))
+                {
+                    bytes.push(
+                        (raw[i + 1] - b'0') * 64 + (raw[i + 2] - b'0') * 8 + raw[i + 3] - b'0',
+                    );
+                    i += 4;
+                } else {
+                    bytes.push(raw[i]);
+                    i += 1;
+                }
+            }
+            PathBuf::from(std::ffi::OsString::from_vec(bytes))
+        })
+        .collect())
 }
 
 #[cfg(windows)]
-/// 在 Windows 上按盘符识别卷，并以用户主目录所在盘符判断是否为外部卷。
-fn volume_for_existing_path(path: &Path) -> Result<VolumeInfo, VeilError> {
-    use std::path::Component;
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetLogicalDrives() -> u32;
+    fn GetDriveTypeW(root: *const u16) -> u32;
+}
 
-    /// 提取路径中的盘符并统一为大写。
-    fn root_key(path: &Path) -> String {
-        match path.components().next() {
-            // 盘符比较统一大写，避免 C: 与 c: 被当成不同卷。
-            Some(Component::Prefix(prefix)) => prefix.as_os_str().to_string_lossy().to_uppercase(),
-            _ => "?".to_string(),
+#[cfg(windows)]
+fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok((0..26)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+        .collect())
+}
+
+fn is_external_mount(root: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        root.starts_with("/Volumes")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        root.starts_with("/media") || root.starts_with("/mnt") || root.starts_with("/run/media")
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<_> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        let home_is_here = dirs::home_dir()
+            .and_then(|home| nearest_existing_path(&home).ok())
+            .is_some_and(|home| home.starts_with(root));
+        matches!(kind, 2 | 3) && !home_is_here
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_existing_and_future_paths_without_creating_them() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let future = temp.path().join("future/work");
+        assert_eq!(
+            volume_for_path(temp.path()).unwrap(),
+            volume_for_path(&future).unwrap()
+        );
+        assert!(!future.exists());
+        for volume in mounted_volumes().unwrap() {
+            assert!(volume.root_path.is_dir());
         }
     }
-
-    // Windows 先用盘符归约卷根，再与用户主目录盘符比较判断是否外部卷。
-    let mount_path = PathBuf::from(root_key(path));
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
-    let is_external = home
-        .as_deref()
-        .map(root_key)
-        .map(|home_root| {
-            !mount_path
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&home_root)
-        })
-        .unwrap_or(true);
-    let volume_label = mount_path.to_string_lossy().into_owned();
-
-    Ok(VolumeInfo {
-        volume_id: format!("drive:{}", volume_label.to_ascii_lowercase()),
-        volume_label,
-        mount_path,
-        is_external,
-    })
 }

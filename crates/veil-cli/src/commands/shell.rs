@@ -256,10 +256,6 @@ fn show_info(_veil_name: &str, metadata: &veil_core::metadata::MetaData) -> Resu
     );
     crate::outln!(
         "{}",
-        crate::i18n::t1("info.work_type", "work_type", &metadata.work_type)
-    );
-    crate::outln!(
-        "{}",
         crate::i18n::t1(
             "info.content_count",
             "count",

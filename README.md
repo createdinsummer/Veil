@@ -9,6 +9,7 @@ Veil 是一个 Work 模型的加密文件工具。CLI 通过 `.veil-link` 定位
 | [CLI 使用说明](crates/veil-cli/README.md) | 命令使用者、运维和脚本维护者 | 参数、工作流、配置、链接、打包解包和 CLI 限制 |
 | [核心库说明](crates/veil-core/README.md) | 库维护者、格式维护者 | 存储模型、模块职责、磁盘格式、密钥流程、恢复和并发语义 |
 | [密码强度测试工具](crates/veil-brute-force/README.md) | 授权测试者、安全评审者 | 支持范围、攻击模式、线程模型、历史记录和安全边界 |
+| [录屏转长截图](crates/veil-scrollshot/README.md) | 独立工具使用者、库集成开发者 | 垂直滚动录屏拼接、固定栏识别和回滚去重 |
 
 ## 产品定位
 
@@ -28,10 +29,11 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 
 | 对象 | 内容 | 说明 |
 | --- | --- | --- |
-| `.veil-link` | Veil ID、展示名称、卷 ID 和 `veil_dir` 相对路径 | 只是入口和定位信息，不保存文件内容 |
-| Veil 目录 `veil_dir` | `.veil-meta` 和随机命名的 `.enc` 文件 | 真正的数据存储位置 |
+| `.veil-link` | 容器 ID、展示名称、容器创建时间和链接创建时间 | 只是入口和定位信息，不保存文件内容 |
+| Work 目录 `work_root` | 以 `veil_id` 命名的容器目录 | 仅作为存放容器的目录 |
+| Veil 目录 `veil_dir` | `.veil-info` 和随机命名的 `.enc` 文件 | 真正的数据存储位置 |
 
-默认 `work_root` 位于 `~/.veil/works/default`，每个 Veil 使用独立 `veil_dir`。全局配置位于 `~/.veil/config.toml`，会缓存 Veil、卷和链接信息。链接被删除时，如果配置中仍有原始字节副本，Veil 会尝试恢复。
+默认 `work_root` 位于 `~/.veil/works/default`，每个 Veil 使用独立 `veil_dir`。本机配置位于 `~/.veil/config.jsonc`，移动盘配置位于 `<盘根目录>/.veil/config.jsonc`；配置登记工作区，并缓存容器信息和链接正文。相对工作区路径基于所属配置目录解析，默认值为 `works/default`。程序遍历已登记工作区，以 `.veil-info` 中的容器 ID 核验身份；容器整体移动到已登记工作区后，原链接继续有效。同 ID 的多个副本报告歧义，目标盘未挂载时报未找到。配置文件与 `.veil-link` 均使用 JSONC，支持注释和尾逗号，更新时保留已有字段的注释。链接被删除时，如果配置中仍有对应的结构化正文，Veil 会尝试重新生成链接。
 
 `veil pack` 会把 Veil 整理为一个便于传输的 `.veil` 文件。该文件包含加密元数据和已有密文，不会在打包时重新加密文件内容。`veil unpack` 使用原 Veil 密码验证并还原目录，然后生成新的链接和 Veil 记录。
 
@@ -70,7 +72,7 @@ Work 模型中的 Veil 使用 Argon2id 从用户密码和 salt 派生密码保�
 
 - CLI 的 `ex` 当前只处理单文件；`add` 支持文件、目录递归导入和目标路径。
 - `passwd` 默认只修改密码保护层；`passwd --full` 才会重新加密 Veil 中的全部文件。
-- `.veil-link` 依赖稳定的卷身份和 `veil_dir` 相对路径。
+- `.veil-link` 仅按容器 ID 查找已登记工作区，移动容器后无需修改链接。
 - 忘记密码后没有恢复通道。
 
 详细限制分别记录在 CLI 和 Core 文档中。
@@ -82,6 +84,7 @@ Work 模型中的 Veil 使用 Argon2id 从用户密码和 salt 派生密码保�
 | `crates/veil-core` | 核心库和存储格式 |
 | `crates/veil-cli` | `veil` 命令行程序和集成测试 |
 | `crates/veil-brute-force` | 密码强度测试工具 |
+| `crates/veil-scrollshot` | 独立的录屏转长截图模块与命令行程序 |
 
 ## 许可证
 

@@ -6,6 +6,89 @@ use assert_cmd::Command;
 use common::TestEnv;
 use predicates::prelude::*;
 
+/// 命名工作区按配置目录及相对路径完成初始化、名称访问和解包。
+#[test]
+fn named_work_uses_config_relative_location() {
+    let env = TestEnv::new("test-password");
+    env.init("default-demo");
+    let config_path = env.home.path().join(".veil/config.jsonc");
+    let mut config = veil_core::config::GlobalConfig::load_from(&config_path).unwrap();
+    let target = env.work.path().join("archive");
+    config
+        .register_custom_work("archive".to_string(), target.clone(), None)
+        .unwrap();
+    let work = &config.work.custom["archive"];
+    assert_eq!(work.path, target);
+    let work_root = config.resolve_work_root(work).unwrap();
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    env.command()
+        .args(["init", "named-demo", "--work", "archive"])
+        .assert()
+        .success();
+    let link = veil_core::link::VeilLink::load(&env.link_path("named-demo")).unwrap();
+    assert!(
+        work_root
+            .join(&link.veil.veil_id)
+            .join(".veil-info")
+            .exists()
+    );
+    env.command()
+        .args(["list", "named-demo"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["pack", "named-demo", "-o", "named.veil"])
+        .assert()
+        .success();
+    // 清除原容器注册记录，使解包可以复用包内稳定 ID。
+    let mut config = veil_core::config::GlobalConfig::load_from(&config_path).unwrap();
+    config
+        .veils
+        .retain(|_, veil| veil.veil_id != link.veil.veil_id);
+    config
+        .links
+        .retain(|record| record.link.veil.veil_id != link.veil.veil_id);
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+    let output = env.work.path().join("unpacked.veil-link");
+    env.command()
+        .args([
+            "unpack",
+            "named.veil",
+            "--work",
+            "archive",
+            "--link",
+            &env.path(&output),
+        ])
+        .assert()
+        .failure();
+    assert!(
+        work_root
+            .join(&link.veil.veil_id)
+            .join(".veil-info")
+            .exists()
+    );
+    std::fs::remove_dir_all(work_root.join(&link.veil.veil_id)).unwrap();
+    env.command()
+        .args([
+            "unpack",
+            "named.veil",
+            "--work",
+            "archive",
+            "--link",
+            &env.path(&output),
+        ])
+        .assert()
+        .success();
+    let unpacked = veil_core::link::VeilLink::load(&output).unwrap();
+    assert_eq!(unpacked.veil.veil_id, link.veil.veil_id);
+    assert!(
+        env.veil_dir(&output)
+            .starts_with(std::fs::canonicalize(&work_root).unwrap())
+    );
+}
+
 /// 验证顶层帮助包含全部工作区命令。
 #[test]
 fn help_lists_work_model_commands() {
@@ -177,15 +260,10 @@ fn multiple_links_can_target_the_same_work() {
 fn veil_selector_accepts_name_id_and_link_only() {
     let env = TestEnv::new("test-password");
     let link = env.init("selector");
-    let link_content = std::fs::read_to_string(&link).unwrap();
-    let veil_id = link_content
-        .lines()
-        .find_map(|line| line.strip_prefix("veil_id = \""))
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap();
+    let veil_id = veil_core::link::VeilLink::load(&link).unwrap().veil.veil_id;
 
     env.command().args(["list", "selector"]).assert().success();
-    env.command().args(["list", veil_id]).assert().success();
+    env.command().args(["list", &veil_id]).assert().success();
     env.command()
         .args(["list", &env.path(&link)])
         .assert()
@@ -195,7 +273,7 @@ fn veil_selector_accepts_name_id_and_link_only() {
     let work = std::fs::read_dir(work_root)
         .unwrap()
         .filter_map(Result::ok)
-        .find(|entry| entry.path().join(".veil-meta").is_file())
+        .find(|entry| entry.path().join(".veil-info").is_file())
         .unwrap()
         .path();
     env.command()
@@ -212,29 +290,25 @@ fn veil_selector_accepts_name_id_and_link_only() {
     assert!(rebuilt_link.exists());
 }
 
-/// 验证配置缺失时显式链接仍可用，而名称和 ID 因缺少映射而失败。
+/// 配置缺失时没有已登记工作区，所有入口均报告未找到且不创建配置。
 #[test]
-fn explicit_link_works_without_config_but_name_requires_config() {
+fn missing_config_does_not_use_link_location_or_create_config() {
     let env = TestEnv::new("test-password");
     let link = env.init("configless");
-    let link_content = std::fs::read_to_string(&link).unwrap();
-    let veil_id = link_content
-        .lines()
-        .find_map(|line| line.strip_prefix("veil_id = \""))
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap();
+    let veil_id = veil_core::link::VeilLink::load(&link).unwrap().veil.veil_id;
 
-    std::fs::remove_file(env.home.path().join(".veil/config.toml")).unwrap();
+    std::fs::remove_file(env.home.path().join(".veil/config.jsonc")).unwrap();
 
     env.command()
         .args(["list", &env.path(&link)])
         .assert()
-        .success();
+        .failure();
     env.command()
         .args(["list", "configless"])
         .assert()
         .failure();
-    env.command().args(["list", veil_id]).assert().failure();
+    env.command().args(["list", &veil_id]).assert().failure();
+    assert!(!env.home.path().join(".veil/config.jsonc").exists());
 }
 
 /// 验证主 CLI 支持创建专属工作区容器。
@@ -259,9 +333,10 @@ fn dedicated_work_init_is_available_from_main_cli() {
         .success()
         .stdout(predicate::str::contains("创建容器成功"));
 
-    // 专属模式下列表项与 .veil-meta 都应直接位于指定工作区路径。
+    // 专属模式仍使用 work_root/veil_id，工作区本身只负责容器归属。
     assert!(link.exists());
-    assert!(work.join(".veil-meta").exists());
+    let data = veil_core::link::VeilLink::load(&link).unwrap();
+    assert!(work.join(&data.veil.veil_id).join(".veil-info").exists());
 
     let source = env.write_file("secret.txt", "secret");
     env.command()
@@ -305,17 +380,9 @@ fn duplicate_veil_names_are_distinguished_by_veil_id() {
         .success();
 
     // 两个容器展示名相同，只有链接中持久化的 veil_id 能区分它们。
-    let first = std::fs::read_to_string(&first_link).unwrap();
-    let second = std::fs::read_to_string(&second_link).unwrap();
-    let first_id = first
-        .lines()
-        .find(|line| line.starts_with("veil_id = "))
-        .unwrap();
-    let second_id = second
-        .lines()
-        .find(|line| line.starts_with("veil_id = "))
-        .unwrap();
-    assert_ne!(first_id, second_id);
+    let first = veil_core::link::VeilLink::load(&first_link).unwrap();
+    let second = veil_core::link::VeilLink::load(&second_link).unwrap();
+    assert_ne!(first.veil.veil_id, second.veil.veil_id);
 
     // 同名时仅输入展示名无法确定目标，必须通过 ID 或链接区分。
     env.command()
@@ -342,9 +409,9 @@ fn duplicate_veil_names_are_distinguished_by_veil_id() {
         .stdout(predicate::str::contains("(空)"));
 }
 
-/// 验证便携模式把链接和工作区放在同一路径下。
+/// 本机的便携选项仍使用固定的本机配置和默认工作区。
 #[test]
-fn portable_mode_keeps_link_and_work_on_the_same_path() {
+fn portable_mode_uses_fixed_local_config() {
     let env = TestEnv::new("test-password");
     let portable_dir = env.work.path().join("portable");
     std::fs::create_dir_all(&portable_dir).unwrap();
@@ -363,8 +430,8 @@ fn portable_mode_keeps_link_and_work_on_the_same_path() {
         .success()
         .stdout(predicate::str::contains("工作区将创建在"));
 
-    // 便携模式的默认工作区根应位于链接所在目录内部。
-    let work_root = portable_dir.join(".veil/works/default");
+    let work_root = env.home.path().join(".veil/works/default");
+    assert!(!portable_dir.join(".veil").exists());
     let veil_dirs: Vec<_> = std::fs::read_dir(&work_root)
         .unwrap()
         .filter_map(Result::ok)
@@ -373,14 +440,16 @@ fn portable_mode_keeps_link_and_work_on_the_same_path() {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("veil-"))
-                && path.join(".veil-meta").exists()
+                && path.join(".veil-info").exists()
         })
         .collect();
     assert_eq!(veil_dirs.len(), 1);
 
     let link_content = std::fs::read_to_string(link).unwrap();
-    assert!(link_content.contains(".veil/works/default/veil-"));
-    assert!(!link_content.contains("mount_path = "));
+    let link: serde_json::Value = veil_core::jsonc::from_str(&link_content).unwrap();
+    assert!(link.get("work").is_none());
+    assert!(link.get("root_path").is_none());
+    assert!(link["veil"].get("root_path").is_none());
 
     // 链接不可用时应能仅凭配置中的实际工作区路径按名称恢复。
     env.command().args(["list", "photos"]).assert().success();
@@ -454,17 +523,9 @@ fn init_resolves_relative_work_root_from_another_directory() {
         .assert()
         .success();
 
-    let link_data = veil_core::link::VeilLink::load(&link).unwrap();
-    assert_ne!(
-        link_data.veil.path,
-        std::path::PathBuf::from("relative-work")
-    );
-    assert!(
-        link_data
-            .veil
-            .path
-            .to_string_lossy()
-            .contains("relative-work")
+    assert_eq!(
+        std::fs::canonicalize(env.veil_dir(&link).parent().unwrap()).unwrap(),
+        std::fs::canonicalize(env.work.path().join("relative-work")).unwrap()
     );
 
     let mut list = env.command();
@@ -494,41 +555,22 @@ fn init_rejects_link_path_with_unknown_extension() {
         .stderr(predicate::str::contains(".veil-link"));
 
     assert!(!output.exists());
-    assert!(!env.home.path().join(".veil/config.toml").exists());
+    assert!(!env.home.path().join(".veil/config.jsonc").exists());
 }
 
-/// 验证被手工改成绝对工作区路径的链接会被拒绝。
+/// 链接中的 ID 被修改后，不会按名称或链接位置选择其他容器。
 #[test]
-fn link_rejects_absolute_work_root() {
+fn link_does_not_fall_back_from_missing_id_to_name() {
     let env = TestEnv::new("test-password");
-    let link = env.init("absolute-link");
-    let work = env.home.path().join(".veil/works/default");
-    let veil_dir = std::fs::read_dir(&work)
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| entry.path().join(".veil-meta").is_file())
-        .unwrap()
-        .path();
-
-    let content = std::fs::read_to_string(&link).unwrap();
-    let rewritten = content
-        .lines()
-        .map(|line| {
-            if line.starts_with("path = ") {
-                format!("path = \"{}\"", veil_dir.display())
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&link, format!("{rewritten}\n")).unwrap();
-
+    let link = env.init("missing-link");
+    let mut rewritten = veil_core::link::VeilLink::load(&link).unwrap();
+    rewritten.veil.veil_id = "veil-missing".into();
+    rewritten.save(&link).unwrap();
     env.command()
         .args(["list", &env.path(&link)])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("相对路径"));
+        .stderr(predicate::str::contains("当前未找到容器"));
 }
 
 /// 验证链接写入失败时会清理工作区，且不会留下孤立容器记录。
@@ -547,12 +589,24 @@ fn init_rolls_back_when_link_registration_fails() {
         .stderr(predicate::str::contains("链接注册失败"));
 
     assert!(!link.exists());
-    assert!(!env.home.path().join(".veil/config.toml").exists());
+    assert!(!env.home.path().join(".veil/config.jsonc").exists());
 
     let work_root = env.home.path().join(".veil/works/default");
     if work_root.exists() {
-        assert_eq!(std::fs::read_dir(work_root).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&work_root).unwrap().count(), 0);
     }
+
+    // 已有工作区发生同类失败时，原配置和原容器都必须保留。
+    env.init("keep");
+    let config_path = env.home.path().join(".veil/config.jsonc");
+    let config = std::fs::read(&config_path).unwrap();
+    let entry_count = std::fs::read_dir(&work_root).unwrap().count();
+    env.command()
+        .args(["init", "rollback-again", "--link", &env.path(&link)])
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(config_path).unwrap(), config);
+    assert_eq!(std::fs::read_dir(work_root).unwrap().count(), entry_count);
 }
 
 /// 验证专属工作区允许复用空目录，但拒绝覆盖已有内容。
@@ -575,7 +629,14 @@ fn init_dedicated_work_requires_empty_directory() {
         ])
         .assert()
         .success();
-    assert!(empty_work.join(".veil-meta").exists());
+    let data = veil_core::link::VeilLink::load(&empty_link).unwrap();
+    assert!(!empty_work.join(".work-id").exists());
+    assert!(
+        empty_work
+            .join(&data.veil.veil_id)
+            .join(".veil-info")
+            .exists()
+    );
 
     let non_empty_work = env.work.path().join("non-empty-work");
     std::fs::create_dir_all(&non_empty_work).unwrap();
@@ -598,7 +659,7 @@ fn init_dedicated_work_requires_empty_directory() {
         .stderr(predicate::str::contains("必须为空目录"));
 
     assert_eq!(std::fs::read_to_string(existing_file).unwrap(), "keep");
-    assert!(!non_empty_work.join(".veil-meta").exists());
+    assert!(!non_empty_work.join(".veil-info").exists());
     assert!(!non_empty_link.exists());
 }
 
@@ -615,7 +676,7 @@ fn init_rejects_empty_password_without_side_effects() {
         .stderr(predicate::str::contains("❌ 错误 [2002]: 新密码不能为空"));
 
     assert!(!link.exists());
-    assert!(!env.home.path().join(".veil/config.toml").exists());
+    assert!(!env.home.path().join(".veil/config.jsonc").exists());
     assert!(!env.home.path().join(".veil/works/default").exists());
 }
 

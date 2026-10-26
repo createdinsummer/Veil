@@ -5,9 +5,8 @@ use colored::Colorize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use veil_core::config::{GlobalConfig, VeilConfig};
-use veil_core::metadata::MetaHeader;
+use veil_core::metadata::{MetaHeader, VEIL_INFO_FILE};
 use veil_core::veil_package::VeilUnpacker;
-use veil_core::work::{WorkConfig, allocate_veil_directory};
 
 /// 读取打包文件，验证密码后重建 `veil_dir`、配置记录和链接。
 pub fn run(
@@ -34,27 +33,17 @@ pub fn run(
         crate::cli_bail!(UnpackNameExtractFailed);
     }
 
-    let mut config = GlobalConfig::load()?;
-    if config.work.default.is_none() {
-        config.work.default = Some(WorkConfig::default_work()?);
+    let link_location = link_output
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let (mut config, work) = GlobalConfig::creation_work(&link_location, work_name, None, false)?;
+    let work_root = config.resolve_work_root(&work)?;
+    if matches!(work.work_type, veil_core::work::WorkType::Dedicated)
+        && work_root.exists()
+        && fs::read_dir(&work_root)?.next().transpose()?.is_some()
+    {
+        crate::cli_bail!(UnpackDirectoryExists, "path" => work_root.display());
     }
-
-    let work_root = if let Some(work_name) = work_name {
-        if work_name == "default" {
-            config.work.default.as_ref().unwrap().path.clone()
-        } else {
-            config
-                .work
-                .custom
-                .get(work_name)
-                .ok_or_else(|| crate::cli_error!(UnpackWorkNotFound, "name" => work_name))?
-                .path
-                .clone()
-        }
-    } else {
-        config.work.default.as_ref().unwrap().path.clone()
-    };
-    let work_root = absolute_path(&work_root)?;
 
     let unpacker = VeilUnpacker::new(package_path);
     let encrypted_metadata = unpacker.read_encrypted_metadata()?;
@@ -79,7 +68,8 @@ pub fn run(
         crate::cli_bail!(LinkOutputExists, "path" => link_path.display());
     }
 
-    let veil_dir = allocate_veil_directory(&work_root, &header.veil_id, &creation_time);
+    veil_core::work::validate_veil_id(&header.veil_id)?;
+    let veil_dir = work_root.join(&header.veil_id);
     if veil_dir.exists() {
         crate::cli_bail!(UnpackDirectoryExists, "path" => veil_dir.display());
     }
@@ -103,23 +93,22 @@ pub fn run(
     let transaction = (|| -> Result<()> {
         unpacker.unpack_encrypted_files(&veil_dir, &metadata)?;
 
-        let meta_path = veil_dir.join(".veil-meta");
+        let meta_path = veil_dir.join(VEIL_INFO_FILE);
         veil_core::temp::write_private_file_atomic(&meta_path, &encrypted_metadata)?;
+        if metadata.veil_name != name {
+            // 名称查找以明文头为准，解包重命名需同步头部和加密正文，保留 ID 与创建时间。
+            veil_core::veil_ops::VeilManager::for_veil(veil_dir.clone(), metadata.veil_id.clone())
+                .update_meta(password, |metadata| metadata.veil_name = name.clone())?;
+        }
 
         let veil_config = VeilConfig {
             veil_id: metadata.veil_id.clone(),
             veil_name: name.clone(),
-            work: Some(work_name.unwrap_or("default").to_string()),
-            veil_dir_name: veil_dir
-                .file_name()
-                .and_then(|directory| directory.to_str())
-                .map(ToOwned::to_owned),
-            veil_dir: None,
-            dedicated_work: false,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: metadata.created_at.clone(),
             last_accessed: None,
             links: Vec::new(),
         };
+        config.veils.remove(&metadata.veil_id);
         config.register_veil(veil_config)?;
 
         // 注册链接会写入链接文件并保存完整配置。
@@ -150,15 +139,6 @@ pub fn run(
 
     crate::hints::show_unpack_explain_hint(&name, &link_path, metadata.files.len());
     Ok(())
-}
-
-/// 将相对 Work 根路径固定到当前目录。
-fn absolute_path(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
 }
 
 /// 解包失败时移除新建 `veil_dir`、链接和空 `work_root`。

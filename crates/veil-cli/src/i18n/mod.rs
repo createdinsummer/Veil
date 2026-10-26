@@ -1,6 +1,6 @@
 //! 编译期内嵌的轻量国际化资源。
 //!
-//! `messages.json` 在编译时嵌入二进制，启动后按 `VEIL_LANG` 选择语言。模块保持一个
+//! `messages.jsonc` 在编译时嵌入二进制，启动后按 `VEIL_LANG` 选择语言。模块保持一个
 //! 进程级只读消息表和语言代码，翻译查询不执行 I/O，占位符按名称替换。
 
 use std::collections::{BTreeMap, HashMap};
@@ -17,13 +17,13 @@ static STORE: OnceLock<MsgStore> = OnceLock::new();
 static LANG: OnceLock<String> = OnceLock::new();
 
 /// 启动时调用一次。从 `VEIL_LANG` 环境变量读取语言（默认 `zh`），
-/// 并加载编译时嵌入的 `messages.json`。
+/// 并加载编译时嵌入的 `messages.jsonc`。
 ///
 /// # Panics
-/// 内嵌的 `messages.json` 不是合法 JSON 时 panic，因为这属于构建产物错误。
+/// 内嵌的 `messages.jsonc` 不是合法 JSONC 时 panic，因为这属于构建产物错误。
 pub fn init() {
-    let store: MsgStore =
-        serde_json::from_str(include_str!("messages.json")).expect("i18n/messages.json 格式错误");
+    let store: MsgStore = veil_core::jsonc::from_str(include_str!("messages.jsonc"))
+        .expect("i18n/messages.jsonc 格式错误");
     // OnceLock 只接受第一次写入，重复调用 init 时保留已有消息表。
     STORE.set(store).ok();
 

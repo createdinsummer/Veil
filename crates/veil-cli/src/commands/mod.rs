@@ -29,8 +29,8 @@ use crate::error::Result;
 /// 所有需要选择已有 Veil 的命令都必须经过这里。
 ///
 /// 普通命令支持显式 `.veil-link` 路径、唯一 Veil 名称和唯一 `veil_id`。`veil_dir`
-/// 仅由 [`resolve_link_target`] 用于恢复链接。无论输入形式如何，返回前都会读取
-/// `.veil-meta` 确认真实 `veil_id`。
+/// 仅由 `veil link` 用于恢复链接。无论输入形式如何，返回前都会读取
+/// `.veil-info` 确认真实 `veil_id`。
 ///
 /// 从配置缓存恢复链接后会展示恢复提示。
 ///
@@ -41,20 +41,6 @@ pub fn resolve_veil(input: &str) -> Result<ResolvedVeil> {
     let resolved = config.resolve_veil(input)?;
 
     // 已恢复的链接需要提示用户。
-    if resolved.recovered_link
-        && let Some(link_path) = resolved.link_path.as_deref()
-    {
-        crate::hints::show_link_recovery_hint(link_path);
-    }
-
-    Ok(resolved)
-}
-
-/// 解析 `veil link` 的目标，支持 Veil 名、ID、链接路径和 `veil_dir`。
-pub fn resolve_link_target(input: &str) -> Result<ResolvedVeil> {
-    let mut config = GlobalConfig::load()?;
-    let resolved = config.resolve_link_target(input)?;
-
     if resolved.recovered_link
         && let Some(link_path) = resolved.link_path.as_deref()
     {

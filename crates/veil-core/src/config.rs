@@ -1,22 +1,16 @@
-//! 全局配置与 Veil/链接解析。
-//!
-//! 配置文件位置：~/.veil/config.toml
-//!
-//! 配置同时维护 Work、Veil、卷和链接索引，并保存每个 `.veil-link` 的原始字节副本：
-//! - 链接被删除时，可以按字节原样恢复；
-//! - Veil 与 Work 的映射始终以稳定 `veil_id` 作为身份依据。
+//! 本机及移动盘配置；通过已登记的工作区扫描、核验容器身份。
 
 use crate::error::VeilError;
 use crate::link::{LINK_EXTENSION, VeilLink};
-use crate::metadata::MetaHeader;
+use crate::metadata::{MetaHeader, VEIL_INFO_FILE};
 use crate::volume::{self, VolumeInfo};
-use crate::work::WorkConfig;
+use crate::work::{WorkConfig, WorkType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// `~/.veil/config.toml` 的根配置。
+/// 本机或单块移动盘的配置，不保存容器位置绑定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConfig {
     /// 配置格式版本。
@@ -35,37 +29,30 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub veils: HashMap<String, VeilConfig>,
 
-    /// 以稳定卷 ID 索引的磁盘卷缓存。
-    #[serde(default)]
-    pub volumes: HashMap<String, VolumeRecord>,
-
-    /// 已知 `.veil-link` 的完整原始字节副本。
-    ///
-    /// 这是对实际链接文件的字节级镜像，而不只是路径索引；链接丢失后可据此恢复。
+    /// 已知 `.veil-link` 的结构化正文及本机索引，链接丢失后可据此重新生成。
     #[serde(default)]
     pub links: Vec<LinkRecord>,
 
-    /// 用户偏好设置。
+    /// 用户设置。
     #[serde(default)]
-    pub preferences: PreferencesConfig,
+    pub user_settings: UserSettings,
 
-    /// 新容器使用的默认加密参数。
-    #[serde(default)]
-    pub encryption: EncryptionConfig,
+    /// 配置来源仅用于运行时解析，不写入文件。
+    #[serde(skip)]
+    source_path: Option<PathBuf>,
 }
 
 impl Default for GlobalConfig {
-    /// 创建版本、空索引和默认偏好组成的配置。
+    /// 创建版本、空索引和默认用户设置组成的配置。
     fn default() -> Self {
         Self {
             version: default_version(),
             system: SystemConfig::default(),
             work: WorkSection::default(),
             veils: HashMap::new(),
-            volumes: HashMap::new(),
             links: Vec::new(),
-            preferences: PreferencesConfig::default(),
-            encryption: EncryptionConfig::default(),
+            user_settings: UserSettings::default(),
+            source_path: None,
         }
     }
 }
@@ -133,15 +120,12 @@ pub struct WorkSection {
     /// 默认 Work 配置；首次初始化时可自动补全。
     pub default: Option<WorkConfig>,
 
-    /// 以名称索引的自定义 Work。
-    ///
-    /// CLI 目前没有创建或注册自定义工作区的命令，调用方需在配置文件写入该映射后，
-    /// 才能通过 `--work <名称>` 引用。
+    /// 以名称索引的自定义工作区；显式路径使用目录路径作为配置键。
     #[serde(default)]
     pub custom: HashMap<String, WorkConfig>,
 }
 
-/// Veil 在 Work 和链接中的注册信息。
+/// 容器信息缓存，不参与容器位置查找。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeilConfig {
     /// Veil 稳定 ID。
@@ -149,22 +133,6 @@ pub struct VeilConfig {
 
     /// 展示名称，不再作为唯一键。
     pub veil_name: String,
-
-    /// 共享 Work 名称，值为 `default` 或 [`WorkSection::custom`] 的键。
-    pub work: Option<String>,
-
-    /// Veil 在共享 `work_root` 下的目录名。
-    pub veil_dir_name: Option<String>,
-
-    /// 无法仅靠命名 Work 和 `veil_dir_name` 推导时记录的实际 `veil_dir`。
-    ///
-    /// 通过 `--work-root`、专属 Work 或便携模式创建时会写入此字段；该路径不会
-    /// 新增到命名 Work 表。
-    pub veil_dir: Option<PathBuf>,
-
-    /// 是否使用由该 Veil 独占的 Work。
-    #[serde(default)]
-    pub dedicated_work: bool,
 
     /// RFC 3339 格式的注册创建时间。
     pub created_at: String,
@@ -177,21 +145,6 @@ pub struct VeilConfig {
     pub links: Vec<PathBuf>,
 }
 
-/// 配置中缓存的磁盘卷记录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeRecord {
-    /// 稳定卷 ID。
-    pub volume_id: String,
-    /// 面向用户展示的卷名称。
-    pub volume_label: String,
-    /// 最近一次检测到的卷根路径。
-    pub mount_path: PathBuf,
-    /// 是否被识别为外部或可移动卷。
-    pub is_external: bool,
-    /// 最近一次检测到该卷的时间。
-    pub last_seen_at: String,
-}
-
 /// `.veil-link` 在当前系统中的可解析状态。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -200,118 +153,51 @@ pub enum LinkStatus {
     Present,
     /// 链接文件缺失，但配置中可能保存可恢复内容。
     Missing,
-    /// 链接存在，但其目标卷当前不可用。
+    /// 链接存在，但当前未找到目标容器。
     Unavailable,
     /// 链接文件存在但无法解析。
     Invalid,
 }
 
-/// 已知 `.veil-link` 的索引和原始内容副本。
+/// 已知 `.veil-link` 的结构化正文及本机索引。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkRecord {
+    /// 与独立 `.veil-link` 共用的完整正文，保存为独立的 `link` 对象。
+    pub link: VeilLink,
     /// 链接文件的绝对路径。
     pub link_path: PathBuf,
-    /// 链接指向的稳定容器 ID。
-    pub veil_id: String,
-    /// 链接记录的容器展示名称。
-    #[serde(default)]
-    pub veil_name: String,
-    /// 链接记录的目标卷 ID。
-    #[serde(default)]
-    pub volume_id: String,
-    /// 链接记录的目标卷展示名称。
-    #[serde(default)]
-    pub volume_label: String,
-    /// `veil_dir` 相对于目标卷根的路径。
-    #[serde(default)]
-    pub relative_path: PathBuf,
     /// 最近一次观察到链接时的状态。
-    pub status: LinkStatus,
-    /// 对原始链接字节计算的 blake3 十六进制摘要。
-    #[serde(default)]
-    pub content_hash: String,
-    /// 与 `.veil-link` 文件逐字节一致的十六进制副本。
-    ///
-    /// 用户删除链接后可直接写回这些字节完成原样恢复。
-    #[serde(default)]
-    pub raw_hex: String,
+    pub seen_status: LinkStatus,
     /// 最近一次观察或恢复链接的时间。
     pub last_seen_at: String,
 }
 
-/// 用户偏好设置。
-///
-/// 当前运行路径读取提示级别；其余字段会被配置读写流程保留，但尚未参与行为分支。
+/// 用户设置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PreferencesConfig {
-    /// 提示级别
-    #[serde(default = "default_hints_level")]
-    pub hints_level: HintsLevel,
-
-    /// 自动同步
-    #[serde(default)]
-    pub auto_sync: bool,
-
-    /// 默认密钥派生算法
-    #[serde(default = "default_kdf")]
-    pub default_key_derivation: String,
-
-    /// 是否缓存密钥
-    #[serde(default)]
-    pub cache_keys: bool,
-
-    /// 缓存超时（秒）
-    #[serde(default = "default_cache_timeout")]
-    pub cache_timeout_seconds: u64,
-
-    /// 是否使用系统密钥链
-    #[serde(default)]
-    pub use_system_keychain: bool,
-
-    /// 日志级别
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
+pub struct UserSettings {
+    /// 操作提示的展示级别。
+    #[serde(default = "default_hint_level")]
+    pub hint_level: HintLevel,
 }
 
-impl Default for PreferencesConfig {
-    /// 使用完整提示、禁用缓存与自动同步，并采用信息级日志。
+impl Default for UserSettings {
+    /// 默认展示完整操作提示。
     fn default() -> Self {
         Self {
-            hints_level: HintsLevel::Full,
-            auto_sync: false,
-            default_key_derivation: "Argon2id".to_string(),
-            cache_keys: false,
-            cache_timeout_seconds: 300,
-            use_system_keychain: false,
-            log_level: "info".to_string(),
+            hint_level: HintLevel::Full,
         }
     }
 }
 
 /// 返回提示级别的 Serde 默认值。
-fn default_hints_level() -> HintsLevel {
-    HintsLevel::Full
-}
-
-/// 返回默认密钥派生函数名称。
-fn default_kdf() -> String {
-    "Argon2id".to_string()
-}
-
-/// 返回密钥缓存默认超时秒数。
-fn default_cache_timeout() -> u64 {
-    300
-}
-
-/// 返回默认日志级别。
-fn default_log_level() -> String {
-    "info".to_string()
+fn default_hint_level() -> HintLevel {
+    HintLevel::Full
 }
 
 /// 一次性使用提示的展示级别。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum HintsLevel {
+pub enum HintLevel {
     /// 展示全部提示。
     Full,
     /// 仅展示解包和链接恢复提示。
@@ -320,7 +206,7 @@ pub enum HintsLevel {
     Off,
 }
 
-impl HintsLevel {
+impl HintLevel {
     /// 返回可写入配置的稳定小写字符串。
     pub fn as_str(self) -> &'static str {
         match self {
@@ -348,7 +234,7 @@ impl HintsLevel {
 pub struct ResolvedVeil {
     /// Veil 展示名称。
     pub veil_name: String,
-    /// 从实际 `.veil-meta` 明文头确认的稳定 Veil ID。
+    /// 从实际 `.veil-info` 明文头确认的稳定 Veil ID。
     pub veil_id: String,
     /// Veil 实际目录 `veil_dir`。
     pub veil_dir: PathBuf,
@@ -358,927 +244,895 @@ pub struct ResolvedVeil {
     pub recovered_link: bool,
 }
 
-/// 新容器的加密默认值配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EncryptionConfig {
-    /// 默认加密参数
-    #[serde(default)]
-    pub defaults: EncryptionDefaults,
-
-    /// Argon2id 参数
-    #[serde(default)]
-    pub argon2id: Argon2idParams,
-}
-
-impl Default for EncryptionConfig {
-    /// 使用默认算法参数和 Argon2id 参数。
-    fn default() -> Self {
-        Self {
-            defaults: EncryptionDefaults::default(),
-            argon2id: Argon2idParams::default(),
-        }
-    }
-}
-
-/// 新容器默认使用的算法名称。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EncryptionDefaults {
-    /// 默认内容加密算法名称。
-    #[serde(default = "default_algorithm")]
-    pub algorithm: String,
-
-    /// 默认密钥派生函数名称。
-    #[serde(default = "default_kdf")]
-    pub key_derivation: String,
-}
-
-impl Default for EncryptionDefaults {
-    /// 使用 ChaCha20-Poly1305 和 Argon2id 作为配置默认值。
-    fn default() -> Self {
-        Self {
-            algorithm: "ChaCha20-Poly1305".to_string(),
-            key_derivation: "Argon2id".to_string(),
-        }
-    }
-}
-
-/// 返回默认内容加密算法名称。
-fn default_algorithm() -> String {
-    "ChaCha20-Poly1305".to_string()
-}
-
-/// 配置文件中的 Argon2id 参数。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Argon2idParams {
-    /// 内存使用量，单位为 KiB。
-    #[serde(default = "default_memory_kb")]
-    pub memory_kb: u32,
-
-    /// Argon2 迭代轮数。
-    #[serde(default = "default_iterations")]
-    pub iterations: u32,
-
-    /// Argon2 并行度。
-    #[serde(default = "default_parallelism")]
-    pub parallelism: u32,
-}
-
-impl Default for Argon2idParams {
-    /// 使用 64 MiB 内存、3 次迭代和并行度 4。
-    fn default() -> Self {
-        Self {
-            memory_kb: 65536,
-            iterations: 3,
-            parallelism: 4,
-        }
-    }
-}
-
-/// 返回默认 Argon2 内存量，单位为 KiB。
-fn default_memory_kb() -> u32 {
-    65536
-}
-
-/// 返回默认 Argon2 迭代次数。
-fn default_iterations() -> u32 {
-    3
-}
-
-/// 返回默认 Argon2 并行度。
-fn default_parallelism() -> u32 {
-    4
-}
-
 impl GlobalConfig {
-    /// 返回 `~/.veil/config.toml` 的路径。
-    ///
-    /// # 错误
-    /// 无法确定用户主目录时返回 [`VeilError::ConfigError`]。
+    /// 本机配置固定在用户主目录下。
     pub fn config_path() -> Result<PathBuf, VeilError> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| VeilError::ConfigError("无法获取用户主目录".to_string()))?;
-        Ok(home.join(".veil/config.toml"))
+        Ok(dirs::home_dir()
+            .ok_or_else(|| VeilError::ConfigError("无法获取用户主目录".into()))?
+            .join(".veil/config.jsonc"))
     }
 
-    /// 从默认路径加载配置；文件不存在时返回默认配置。
-    ///
-    /// 反序列化后会把空的版本字段补成当前默认版本。
-    ///
-    /// # 错误
-    /// 路径解析、文件读取或 TOML 解析失败时返回 [`VeilError::ConfigError`]。
     pub fn load() -> Result<Self, VeilError> {
-        // 未初始化配置是合法状态，首次运行直接使用内存默认值。
-        let path = Self::config_path()?;
+        Self::load_from(&Self::config_path()?)
+    }
 
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content = fs::read_to_string(&path)
-            .map_err(|e| VeilError::ConfigError(format!("读取配置文件失败: {}", e)))?;
-
-        // 旧配置可能没有版本字段，解析后统一补成当前版本。
-        let mut config: Self = toml::from_str(&content)
-            .map_err(|e| VeilError::ConfigError(format!("解析配置文件失败: {}", e)))?;
-        if config.version.is_empty() {
-            config.version = default_version();
-        }
-        config.validate_veil_ids()?;
-
+    /// 记录配置来源；缺少文件时只返回内存默认值。
+    pub fn load_from(path: &Path) -> Result<Self, VeilError> {
+        let path = std::path::absolute(path)?;
+        let mut config: Self = match fs::read_to_string(&path) {
+            Ok(content) => crate::jsonc::from_str(&content).map_err(|error| {
+                VeilError::ConfigError(format!("解析配置失败 {}: {error}", path.display()))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                return Err(VeilError::ConfigError(format!(
+                    "读取配置失败 {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        config.source_path = Some(path);
+        config.validate()?;
         Ok(config)
     }
 
-    /// 将配置序列化后写入默认路径。
-    ///
-    /// 写入先落到同目录的 `config.toml.tmp`，再用重命名替换正式文件。
-    ///
-    /// # 错误
-    /// 目录创建、序列化、临时文件写入、同步或原子替换失败时返回
-    /// [`VeilError::ConfigError`]。
+    pub fn source_path(&self) -> Result<PathBuf, VeilError> {
+        self.source_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(Self::config_path)
+    }
+
+    pub fn config_dir(&self) -> Result<PathBuf, VeilError> {
+        Ok(self.source_path()?.parent().unwrap().to_path_buf())
+    }
+
+    /// 只保存当前配置，不把其他盘的工作区合并写入本机配置。
     pub fn save(&self) -> Result<(), VeilError> {
-        self.validate_veil_ids()?;
-        let path = Self::config_path()?;
-
-        // 配置目录可能尚未存在，保存前按需创建并持久化目录链。
-        if let Some(parent) = path.parent() {
-            crate::fsutil::create_dir_all_durable(parent)
-                .map_err(|e| VeilError::ConfigError(format!("创建配置目录失败: {}", e)))?;
-        }
-
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| VeilError::ConfigError(format!("序列化配置失败: {}", e)))?;
-
-        // 同目录临时文件加原子替换，并在返回前同步父目录。
-        crate::fsutil::atomic_write(&path, content.as_bytes())
-            .map_err(|e| VeilError::ConfigError(format!("保存配置文件失败: {}", e)))?;
-
-        Ok(())
+        self.validate()?;
+        crate::jsonc::save(&self.source_path()?, self)
     }
 
-    /// 确认稳定 ID 尚未注册给其他容器。
-    ///
-    /// 配置键和容器记录中的 `veil_id` 都参与检查。同一容器可以保存多个链接，
-    /// 因此这里不把链接记录视为 ID 冲突。
-    pub fn ensure_veil_id_available(&self, veil_id: &str) -> Result<(), VeilError> {
-        if veil_id.trim().is_empty() {
-            return Err(VeilError::InvalidFormat("容器 ID 不能为空".to_string()));
-        }
-
-        if self.veils.contains_key(veil_id)
-            || self.veils.values().any(|veil| veil.veil_id == veil_id)
-            || self.links.iter().any(|link| link.veil_id == veil_id)
-        {
-            return Err(VeilError::VeilIdConflict(format!(
-                "容器 ID '{}' 已被占用",
-                veil_id
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// 注册新容器，并保证稳定 ID 不会被静默覆盖。
-    pub fn register_veil(&mut self, veil: VeilConfig) -> Result<(), VeilError> {
-        self.ensure_veil_id_available(&veil.veil_id)?;
-        let veil_id = veil.veil_id.clone();
-        self.veils.insert(veil_id, veil);
-        Ok(())
-    }
-
-    /// 返回唯一持有指定稳定 ID 的配置键。
-    fn veil_key_by_veil_id(&self, veil_id: &str) -> Result<String, VeilError> {
-        let matched_keys: Vec<_> = self
-            .veils
-            .iter()
-            .filter(|(_, veil)| veil.veil_id == veil_id)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        match matched_keys.as_slice() {
-            [key] => Ok(key.clone()),
-            [] => Err(VeilError::VeilNotFound(format!(
-                "容器 ID '{}' 不存在",
-                veil_id
-            ))),
-            _ => Err(VeilError::VeilIdConflict(format!(
-                "容器 ID '{}' 对应多个容器记录",
-                veil_id
-            ))),
-        }
-    }
-
-    /// 确认 `veil_dir` 中的实际身份与配置中的稳定 ID 一致。
-    ///
-    /// 未注册的脱离 Veil 允许直接使用；只要 ID 已注册，其 `veil_dir` 就必须一致。
-    fn ensure_veil_dir_matches(&self, veil_id: &str, veil_dir: &Path) -> Result<(), VeilError> {
-        let key = match self.veil_key_by_veil_id(veil_id) {
-            Ok(key) => key,
-            Err(VeilError::VeilNotFound(_)) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-
-        let configured_path = self.get_veil_dir(&key)?;
-        if comparable_path(&configured_path) != comparable_path(veil_dir) {
-            return Err(VeilError::VeilIdConflict(format!(
-                "容器 ID '{}' 已绑定到 {}，不能再次绑定到 {}",
-                veil_id,
-                configured_path.display(),
-                veil_dir.display()
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// 校验所有容器记录的稳定 ID 唯一且非空。
-    fn validate_veil_ids(&self) -> Result<(), VeilError> {
+    fn validate(&self) -> Result<(), VeilError> {
         let mut seen = HashSet::new();
-
-        for (key, veil) in &self.veils {
-            if veil.veil_id.trim().is_empty() {
-                return Err(VeilError::InvalidFormat(format!(
-                    "配置项 '{}' 缺少 veil_id",
-                    key
-                )));
-            }
-            if !seen.insert(veil.veil_id.as_str()) {
+        for veil in self.veils.values() {
+            crate::work::validate_veil_id(&veil.veil_id)?;
+            if !seen.insert(&veil.veil_id) {
                 return Err(VeilError::VeilIdConflict(format!(
                     "容器 ID '{}' 在配置中重复",
                     veil.veil_id
                 )));
             }
         }
-
+        for work in self.work.default.iter().chain(self.work.custom.values()) {
+            work.validate_path()?;
+        }
         Ok(())
     }
 
-    /// 内部按配置键、展示名称、稳定 ID 或目录名查找容器。
-    ///
-    /// 展示名称等非唯一字段只有恰好匹配一个容器时才返回其配置键。普通命令的
-    /// 外部输入由 [`GlobalConfig::resolve_veil`] 单独限制。
+    /// 输入当前挂载卷快照，便于复用实际发现流程及验证换盘场景。
+    /// 配置不存在时跳过；发现过程不创建文件或工作区。
+    pub fn discover_from(
+        local_path: &Path,
+        volumes: &[VolumeInfo],
+    ) -> Result<Vec<Self>, VeilError> {
+        let mut configs = vec![Self::load_from(local_path)?];
+        let mut seen = HashSet::from([comparable_path(local_path)]);
+        for volume in volumes.iter().filter(|volume| volume.if_out_volume) {
+            let path = volume.root_path.join(".veil/config.jsonc");
+            if volume.root_path.is_dir()
+                && path.try_exists()?
+                && seen.insert(comparable_path(&path))
+            {
+                configs.push(Self::load_from(&path)?);
+            }
+        }
+        Ok(configs)
+    }
+
+    /// 每次寻址重新枚举挂载卷，使用调用方尚未保存的当前配置。
+    fn all_configs(&self) -> Result<Vec<Self>, VeilError> {
+        let own_path = comparable_path(&self.source_path()?);
+        let mut configs = Self::discover_from(&Self::config_path()?, &volume::mounted_volumes()?)?;
+        configs.retain(|config| comparable_path(&config.source_path().unwrap()) != own_path);
+        configs.push(self.clone());
+        Ok(configs)
+    }
+
+    /// 创建位置所属盘的配置；本机统一使用用户主目录配置。
+    pub fn for_location(location: &Path) -> Result<Self, VeilError> {
+        let volume = volume::volume_for_path(location)?;
+        if volume.if_out_volume {
+            Self::load_from(&volume.root_path.join(".veil/config.jsonc"))
+        } else {
+            Self::load()
+        }
+    }
+
+    /// 显式路径按路径所属盘登记；名称优先在创建位置所属配置中解析。
+    pub fn creation_work(
+        location: &Path,
+        name: Option<&str>,
+        root: Option<&Path>,
+        dedicated: bool,
+    ) -> Result<(Self, WorkConfig), VeilError> {
+        let mut config = Self::for_location(root.unwrap_or(location))?;
+        if let Some(root) = root {
+            let work = config.register_work_at(&std::path::absolute(root)?, dedicated)?;
+            return Ok((config, work));
+        }
+        let name = name.unwrap_or("default");
+        if name == "default" {
+            config.ensure_default_work()?;
+            let work = config.work.default.clone().unwrap();
+            return Ok((config, work));
+        }
+        if let Some(work) = config.work.custom.get(name).cloned() {
+            return Ok((config, work));
+        }
+        let matches: Vec<_> = config
+            .all_configs()?
+            .into_iter()
+            .filter_map(|config| {
+                config
+                    .work
+                    .custom
+                    .get(name)
+                    .cloned()
+                    .map(|work| (config, work))
+            })
+            .collect();
+        let mut matches = matches.into_iter();
+        let found = matches
+            .next()
+            .ok_or_else(|| VeilError::WorkError(format!("工作区 '{name}' 不存在")))?;
+        if matches.next().is_some() {
+            return Err(VeilError::WorkError(format!(
+                "工作区名称 '{name}' 不唯一，请使用 --work-root 指定目录"
+            )));
+        }
+        Ok(found)
+    }
+
+    pub fn ensure_default_work(&mut self) -> Result<(), VeilError> {
+        if self.work.default.is_none() {
+            self.work.default = Some(WorkConfig::default_work()?);
+        }
+        Ok(())
+    }
+
+    pub fn register_custom_work(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        description: Option<String>,
+    ) -> Result<(), VeilError> {
+        let mut work = WorkConfig::custom_work(name.clone(), path, description)?;
+        if let Some(existing) = self.work.custom.get(&name) {
+            work.created_at = existing.created_at.clone();
+        }
+        self.work.custom.insert(name, work);
+        Ok(())
+    }
+
+    pub fn resolve_work_root(&self, work: &WorkConfig) -> Result<PathBuf, VeilError> {
+        work.resolve_root(&self.config_dir()?)
+    }
+
+    /// 显式路径在登记时固定到当前目录；配置中的相对路径只相对于配置目录。
+    pub fn register_work_at(
+        &mut self,
+        path: &Path,
+        dedicated: bool,
+    ) -> Result<WorkConfig, VeilError> {
+        let path = comparable_path(path);
+        for existing in self.work.default.iter().chain(self.work.custom.values()) {
+            if comparable_path(&self.resolve_work_root(existing)?) == path {
+                if dedicated && !matches!(existing.work_type, WorkType::Dedicated) {
+                    return Err(VeilError::WorkError(
+                        "不能把已登记的共享工作区改为专属工作区".into(),
+                    ));
+                }
+                return Ok(existing.clone());
+            }
+        }
+        // 同盘目录尽量相对于配置目录存储，便于换机或更换挂载点。
+        let config_dir = comparable_path(&self.config_dir()?);
+        let stored = relative_path(&config_dir, &path).unwrap_or_else(|| path.clone());
+        let key = stored.to_string_lossy().into_owned();
+        let work = if dedicated {
+            WorkConfig::dedicated_work(stored)?
+        } else {
+            WorkConfig::custom_work(key.clone(), stored, None)?
+        };
+        self.work.custom.insert(key, work.clone());
+        Ok(work)
+    }
+
+    /// 根据实际容器判断 ID 是否已被使用；缓存和旧链接不占用容器 ID。
+    pub fn ensure_veil_id_available(&self, veil_id: &str) -> Result<(), VeilError> {
+        crate::work::validate_veil_id(veil_id)?;
+        match find_by_id(&self.all_configs()?, veil_id) {
+            Ok(_) => Err(VeilError::VeilIdConflict(format!(
+                "容器 ID '{veil_id}' 已存在"
+            ))),
+            Err(VeilError::VeilNotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn register_veil(&mut self, veil: VeilConfig) -> Result<(), VeilError> {
+        crate::work::validate_veil_id(&veil.veil_id)?;
+        if self
+            .veils
+            .values()
+            .any(|existing| existing.veil_id == veil.veil_id)
+        {
+            return Err(VeilError::VeilIdConflict(format!(
+                "容器 ID '{}' 已登记",
+                veil.veil_id
+            )));
+        }
+        self.veils.insert(veil.veil_id.clone(), veil);
+        Ok(())
+    }
+
     pub fn find_veil_key(&self, name_or_id: &str) -> Option<String> {
-        // 配置键是最直接的匹配方式，避免先遍历再判断。
         if self.veils.contains_key(name_or_id) {
             return Some(name_or_id.to_string());
         }
-
-        // 展示名、稳定 ID 和目录名都可以作为用户输入；只有唯一命中才安全返回。
-        let matches: Vec<String> = self
+        let mut matches = self
             .veils
             .iter()
-            .filter(|(_, veil)| {
-                veil.veil_name == name_or_id
-                    || veil.veil_id == name_or_id
-                    || veil.veil_dir_name.as_deref() == Some(name_or_id)
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
-        (matches.len() == 1).then(|| matches[0].clone())
+            .filter(|(_, veil)| veil.veil_name == name_or_id || veil.veil_id == name_or_id);
+        let (key, _) = matches.next()?;
+        matches.next().is_none().then(|| key.clone())
     }
 
-    /// 按稳定 ID 或唯一展示名称查找配置键。
-    ///
-    /// 普通命令只允许 `veil_id`、唯一容器名称和 `.veil-link` 路径。
-    fn find_veil_key_by_name_or_id(&self, name_or_id: &str) -> Result<Option<String>, VeilError> {
-        if let Some((key, _)) = self
-            .veils
-            .iter()
-            .find(|(_, veil)| veil.veil_id == name_or_id)
-        {
-            return Ok(Some(key.clone()));
-        }
-
-        let matches: Vec<_> = self
-            .veils
-            .iter()
-            .filter(|(_, veil)| veil.veil_name == name_or_id)
-            .map(|(key, _)| key.clone())
-            .collect();
-
-        match matches.as_slice() {
-            [] => Ok(None),
-            [key] => Ok(Some(key.clone())),
-            _ => Err(VeilError::VeilNameAmbiguous(format!(
-                "容器名称 '{}' 匹配到多个容器，请改用 veil_id 或 .veil-link 路径",
-                name_or_id
-            ))),
-        }
+    pub fn get_veil_dir(&self, name_or_id: &str) -> Result<PathBuf, VeilError> {
+        Ok(find_container(&self.all_configs()?, name_or_id)?.veil_dir)
     }
 
-    /// 根据 Veil 配置计算实际 `veil_dir`。
-    ///
-    /// 显式记录优先使用 `veil_dir`；共享 Work 则拼接 `WorkConfig.path` 和
-    /// `veil_dir_name`。
-    ///
-    /// # 错误
-    /// Veil、Work 或目录名未注册，或必要路径缺失时返回错误。
-    pub fn get_veil_dir(&self, veil_name: &str) -> Result<PathBuf, VeilError> {
-        let key = self
-            .find_veil_key(veil_name)
-            .ok_or_else(|| VeilError::VeilNotFound(format!("容器 '{}' 不存在", veil_name)))?;
-        let veil = self
-            .veils
-            .get(&key)
-            .ok_or_else(|| VeilError::VeilNotFound(format!("容器 '{}' 不存在", veil_name)))?;
-
-        // 显式 veil_dir 优先于共享 Work 推导。
-        if let Some(path) = &veil.veil_dir {
-            return Ok(path.clone());
-        }
-
-        if veil.dedicated_work {
-            veil.veil_dir.clone().ok_or_else(|| {
-                VeilError::ConfigError(format!("专属 Work 的 veil_dir 未配置: {}", veil_name))
-            })
-        } else {
-            let work_name = veil.work.as_ref().ok_or_else(|| {
-                VeilError::ConfigError(format!("Veil '{}' 的 Work 未配置", veil_name))
-            })?;
-
-            let work = if work_name == "default" {
-                self.work
-                    .default
-                    .as_ref()
-                    .ok_or_else(|| VeilError::ConfigError("默认 Work 未配置".to_string()))?
-            } else {
-                self.work
-                    .custom
-                    .get(work_name)
-                    .ok_or_else(|| VeilError::ConfigError(format!("Work '{}' 不存在", work_name)))?
-            };
-
-            let veil_dir_name = veil.veil_dir_name.as_ref().ok_or_else(|| {
-                VeilError::ConfigError(format!("Veil '{}' 的 veil_dir_name 未配置", veil_name))
-            })?;
-
-            Ok(work.path.join(veil_dir_name))
-        }
-    }
-
-    /// 通过配置键读取实际 Veil 身份，并确认明文头中的 `veil_id`。
-    fn resolve_registered_veil(&self, key: &str) -> Result<ResolvedVeil, VeilError> {
-        let veil = self
-            .veils
-            .get(key)
-            .ok_or_else(|| VeilError::VeilNotFound(format!("容器记录 '{}' 不存在", key)))?;
-        if veil.veil_id.trim().is_empty() {
-            return Err(VeilError::InvalidFormat(format!(
-                "容器记录 '{}' 缺少 veil_id",
-                key
-            )));
-        }
-
-        let veil_dir = self.get_veil_dir(key)?;
-        let header = read_veil_header(&veil_dir)?;
-        if header.veil_id != veil.veil_id {
-            return Err(VeilError::VeilIdConflict(format!(
-                "Veil 记录 '{}' 的 ID 为 '{}'，磁盘实际 ID 为 '{}'",
-                key, veil.veil_id, header.veil_id
-            )));
-        }
-
-        Ok(ResolvedVeil {
-            veil_name: header.veil_name,
-            veil_id: header.veil_id,
-            veil_dir,
-            link_path: None,
-            recovered_link: false,
-        })
-    }
-
-    /// 将普通命令的 Veil 输入解析成实际 `veil_id` 和 `veil_dir`。
-    ///
-    /// 只接受显式的 `.veil-link` 路径、稳定 ID 和配置中的唯一 Veil 名称。Veil 目录
-    /// 只允许由 [`GlobalConfig::resolve_link_target`] 在重建链接时使用。
-    ///
-    /// # 错误
-    /// 链接、配置或目录无法解析，名称不唯一，或输入类型不受支持时返回错误。
+    /// 普通命令仅接受 ID、名称、链接；所有入口共用工作区扫描。
     pub fn resolve_veil(&mut self, input: &str) -> Result<ResolvedVeil, VeilError> {
-        let input_path = PathBuf::from(input);
-        if input_path.exists() {
-            if input_path.is_file() && is_link_path(&input_path) {
-                return self.resolve_link_file(&input_path);
-            }
-
-            if input_path.is_file()
-                && input_path.extension().and_then(|ext| ext.to_str()) == Some("veil")
-            {
-                return Err(VeilError::InvalidFormat(format!(
-                    "{} 是打包文件，请先运行 veil unpack {}",
-                    input_path.display(),
-                    input_path.display()
-                )));
-            }
-
-            if input_path.is_dir() {
-                return Err(VeilError::InvalidFormat(format!(
-                    "工作区目录不能直接作为容器参数: {}；请使用 .veil-link 路径",
-                    input_path.display()
-                )));
-            }
-
+        let path = Path::new(input);
+        if is_link_path(path) {
+            return if path.try_exists()? {
+                self.resolve_link_file(path)
+            } else {
+                self.resolve_missing_link(path)
+            };
+        }
+        if path.is_dir() {
             return Err(VeilError::InvalidFormat(format!(
-                "不支持的容器参数: {}；请使用 .veil-link 路径、容器名称或 veil_id",
-                input
+                "工作区目录不能直接作为容器参数: {}；请使用 .veil-link 路径",
+                path.display()
             )));
         }
-
-        if is_link_path(&input_path) {
-            return self.resolve_missing_link(&input_path);
+        if path.is_file() {
+            return Err(VeilError::InvalidFormat(
+                if path.extension().and_then(|ext| ext.to_str()) == Some("veil") {
+                    format!(
+                        "{} 是打包文件，请先运行 veil unpack {}",
+                        path.display(),
+                        path.display()
+                    )
+                } else {
+                    format!("不支持的容器参数: {input}")
+                },
+            ));
         }
-
-        if let Some(key) = self.find_veil_key_by_name_or_id(input)? {
-            return self.resolve_registered_veil(&key);
-        }
-
-        Err(VeilError::VeilNotFound(format!(
-            "找不到容器名称或 ID '{}'；也可以输入显式的 .veil-link 路径",
-            input
-        )))
+        find_container(&self.all_configs()?, input)
     }
 
-    /// 解析 `veil link` 的目标，额外允许直接输入 `veil_dir` 进行恢复。
+    /// 重建链接时允许直接输入容器目录，但仍检查已登记工作区中有无副本。
     pub fn resolve_link_target(&mut self, input: &str) -> Result<ResolvedVeil, VeilError> {
-        let input_path = PathBuf::from(input);
-        if input_path.is_dir() && input_path.join(".veil-meta").exists() {
-            let header = read_veil_header(&input_path)?;
-            self.ensure_veil_dir_matches(&header.veil_id, &input_path)?;
-            return Ok(ResolvedVeil {
-                veil_name: header.veil_name,
-                veil_id: header.veil_id,
-                veil_dir: input_path,
-                link_path: None,
-                recovered_link: false,
-            });
+        let path = Path::new(input);
+        if path.is_dir() && path.join(VEIL_INFO_FILE).is_file() {
+            let header = read_veil_header(path)?;
+            match find_by_id(&self.all_configs()?, &header.veil_id) {
+                Ok(resolved) if comparable_path(&resolved.veil_dir) == comparable_path(path) => {
+                    return Ok(resolved);
+                }
+                Ok(_) => {
+                    return Err(VeilError::VeilIdConflict(format!(
+                        "容器 ID '{}' 存在多个副本",
+                        header.veil_id
+                    )));
+                }
+                Err(VeilError::VeilNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+            return Ok(resolved_header(header, std::path::absolute(path)?));
         }
-
         self.resolve_veil(input)
     }
 
-    /// 为已注册容器生成并保存新的 `.veil-link`。
-    ///
-    /// 链接使用 Veil 的稳定 ID、当前 `veil_dir` 和所在卷信息生成，并加入配置索引。
-    ///
-    /// # 错误
-    /// Veil 或目录不存在、缺少 `veil_id`、链接写入或配置保存失败时返回错误。
     pub fn register_link(
         &mut self,
         veil_id: &str,
         link_path: &Path,
     ) -> Result<VeilLink, VeilError> {
-        // 先由稳定 ID 定位唯一容器，再取得当前工作区。
-        let veil_key = self.veil_key_by_veil_id(veil_id)?;
-        let veil = self
-            .veils
-            .get(&veil_key)
-            .ok_or_else(|| VeilError::VeilNotFound(format!("容器 ID '{}' 不存在", veil_id)))?;
-        if veil.veil_id.is_empty() {
-            return Err(VeilError::InvalidFormat(format!(
-                "容器 ID '{}' 缺少 veil_id",
-                veil_id
-            )));
-        }
-        let veil_name = veil.veil_name.clone();
-        let veil_dir = self.get_veil_dir(&veil_key)?;
-
-        self.register_link_at(veil_id, &veil_name, &veil_dir, link_path)
+        let resolved = find_by_id(&self.all_configs()?, veil_id)?;
+        self.register_link_at(veil_id, &resolved.veil_name, &resolved.veil_dir, link_path)
     }
 
-    /// 使用调用方提供的 Veil 身份和 `veil_dir` 创建链接。
-    ///
-    /// 方法会登记目标卷、写入链接文件、缓存原始内容，并把新链接追加到对应容器记录。
-    ///
-    /// # 错误
-    /// 卷识别、链接序列化、文件写入、容器查找或配置保存失败时返回错误。
     pub fn register_link_at(
         &mut self,
         veil_id: &str,
-        veil_name: &str,
+        _veil_name: &str,
         veil_dir: &Path,
         link_path: &Path,
     ) -> Result<VeilLink, VeilError> {
-        let veil_key = self
-            .veil_key_by_veil_id(veil_id)
-            .map_err(|error| match error {
-                VeilError::VeilNotFound(_) => {
-                    VeilError::VeilNotFound(format!("容器 '{}' 不存在", veil_name))
-                }
-                other => other,
-            })?;
-
-        // 先登记卷，再计算相对路径；链接文件只保存相对卷根的路径。
-        let volume = volume::volume_for_path(veil_dir)?;
-        self.register_volume(&volume);
-        let relative_path = veil_dir
-            .strip_prefix(&volume.mount_path)
-            .unwrap_or(veil_dir)
-            .to_path_buf();
-        let link = VeilLink::new(
-            veil_id,
-            veil_name,
-            relative_path,
-            volume.volume_id,
-            volume.volume_label,
-        );
-        // 链接内容和配置中的原始字节缓存必须来自同一份序列化结果。
+        let resolved = find_by_id(&self.all_configs()?, veil_id)?;
+        if comparable_path(&resolved.veil_dir) != comparable_path(veil_dir) {
+            return Err(VeilError::VeilIdConflict(format!(
+                "容器 ID '{veil_id}' 的实际位置不一致"
+            )));
+        }
+        let header = read_veil_header(veil_dir)?;
+        let link = VeilLink::new(veil_id, &header.veil_name, &header.created_at);
         link.save(link_path)?;
-        let raw = fs::read(link_path)?;
-        self.cache_link_content(link_path, &link, &raw);
-
-        let veil = self
-            .veils
-            .get_mut(&veil_key)
-            .ok_or_else(|| VeilError::VeilNotFound(format!("容器 '{}' 不存在", veil_name)))?;
-
-        // 容器记录保存绝对路径，便于后续不依赖当前目录定位链接。
-        let stored_path = absolute_path(link_path);
-        if !veil.links.iter().any(|path| path == &stored_path) {
-            veil.links.push(stored_path);
-        }
+        self.cache_link_content(link_path, &link);
         self.save()?;
-
         Ok(link)
     }
 
-    /// 读取链接并把解析结果及原始字节缓存到全局配置。
-    ///
-    /// 当链接所在卷与链接记录一致时会同步更新卷缓存。
-    ///
-    /// # 错误
-    /// 链接读取、解析或配置保存失败时返回错误。
     pub fn cache_link(&mut self, link_path: &Path) -> Result<VeilLink, VeilError> {
-        // 同时保留解析结构和原始字节，前者用于查询，后者用于精确恢复。
-        let raw = fs::read(link_path)?;
         let link = VeilLink::load(link_path)?;
-        self.cache_link_content(link_path, &link, &raw);
-        if let Ok(link_volume) = volume::volume_for_path(link_path)
-            && link.veil.volume_id == link_volume.volume_id
-        {
-            self.register_volume(&link_volume);
-        }
+        self.cache_link_content(link_path, &link);
         self.save()?;
         Ok(link)
     }
 
-    /// 使用配置缓存的卷挂载路径解析链接目标。
-    ///
-    /// 仅当缓存卷路径仍存在时才把该路径作为挂载提示，否则回退到链接自身的卷校验。
-    ///
-    /// # 错误
-    /// 链接目标卷不可用或 `veil_dir` 无法解析时返回错误。
     pub fn resolve_link_veil_dir(
         &self,
         link: &VeilLink,
-        link_path: &Path,
+        _link_path: &Path,
     ) -> Result<PathBuf, VeilError> {
-        // 缓存挂载点仍存在时才使用，否则把校验交回链接的卷 ID。
-        let mount_path = self
-            .volumes
-            .get(&link.veil.volume_id)
-            .filter(|volume| volume.mount_path.exists())
-            .map(|volume| volume.mount_path.as_path());
-        link.resolve_veil_dir_with_mount(link_path, mount_path)
+        link.validate()?;
+        Ok(find_by_id(&self.all_configs()?, &link.veil.veil_id)?.veil_dir)
     }
 
-    /// 新增或更新卷缓存，并记录本次探测时间。
-    fn register_volume(&mut self, volume: &VolumeInfo) {
-        // 同一 volume_id 重新探测时直接覆盖旧路径和标签。
-        self.volumes.insert(
-            volume.volume_id.clone(),
-            VolumeRecord {
-                volume_id: volume.volume_id.clone(),
-                volume_label: volume.volume_label.clone(),
-                mount_path: volume.mount_path.clone(),
-                is_external: volume.is_external,
-                last_seen_at: chrono::Utc::now().to_rfc3339(),
-            },
-        );
-    }
-
-    /// 缓存 `.veil-link` 的原始字节和解析结果。
-    ///
-    /// `raw_hex` 保存与文件完全相同的字节，`content_hash` 用于检查恢复副本是否损坏。
-    fn cache_link_content(&mut self, link_path: &Path, link: &VeilLink, raw: &[u8]) {
-        // 路径统一转为绝对形式，保证同一链接不会产生两条缓存记录。
+    fn cache_link_content(&mut self, link_path: &Path, link: &VeilLink) {
         let link_path = absolute_path(link_path);
         let now = chrono::Utc::now().to_rfc3339();
-        let content_hash = blake3::hash(raw).to_hex().to_string();
-        let raw_hex = hex::encode(raw);
-
-        // 已存在记录就地更新，避免链接被反复解析后缓存无限增长。
-        if let Some(existing) = self
+        if let Some(record) = self
             .links
             .iter_mut()
             .find(|record| record.link_path == link_path)
         {
-            existing.veil_id = link.veil.veil_id.clone();
-            existing.veil_name = link.veil.veil_name.clone();
-            existing.volume_id = link.veil.volume_id.clone();
-            existing.volume_label = link.veil.volume_label.clone();
-            existing.relative_path = link.veil.path.clone();
-            existing.status = LinkStatus::Present;
-            existing.content_hash = content_hash;
-            existing.raw_hex = raw_hex;
-            existing.last_seen_at = now;
+            record.link = link.clone();
+            record.seen_status = LinkStatus::Present;
+            record.last_seen_at = now;
         } else {
             self.links.push(LinkRecord {
-                link_path,
-                veil_id: link.veil.veil_id.clone(),
-                veil_name: link.veil.veil_name.clone(),
-                volume_id: link.veil.volume_id.clone(),
-                volume_label: link.veil.volume_label.clone(),
-                relative_path: link.veil.path.clone(),
-                status: LinkStatus::Present,
-                content_hash,
-                raw_hex,
+                link: link.clone(),
+                link_path: link_path.clone(),
+                seen_status: LinkStatus::Present,
                 last_seen_at: now,
             });
         }
-
-        // 链接中的展示信息是当前可见来源，可刷新卷和容器的用户界面字段。
-        if let Some(volume) = self.volumes.get_mut(&link.veil.volume_id) {
-            volume.volume_label = link.veil.volume_label.clone();
-            volume.last_seen_at = chrono::Utc::now().to_rfc3339();
-        }
-
-        if let Some(veil) = self
+        let veil = self
             .veils
-            .values_mut()
-            .find(|veil| veil.veil_id == link.veil.veil_id)
-        {
-            veil.veil_name = link.veil.veil_name.clone();
+            .entry(link.veil.veil_id.clone())
+            .or_insert_with(|| VeilConfig {
+                veil_id: link.veil.veil_id.clone(),
+                veil_name: link.veil.veil_name.clone(),
+                created_at: link.veil.created_at.clone(),
+                last_accessed: None,
+                links: Vec::new(),
+            });
+        veil.veil_name = link.veil.veil_name.clone();
+        if !veil.links.contains(&link_path) {
+            veil.links.push(link_path);
         }
     }
 
-    /// 读取链接、更新缓存并解析其 `veil_dir`。
-    ///
-    /// # 错误
-    /// 链接读取、解析、卷校验或 `veil_dir` 解析失败时返回错误。
     fn resolve_link_file(&mut self, link_path: &Path) -> Result<ResolvedVeil, VeilError> {
-        // 先读取原始字节，随后解析和缓存都使用同一份内容。
-        let raw = fs::read(link_path)?;
         let link = VeilLink::load(link_path)?;
-        // 优先使用仍存在的卷挂载缓存，否则回退到链接自身的卷校验。
-        let veil_dir = self.resolve_link_veil_dir(&link, link_path)?;
-        let header = read_veil_header(&veil_dir)?;
-        if header.veil_id != link.veil.veil_id {
-            return Err(VeilError::VeilIdConflict(format!(
-                "链接记录的 ID 为 '{}'，工作区实际 ID 为 '{}'",
-                link.veil.veil_id, header.veil_id
-            )));
-        }
-        self.ensure_veil_dir_matches(&header.veil_id, &veil_dir)?;
-        self.cache_link_content(link_path, &link, &raw);
-
-        Ok(ResolvedVeil {
-            veil_name: header.veil_name,
-            veil_id: header.veil_id,
-            veil_dir,
-            link_path: Some(link_path.to_path_buf()),
-            recovered_link: false,
-        })
+        let mut resolved = find_by_id(&self.all_configs()?, &link.veil.veil_id)?;
+        self.cache_link_content(link_path, &link);
+        resolved.link_path = Some(link_path.to_path_buf());
+        Ok(resolved)
     }
 
-    /// 在链接文件缺失时，通过配置中的原始字节缓存恢复。
-    ///
-    /// # 错误
-    /// 缓存副本损坏或配置中没有可恢复副本时返回错误。
     fn resolve_missing_link(&mut self, link_path: &Path) -> Result<ResolvedVeil, VeilError> {
-        let missing_path = absolute_path(link_path);
-        // 只接受配置保存的原始链接字节，避免仅凭文件名猜测目标容器。
-        if self.restore_cached_link(&missing_path)? {
-            let mut resolved = self.resolve_link_file(&missing_path)?;
-            resolved.recovered_link = true;
-            return Ok(resolved);
-        }
-
-        Err(VeilError::VeilNotFound(format!(
-            "找不到容器：链接文件不存在，且配置中没有可恢复的原始字节: {}",
-            link_path.display()
-        )))
-    }
-
-    /// 从 `config.toml` 中的原始字节副本恢复缺失的 `.veil-link`。
-    ///
-    /// 写入前校验内容哈希。返回 `false` 表示配置中没有可恢复副本。
-    ///
-    /// # 错误
-    /// 十六进制副本损坏、哈希不匹配、目录创建、文件写入或配置保存失败时返回错误。
-    fn restore_cached_link(&mut self, link_path: &Path) -> Result<bool, VeilError> {
-        let link_path = absolute_path(link_path);
-        let Some(record) = self
-            .links
+        let path = absolute_path(link_path);
+        let records: Vec<_> = self
+            .all_configs()?
+            .into_iter()
+            .flat_map(|config| config.links)
+            .filter(|record| record.link_path == path)
+            .collect();
+        let record = records.first().ok_or_else(|| {
+            VeilError::VeilNotFound(format!(
+                "当前未找到容器：链接不存在且没有缓存正文: {}",
+                path.display()
+            ))
+        })?;
+        if records
             .iter()
-            .find(|record| record.link_path == link_path)
-            .cloned()
-        else {
-            return Ok(false);
-        };
-
-        if record.raw_hex.is_empty() {
-            return Ok(false);
+            .any(|other| other.link.veil.veil_id != record.link.veil.veil_id)
+        {
+            return Err(VeilError::VeilIdConflict(
+                "同一链接路径缓存了不同容器 ID".into(),
+            ));
         }
+        record.link.validate()?;
+        // 先确认唯一目标，未挂载或歧义时不恢复链接、不创建任何目录。
+        let mut resolved = find_by_id(&self.all_configs()?, &record.link.veil.veil_id)?;
+        record.link.save(&path)?;
+        self.cache_link_content(&path, &record.link);
+        self.save()?;
+        resolved.link_path = Some(path);
+        resolved.recovered_link = true;
+        Ok(resolved)
+    }
+}
 
-        let raw = hex::decode(&record.raw_hex)
-            .map_err(|error| VeilError::ConfigError(format!("链接缓存副本损坏: {}", error)))?;
-        // 哈希用于确认缓存副本没有被改写，缺失旧哈希时仍允许恢复。
-        let actual_hash = blake3::hash(&raw).to_hex().to_string();
-        if !record.content_hash.is_empty() && actual_hash != record.content_hash {
-            return Err(VeilError::ConfigError(format!(
-                "链接缓存副本哈希不匹配: {}",
-                link_path.display()
+/// 汇总工作区，消除别名及符号链接产生的同目录重复登记。
+fn work_roots(configs: &[GlobalConfig]) -> Result<Vec<PathBuf>, VeilError> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for config in configs {
+        for work in config
+            .work
+            .default
+            .iter()
+            .chain(config.work.custom.values())
+        {
+            let root = comparable_path(&config.resolve_work_root(work)?);
+            if matches!(work.work_type, WorkType::Dedicated) {
+                let entries = match fs::read_dir(&root) {
+                    Ok(entries) => Some(entries),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                let mut containers = 0;
+                if let Some(entries) = entries {
+                    for entry in entries {
+                        let path = entry?.path();
+                        if path.is_dir() && path.join(VEIL_INFO_FILE).try_exists()? {
+                            containers += 1;
+                        }
+                        if containers > 1 {
+                            return Err(VeilError::WorkError(format!(
+                                "专属工作区只能保存一个容器: {}",
+                                root.display()
+                            )));
+                        }
+                    }
+                }
+            }
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+    }
+    Ok(roots)
+}
+
+fn find_by_id(configs: &[GlobalConfig], veil_id: &str) -> Result<ResolvedVeil, VeilError> {
+    crate::work::validate_veil_id(veil_id)?;
+    let mut matches = Vec::new();
+    let mut seen = HashSet::new();
+    for root in work_roots(configs)? {
+        let path = root.join(veil_id);
+        if !path.try_exists()? {
+            continue;
+        }
+        let header = read_veil_header(&path)?;
+        if header.veil_id != veil_id {
+            return Err(VeilError::VeilIdConflict(format!(
+                "目录 {} 与元数据 ID '{}' 不一致",
+                path.display(),
+                header.veil_id
             )));
         }
-
-        if let Some(parent) = link_path.parent() {
-            crate::fsutil::create_dir_all_durable(parent)?;
+        if seen.insert(comparable_path(&path)) {
+            matches.push(resolved_header(header, path));
         }
-        // 恢复的是捕获时的原始字节，避免 TOML 重新序列化造成内容漂移。
-        crate::fsutil::atomic_write(&link_path, &raw)?;
-
-        if let Some(existing) = self
-            .links
-            .iter_mut()
-            .find(|item| item.link_path == link_path)
-        {
-            existing.status = LinkStatus::Present;
-            existing.last_seen_at = chrono::Utc::now().to_rfc3339();
-            existing.content_hash = actual_hash;
-        }
-        self.save()?;
-        Ok(true)
+    }
+    match matches.len() {
+        0 => Err(VeilError::VeilNotFound(format!(
+            "当前未找到容器 '{veil_id}'"
+        ))),
+        1 => Ok(matches.remove(0)),
+        _ => Err(VeilError::VeilIdConflict(format!(
+            "容器 ID '{veil_id}' 匹配到多个副本，无法确定目标: {}",
+            matches
+                .iter()
+                .map(|item| item.veil_dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ))),
     }
 }
 
-/// 读取 `veil_dir/.veil-meta` 明文头，用于确认 Veil 稳定身份。
-fn read_veil_header(veil_dir: &Path) -> Result<MetaHeader, VeilError> {
-    let meta_path = veil_dir.join(".veil-meta");
-    let bytes = fs::read(&meta_path).map_err(|error| {
-        VeilError::ConfigError(format!(
-            "读取容器元数据失败 {}: {}",
-            meta_path.display(),
-            error
-        ))
-    })?;
-    MetaHeader::from_bytes(&bytes)
+fn find_container(configs: &[GlobalConfig], input: &str) -> Result<ResolvedVeil, VeilError> {
+    if crate::work::validate_veil_id(input).is_ok() {
+        match find_by_id(configs, input) {
+            Err(VeilError::VeilNotFound(_)) => {}
+            result => return result,
+        }
+    }
+    let mut matches = Vec::new();
+    let mut seen = HashSet::new();
+    for root in work_roots(configs)? {
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if !path.is_dir() || !path.join(VEIL_INFO_FILE).try_exists()? {
+                continue;
+            }
+            let header = read_veil_header(&path)?;
+            if header.veil_name == input && seen.insert(comparable_path(&path)) {
+                matches.push(resolved_header(header, path));
+            }
+        }
+    }
+    // 同名副本先报告 ID 歧义，其他同名容器提示使用 ID。
+    let mut ids = HashSet::new();
+    for item in &matches {
+        if !ids.insert(&item.veil_id) {
+            return Err(VeilError::VeilIdConflict(format!(
+                "容器 ID '{}' 匹配到多个副本",
+                item.veil_id
+            )));
+        }
+    }
+    match matches.len() {
+        0 => Err(VeilError::VeilNotFound(format!("当前未找到容器 '{input}'"))),
+        1 => find_by_id(configs, &matches[0].veil_id),
+        _ => Err(VeilError::VeilNameAmbiguous(format!(
+            "容器名称 '{input}' 匹配到多个容器，请使用容器 ID"
+        ))),
+    }
 }
 
-/// 对 Veil 目录路径做可比较的规范化，优先消除符号链接和相对路径差异。
+fn resolved_header(header: MetaHeader, veil_dir: PathBuf) -> ResolvedVeil {
+    ResolvedVeil {
+        veil_name: header.veil_name,
+        veil_id: header.veil_id,
+        veil_dir,
+        link_path: None,
+        recovered_link: false,
+    }
+}
+
+/// 仅读取有界的明文头，不加载或解密文件清单。
+fn read_veil_header(veil_dir: &Path) -> Result<MetaHeader, VeilError> {
+    use std::io::Read;
+    let mut file = fs::File::open(veil_dir.join(VEIL_INFO_FILE))?;
+    let mut prefix = [0u8; 10];
+    file.read_exact(&mut prefix)?;
+    if &prefix[..8] != crate::metadata::MAGIC {
+        return Err(VeilError::InvalidFormat("元数据魔数无效".into()));
+    }
+    let mut bytes = vec![0; 10 + u16::from_le_bytes([prefix[8], prefix[9]]) as usize];
+    bytes[..10].copy_from_slice(&prefix);
+    file.read_exact(&mut bytes[10..])?;
+    let header = MetaHeader::from_bytes(&bytes)?;
+    crate::work::validate_veil_id(&header.veil_id)?;
+    if veil_dir.file_name().and_then(|name| name.to_str()) != Some(&header.veil_id) {
+        return Err(VeilError::VeilIdConflict(format!(
+            "容器目录名必须与元数据 veil_id 一致: {}，实际 ID '{}'",
+            veil_dir.display(),
+            header.veil_id
+        )));
+    }
+    Ok(header)
+}
+
 fn comparable_path(path: &Path) -> PathBuf {
     let absolute = absolute_path(path);
-    fs::canonicalize(&absolute).unwrap_or(absolute)
+    if let Ok(path) = fs::canonicalize(&absolute) {
+        return path;
+    }
+    // 尚未创建的目录也消除符号链接祖先，并规范化 . 和 ..。
+    for ancestor in absolute.ancestors() {
+        if let Ok(base) = fs::canonicalize(ancestor) {
+            let mut resolved = base;
+            for component in absolute.strip_prefix(ancestor).unwrap().components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        resolved.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => resolved.push(other.as_os_str()),
+                }
+            }
+            return resolved;
+        }
+    }
+    absolute
 }
 
-/// 判断路径扩展名是否严格等于 `.veil-link`。
+fn relative_path(base: &Path, target: &Path) -> Option<PathBuf> {
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = target.components().collect();
+    if base.first() != target.first() {
+        return None;
+    }
+    let common = base.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    let mut result = PathBuf::new();
+    for _ in common..base.len() {
+        result.push("..");
+    }
+    for part in &target[common..] {
+        result.push(part.as_os_str());
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    Some(result)
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
 fn is_link_path(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()) == Some(LINK_EXTENSION)
-}
-
-/// 将路径转换为绝对形式；当前目录不可用时以 `.` 为基准回退。
-fn absolute_path(path: &Path) -> PathBuf {
-    // 绝对路径原样返回，避免不必要的当前目录依赖。
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::veil_ops::VeilManager;
+    use crate::metadata::AlgorithmId;
 
-    /// 构造仅用于配置唯一性测试的容器记录。
-    fn veil(veil_id: &str, veil_name: &str) -> VeilConfig {
-        VeilConfig {
-            veil_id: veil_id.to_string(),
-            veil_name: veil_name.to_string(),
-            work: Some("default".to_string()),
-            veil_dir_name: Some(veil_id.to_string()),
-            veil_dir: None,
-            dedicated_work: false,
-            created_at: "2026-09-12T00:00:00Z".to_string(),
-            last_accessed: None,
-            links: Vec::new(),
+    fn config_at(root: &Path) -> GlobalConfig {
+        let mut config = GlobalConfig::load_from(&root.join(".veil/config.jsonc")).unwrap();
+        config.ensure_default_work().unwrap();
+        config
+    }
+
+    fn container(root: &Path, id: &str, name: &str) -> PathBuf {
+        let path = root.join(id);
+        fs::create_dir_all(&path).unwrap();
+        let header = MetaHeader::new(
+            [8; 32],
+            [9; 12],
+            AlgorithmId::ChaCha20Poly1305,
+            id.into(),
+            name.into(),
+            "2020-01-02T03:04:05Z".into(),
+        );
+        fs::write(path.join(VEIL_INFO_FILE), header.to_bytes().unwrap()).unwrap();
+        fs::write(path.join("random.enc"), b"unchanged ciphertext").unwrap();
+        path
+    }
+
+    fn volume(root: &Path) -> VolumeInfo {
+        VolumeInfo {
+            volume_name: "external".into(),
+            root_path: root.into(),
+            if_out_volume: true,
         }
     }
 
-    /// 注册第二个同 ID 的容器时必须拒绝，并保留原记录。
     #[test]
-    fn register_veil_rejects_duplicate_veil_id() {
-        let mut config = GlobalConfig::default();
-        config.register_veil(veil("veil-same", "first")).unwrap();
-
-        let error = config
-            .register_veil(veil("veil-same", "second"))
-            .unwrap_err();
-
-        assert!(matches!(error, VeilError::VeilIdConflict(_)));
-        assert_eq!(config.veils["veil-same"].veil_name, "first");
+    fn discovery_skips_missing_configs_without_creating_files() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let local = temp.path().join("home/.veil/config.jsonc");
+        let disk = temp.path().join("disk");
+        fs::create_dir(&disk).unwrap();
+        let configs = GlobalConfig::discover_from(&local, &[volume(&disk)]).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert!(matches!(
+            find_by_id(&configs, "veil-missing"),
+            Err(VeilError::VeilNotFound(_))
+        ));
+        assert!(!local.exists());
+        assert!(!disk.join(".veil").exists());
     }
 
-    /// 加载或保存前的校验必须拒绝同一 ID 出现在两条容器记录中。
     #[test]
-    fn validate_veil_ids_rejects_duplicate_values() {
-        let mut config = GlobalConfig::default();
-        config
-            .veils
-            .insert("first-key".to_string(), veil("veil-same", "first"));
-        config
-            .veils
-            .insert("second-key".to_string(), veil("veil-same", "second"));
-
-        let error = config.validate_veil_ids().unwrap_err();
-
-        assert!(matches!(error, VeilError::VeilIdConflict(_)));
-    }
-
-    /// 普通命令拒绝工作区目录，链接恢复入口仍可读取真实 `veil_id`。
-    #[test]
-    fn resolve_veil_reads_veil_id_from_veil_metadata() {
-        crate::kdf::enable_fast_test_kdf();
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let veil_dir = temp_dir.path().join("detached");
-        VeilManager::new(veil_dir.clone())
-            .init_veil_with_id("veil-actual", "actual-name", "default", "password")
+    fn disk_config_follows_new_mount_and_new_computer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let first_mount = temp.path().join("disk-one");
+        let new_mount = temp.path().join("disk-two");
+        let disk = config_at(&first_mount);
+        let root = disk
+            .resolve_work_root(disk.work.default.as_ref().unwrap())
             .unwrap();
-
-        let mut config = GlobalConfig::default();
-        let error = config.resolve_veil(veil_dir.to_str().unwrap()).unwrap_err();
-        assert!(matches!(error, VeilError::InvalidFormat(_)));
-
-        let resolved = config
-            .resolve_link_target(veil_dir.to_str().unwrap())
-            .unwrap();
-
-        assert_eq!(resolved.veil_id, "veil-actual");
-        assert_eq!(resolved.veil_name, "actual-name");
-        assert_eq!(resolved.veil_dir, veil_dir);
-    }
-
-    /// 配置中的名称和稳定 ID 都可以作为普通命令输入。
-    #[test]
-    fn resolve_veil_accepts_unique_name_and_veil_id() {
-        crate::kdf::enable_fast_test_kdf();
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let veil_dir = temp_dir.path().join("registered");
-        VeilManager::new(veil_dir.clone())
-            .init_veil_with_id("veil-actual", "actual-name", "default", "password")
-            .unwrap();
-
-        let mut config = GlobalConfig::default();
-        config.work.default = Some(WorkConfig {
-            path: temp_dir.path().to_path_buf(),
-            work_type: crate::work::WorkType::Default,
-            description: None,
-            created_at: "2026-09-12T00:00:00Z".to_string(),
-        });
-        let mut record = veil("veil-actual", "actual-name");
-        record.veil_dir_name = Some("registered".to_string());
-        config.register_veil(record).unwrap();
-
+        container(&root, "veil-portable", "photos");
+        disk.save().unwrap();
+        let link_path = temp.path().join("original.veil-link");
+        let link = VeilLink::new("veil-portable", "photos", "2020-01-02T03:04:05Z");
+        link.save(&link_path).unwrap();
+        let original = fs::read(&link_path).unwrap();
+        fs::rename(&first_mount, &new_mount).unwrap();
+        let local = temp.path().join("new-computer/.veil/config.jsonc");
+        let configs = GlobalConfig::discover_from(&local, &[volume(&new_mount)]).unwrap();
+        let target =
+            find_by_id(&configs, &VeilLink::load(&link_path).unwrap().veil.veil_id).unwrap();
         assert_eq!(
-            config.resolve_veil("actual-name").unwrap().veil_id,
-            "veil-actual"
+            target.veil_dir,
+            comparable_path(&new_mount.join(".veil/works/default/veil-portable"))
         );
         assert_eq!(
-            config.resolve_veil("veil-actual").unwrap().veil_id,
-            "veil-actual"
+            find_container(&configs, "photos").unwrap().veil_dir,
+            target.veil_dir
+        );
+        assert_eq!(fs::read(link_path).unwrap(), original);
+        assert!(!local.exists());
+        let offline = GlobalConfig::discover_from(&local, &[]).unwrap();
+        assert!(matches!(
+            find_by_id(&offline, &link.veil.veil_id),
+            Err(VeilError::VeilNotFound(_))
+        ));
+        assert!(!local.exists());
+        assert!(!first_mount.exists());
+    }
+
+    #[test]
+    fn container_moves_across_configs_without_changing_link_or_ciphertext() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = config_at(&temp.path().join("home"));
+        let disk_root = temp.path().join("disk");
+        let disk = config_at(&disk_root);
+        let local_root = home
+            .resolve_work_root(home.work.default.as_ref().unwrap())
+            .unwrap();
+        let remote_root = disk
+            .resolve_work_root(disk.work.default.as_ref().unwrap())
+            .unwrap();
+        let source = container(&local_root, "veil-moving", "photos");
+        home.save().unwrap();
+        disk.save().unwrap();
+        let link = VeilLink::new("veil-moving", "photos", "2020-01-02T03:04:05Z");
+        let before = fs::read(source.join(VEIL_INFO_FILE)).unwrap();
+        let path = temp.path().join("photos.veil-link");
+        link.save(&path).unwrap();
+        let original_link = fs::read(&path).unwrap();
+        fs::create_dir_all(&remote_root).unwrap();
+        fs::rename(source, remote_root.join(&link.veil.veil_id)).unwrap();
+        let configs =
+            GlobalConfig::discover_from(&home.source_path().unwrap(), &[volume(&disk_root)])
+                .unwrap();
+        let found = find_by_id(&configs, &link.veil.veil_id).unwrap();
+        assert_eq!(
+            found.veil_dir,
+            comparable_path(&remote_root.join("veil-moving"))
+        );
+        assert_eq!(
+            fs::read(found.veil_dir.join(VEIL_INFO_FILE)).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(found.veil_dir.join("random.enc")).unwrap(),
+            b"unchanged ciphertext"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original_link);
+    }
+
+    #[test]
+    fn duplicates_are_ambiguous_and_aliases_do_not_duplicate_matches() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_at(temp.path());
+        let root = config
+            .resolve_work_root(config.work.default.as_ref().unwrap())
+            .unwrap();
+        container(&root, "veil-one", "photos");
+        config
+            .register_custom_work("alias".into(), PathBuf::from("works/default"), None)
+            .unwrap();
+        assert!(find_by_id(&[config.clone()], "veil-one").is_ok());
+        config
+            .register_custom_work("archive".into(), PathBuf::from("works/archive"), None)
+            .unwrap();
+        let archive = config.config_dir().unwrap().join("works/archive");
+        container(&archive, "veil-two", "photos");
+        assert!(matches!(
+            find_container(&[config.clone()], "photos"),
+            Err(VeilError::VeilNameAmbiguous(_))
+        ));
+        container(&archive, "veil-one", "photos");
+        assert!(matches!(
+            find_by_id(&[config.clone()], "veil-one"),
+            Err(VeilError::VeilIdConflict(_))
+        ));
+        assert!(matches!(
+            find_container(&[config], "photos"),
+            Err(VeilError::VeilIdConflict(_))
+        ));
+    }
+
+    #[test]
+    fn metadata_identity_must_match_directory_name() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_at(temp.path());
+        let root = config
+            .resolve_work_root(config.work.default.as_ref().unwrap())
+            .unwrap();
+        let path = container(&root, "veil-right", "photos");
+        fs::rename(path, root.join("veil-wrong")).unwrap();
+        assert!(matches!(
+            find_by_id(&[config.clone()], "veil-wrong"),
+            Err(VeilError::VeilIdConflict(_))
+        ));
+        assert!(matches!(
+            find_container(&[config.clone()], "photos"),
+            Err(VeilError::VeilIdConflict(_))
+        ));
+        assert!(
+            config
+                .resolve_link_target(root.join("veil-wrong").to_str().unwrap())
+                .is_err()
         );
     }
 
-    /// 同名容器不能仅靠展示名选择，必须要求用户改用 ID 或链接。
     #[test]
-    fn resolve_veil_rejects_ambiguous_name() {
-        let mut config = GlobalConfig::default();
+    fn configuration_has_no_work_or_volume_identity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_at(temp.path());
         config
-            .register_veil(veil("veil-first", "same-name"))
+            .register_work_at(&temp.path().join("archive"), false)
             .unwrap();
-        config
-            .register_veil(veil("veil-second", "same-name"))
-            .unwrap();
-
-        let error = config.resolve_veil("same-name").unwrap_err();
-
-        assert!(matches!(error, VeilError::VeilNameAmbiguous(_)));
+        config.save().unwrap();
+        let content = fs::read_to_string(config.source_path().unwrap()).unwrap();
+        for field in [
+            "work_id",
+            "volume_id",
+            "volumes",
+            "root_path",
+            "source_path",
+        ] {
+            assert!(!content.contains(field));
+        }
+        let loaded = GlobalConfig::load_from(&config.source_path().unwrap()).unwrap();
+        assert_eq!(
+            loaded.work.default.unwrap().path,
+            Path::new("works/default")
+        );
+        assert!(!temp.path().join("archive").exists());
+    }
+    #[test]
+    fn dedicated_work_rejects_multiple_containers() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_at(temp.path());
+        let root = temp.path().join("dedicated");
+        config.register_work_at(&root, true).unwrap();
+        container(&root, "veil-one", "photos");
+        assert!(find_by_id(&[config.clone()], "veil-one").is_ok());
+        container(&root, "veil-two", "documents");
+        assert!(matches!(
+            find_by_id(&[config], "veil-one"),
+            Err(VeilError::WorkError(_))
+        ));
     }
 
-    /// 绑定预期 ID 的管理器不能读取另一身份的工作区。
     #[test]
-    fn veil_manager_rejects_mismatched_veil_id() {
-        crate::kdf::enable_fast_test_kdf();
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let veil_dir = temp_dir.path().join("detached");
-        VeilManager::new(veil_dir.clone())
-            .init_veil_with_id("veil-actual", "actual-name", "default", "password")
+    fn name_lookup_uses_header_instead_of_stale_cache() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_at(temp.path());
+        let root = config
+            .resolve_work_root(config.work.default.as_ref().unwrap())
             .unwrap();
-
-        let manager = VeilManager::for_veil(veil_dir, "veil-expected");
-        let error = manager.read_meta_header().unwrap_err();
-
-        assert!(matches!(error, VeilError::VeilIdConflict(_)));
+        container(&root, "veil-one", "new-name");
+        config
+            .register_veil(VeilConfig {
+                veil_id: "veil-one".into(),
+                veil_name: "old-name".into(),
+                created_at: "2020-01-02T03:04:05Z".into(),
+                last_accessed: None,
+                links: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            find_container(&[config.clone()], "new-name")
+                .unwrap()
+                .veil_id,
+            "veil-one"
+        );
+        assert!(matches!(
+            find_container(&[config], "old-name"),
+            Err(VeilError::VeilNotFound(_))
+        ));
     }
 }

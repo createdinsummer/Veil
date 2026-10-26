@@ -1,10 +1,10 @@
 //! 工作区容器元数据模型。
 //!
-//! .veil-meta 文件格式：
+//! .veil-info 文件格式：
 //! - 明文头部（TLV 格式）：magic, header_len, salt, nonce, algorithm 等
-//! - 加密数据：JSON 格式的元数据（文件列表、容器信息、数据主密钥等）
+//! - 加密数据：JSONC 格式的元数据（文件列表、容器信息、数据主密钥等）
 //!
-//! `.veil-meta` 是容器身份和内容清单的权威来源，不保存任何绝对路径。明文头部
+//! `.veil-info` 是容器身份和内容清单的权威来源，不保存任何绝对路径。明文头部
 //! 仅保留恢复和识别所需字段，文件清单与业务元数据统一加密。
 
 use crate::error::VeilError;
@@ -14,17 +14,20 @@ use std::collections::HashSet;
 use std::fmt;
 use zeroize::Zeroize;
 
+/// 每个 Veil 容器目录中的信息文件名。
+pub const VEIL_INFO_FILE: &str = ".veil-info";
+
 /// 元数据文件固定魔数。
 pub const MAGIC: &[u8; 8] = b"VEILMETA";
 /// 当前支持的元数据格式版本。
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 6;
 
 /// 元数据中最多保存的数据主密钥数量。
 ///
 /// 第一个是当前主密钥，第二个只用于完整改密过程中兼容尚未迁移的文件。
 pub const MAX_DATA_KEYS: usize = 2;
 
-/// `.veil-meta` 明文 TLV 头部使用的字段标签。
+/// `.veil-info` 明文 TLV 头部使用的字段标签。
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetaTag {
@@ -42,8 +45,8 @@ pub enum MetaTag {
     VeilId = 0x06,
     /// 明文容器展示名称。
     VeilName = 0x07,
-    /// 明文工作区类型。
-    WorkType = 0x08,
+    /// 容器原始创建时间，用于无密码重建链接。
+    CreatedAt = 0x09,
     /// 供扩展字段使用的预留标签。
     Custom = 0xF0,
     /// 预留的 TLV 结束标记；当前写入流程不生成该字段。
@@ -62,7 +65,7 @@ impl MetaTag {
             0x05 => Some(Self::Nonce),
             0x06 => Some(Self::VeilId),
             0x07 => Some(Self::VeilName),
-            0x08 => Some(Self::WorkType),
+            0x09 => Some(Self::CreatedAt),
             0xF0 => Some(Self::Custom),
             0xFF => Some(Self::EndMarker),
             _ => None,
@@ -100,7 +103,7 @@ impl AlgorithmId {
     }
 }
 
-/// `.veil-meta` 的明文头部和恢复身份信息。
+/// `.veil-info` 的明文头部和恢复身份信息。
 #[derive(Debug, Clone)]
 pub struct MetaHeader {
     /// Salt（用于密钥派生）
@@ -121,14 +124,14 @@ pub struct MetaHeader {
     /// 恢复用明文容器名称；仅用于识别容器。
     pub veil_name: String,
 
-    /// 恢复用明文工作区类型。
-    pub work_type: String,
+    /// RFC 3339 格式的容器原始创建时间，与加密正文保持一致。
+    pub created_at: String,
 }
 
 impl MetaHeader {
     /// 使用当前格式版本构造元数据头部。
     ///
-    /// `veil_id`、`veil_name` 和 `work_type` 必须非空，具体约束在
+    /// `veil_id`、`veil_name` 和 `created_at` 必须非空，具体约束在
     /// [`MetaHeader::to_bytes`] 中统一校验。
     pub fn new(
         salt: [u8; 32],
@@ -136,7 +139,7 @@ impl MetaHeader {
         algorithm: AlgorithmId,
         veil_id: String,
         veil_name: String,
-        work_type: String,
+        created_at: String,
     ) -> Self {
         Self {
             salt,
@@ -145,14 +148,14 @@ impl MetaHeader {
             version: VERSION,
             veil_id,
             veil_name,
-            work_type,
+            created_at,
         }
     }
 
     /// 将头部编码为 `magic + header_len + TLV 字段`。
     ///
     /// # 错误
-    /// 三个明文身份字段任一为空时返回 [`VeilError::InvalidFormat`]。
+    /// 明文身份字段任一为空或容器创建时间为空时返回 [`VeilError::InvalidFormat`]。
     pub fn to_bytes(&self) -> Result<Vec<u8>, VeilError> {
         if self.veil_id.is_empty() {
             return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
@@ -160,8 +163,8 @@ impl MetaHeader {
         if self.veil_name.is_empty() {
             return Err(VeilError::InvalidFormat("缺少容器名称".to_string()));
         }
-        if self.work_type.is_empty() {
-            return Err(VeilError::InvalidFormat("缺少工作区类型".to_string()));
+        if self.created_at.is_empty() {
+            return Err(VeilError::InvalidFormat("缺少容器创建时间".to_string()));
         }
 
         let mut buf = Vec::new();
@@ -178,7 +181,7 @@ impl MetaHeader {
         write_tlv(&mut buf, MetaTag::Nonce, &self.nonce)?;
         write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
         write_tlv(&mut buf, MetaTag::VeilName, self.veil_name.as_bytes())?;
-        write_tlv(&mut buf, MetaTag::WorkType, self.work_type.as_bytes())?;
+        write_tlv(&mut buf, MetaTag::CreatedAt, self.created_at.as_bytes())?;
 
         // header_len 只统计 TLV 区域，不包含 magic 和长度字段本身。
         let header_len = u16::try_from(buf.len() - 10)
@@ -217,7 +220,7 @@ impl MetaHeader {
         let mut nonce = None;
         let mut veil_id = String::new();
         let mut veil_name = String::new();
-        let mut work_type = String::new();
+        let mut created_at = String::new();
         let mut pos = 10;
 
         // TLV 区域按 tag、u16 长度、value 的固定布局连续解析。
@@ -270,9 +273,9 @@ impl MetaHeader {
                         VeilError::InvalidFormat(format!("容器名称不是有效的 UTF-8: {}", error))
                     })?;
                 }
-                Some(MetaTag::WorkType) => {
-                    work_type = String::from_utf8(value.to_vec()).map_err(|error| {
-                        VeilError::InvalidFormat(format!("工作区类型不是有效的 UTF-8: {}", error))
+                Some(MetaTag::CreatedAt) => {
+                    created_at = String::from_utf8(value.to_vec()).map_err(|error| {
+                        VeilError::InvalidFormat(format!("容器创建时间不是有效的 UTF-8: {error}"))
                     })?;
                 }
                 // 未知标签和长度不符的已知标签都跳过，为后续格式扩展保留空间。
@@ -303,9 +306,9 @@ impl MetaHeader {
             veil_name: (!veil_name.is_empty())
                 .then_some(veil_name)
                 .ok_or_else(|| VeilError::InvalidFormat("缺少容器名称".to_string()))?,
-            work_type: (!work_type.is_empty())
-                .then_some(work_type)
-                .ok_or_else(|| VeilError::InvalidFormat("缺少工作区类型".to_string()))?,
+            created_at: (!created_at.is_empty())
+                .then_some(created_at)
+                .ok_or_else(|| VeilError::InvalidFormat("缺少容器创建时间".to_string()))?,
         })
     }
 
@@ -349,9 +352,6 @@ pub struct MetaData {
     /// 容器名称
     pub veil_name: String,
 
-    /// 工作区类型
-    pub work_type: String,
-
     /// 创建时间
     pub created_at: String,
 
@@ -376,7 +376,6 @@ impl fmt::Debug for MetaData {
             .debug_struct("MetaData")
             .field("veil_id", &self.veil_id)
             .field("veil_name", &self.veil_name)
-            .field("work_type", &self.work_type)
             .field("created_at", &self.created_at)
             .field("files", &self.files)
             .field(
@@ -390,23 +389,22 @@ impl fmt::Debug for MetaData {
 impl MetaData {
     /// 创建带随机容器身份和空文件清单的元数据。
     ///
-    /// `veil_name` 是展示名称，`work_type` 记录默认、自定义或专属类型。
-    pub fn new(veil_name: String, work_type: String) -> Self {
+    /// `veil_name` 是展示名称，元数据不记录工作区归属或容器位置。
+    pub fn new(veil_name: String) -> Self {
         // 随机身份与调用方提供的展示信息分离，名称变化不影响容器身份。
-        Self::with_veil_id(generate_veil_id(), veil_name, work_type)
+        Self::with_veil_id(generate_veil_id(), veil_name)
     }
 
     /// 使用调用方指定的稳定 ID 创建空元数据。
     ///
     /// `veil_id` 应来自已分配的身份，以保证链接和配置在路径变化后仍能定位容器。
-    pub fn with_veil_id(veil_id: String, veil_name: String, work_type: String) -> Self {
+    pub fn with_veil_id(veil_id: String, veil_name: String) -> Self {
         let mut data_key = [0u8; DATA_KEY_LEN];
         getrandom::getrandom(&mut data_key).expect("无法生成数据主密钥");
 
         Self {
             veil_id,
             veil_name,
-            work_type,
             // 初始清单为空，文件条目由后续 add_file 逐步追加。
             created_at: chrono::Utc::now().to_rfc3339(),
             files: Vec::new(),
@@ -454,24 +452,25 @@ impl MetaData {
         Ok(())
     }
 
-    /// 将元数据序列化为 UTF-8 JSON。
+    /// 将元数据序列化为紧凑的 UTF-8 JSONC，省略注释以减少加密数据体积。
     ///
     /// # 错误
     /// 字段无法序列化时返回 [`VeilError::SerializationError`]。
-    pub fn to_json(&self) -> Result<Vec<u8>, VeilError> {
-        // JSON 明文只在内存中短时存在，调用方随后应立即加密。
-        serde_json::to_vec(self)
-            .map_err(|e| VeilError::SerializationError(format!("序列化元数据失败: {}", e)))
+    pub fn to_jsonc(&self) -> Result<Vec<u8>, VeilError> {
+        // JSONC 明文只在内存中短时存在，调用方随后应立即加密。
+        crate::jsonc::to_vec(self)
     }
 
-    /// 从 UTF-8 JSON 字节反序列化元数据。
+    /// 从 UTF-8 JSONC 字节反序列化元数据。
     ///
     /// # 错误
-    /// JSON 无效、字段缺失或类型不匹配时返回 [`VeilError::SerializationError`]。
-    pub fn from_json(bytes: &[u8]) -> Result<Self, VeilError> {
+    /// JSONC 无效、字段缺失或类型不匹配时返回 [`VeilError::SerializationError`]。
+    pub fn from_jsonc(bytes: &[u8]) -> Result<Self, VeilError> {
         // 反序列化要求字段完整；这是解密后内容损坏与版本不兼容的统一入口。
-        let metadata: Self = serde_json::from_slice(bytes)
-            .map_err(|e| VeilError::SerializationError(format!("反序列化元数据失败: {}", e)))?;
+        let content = std::str::from_utf8(bytes).map_err(|error| {
+            VeilError::SerializationError(format!("元数据不是有效 UTF-8: {error}"))
+        })?;
+        let metadata: Self = crate::jsonc::from_str(content)?;
         metadata.validate()?;
         Ok(metadata)
     }
@@ -537,7 +536,7 @@ pub fn generate_veil_id() -> String {
     format!("veil-{}", hex::encode(bytes))
 }
 
-/// `.veil-meta` 中记录的文件条目。
+/// `.veil-info` 中记录的文件条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     /// 不随路径、重命名或完整改密变化的稳定文件 ID。
@@ -622,6 +621,57 @@ fn write_tlv(buf: &mut Vec<u8>, tag: MetaTag, value: &[u8]) -> Result<(), VeilEr
 mod tests {
     use super::*;
 
+    /// 无密码读取头部时能取得原始创建时间，缺少该时间的头部会被拒绝。
+    #[test]
+    fn header_requires_container_creation_time() {
+        let header = MetaHeader::new(
+            [8u8; 32],
+            [9u8; 12],
+            AlgorithmId::ChaCha20Poly1305,
+            "veil-test".to_string(),
+            "test".to_string(),
+            "2020-01-02T03:04:05Z".to_string(),
+        );
+        let mut bytes = header.to_bytes().unwrap();
+        assert_eq!(
+            MetaHeader::from_bytes(&bytes).unwrap().created_at,
+            header.created_at
+        );
+
+        // 创建时间位于最后一个 TLV；移除后仍保留合法的头部长度，验证必需字段校验。
+        bytes.truncate(bytes.len() - 3 - header.created_at.len());
+        let header_len = (bytes.len() - 10) as u16;
+        bytes[8..10].copy_from_slice(&header_len.to_le_bytes());
+        let error = MetaHeader::from_bytes(&bytes).unwrap_err();
+        assert!(error.to_string().contains("缺少容器创建时间"));
+    }
+
+    /// 加密正文的 JSONC 解析支持注释、尾逗号，并完整保留数据主密钥。
+    #[test]
+    fn metadata_jsonc_round_trip_accepts_comments() {
+        let metadata = MetaData::with_veil_id("veil-jsonc".to_string(), "photos".to_string());
+        let mut body = String::from_utf8(metadata.to_jsonc().unwrap()).unwrap();
+        body.insert(body.len() - 1, ',');
+        let content = format!("// 元数据说明\n/* 正文 */ {body}\n");
+        let loaded = MetaData::from_jsonc(content.as_bytes()).unwrap();
+        assert_eq!(loaded.veil_id, metadata.veil_id);
+        assert_eq!(loaded.veil_name, metadata.veil_name);
+        assert_eq!(loaded.data_keys, metadata.data_keys);
+        let document = serde_json::to_value(&loaded).unwrap();
+        for field in ["work_id", "work_type", "path", "volume_id"] {
+            assert!(document.get(field).is_none());
+        }
+    }
+
+    /// 解密后正文不是有效 UTF-8 时仍返回可处理的序列化错误。
+    #[test]
+    fn metadata_rejects_invalid_utf8() {
+        assert!(matches!(
+            MetaData::from_jsonc(&[0xff, 0xfe]),
+            Err(VeilError::SerializationError(_))
+        ));
+    }
+
     /// 构造一个头部长度合法、但末尾 TLV 被截断的元数据文件。
     fn truncated_tlv_header() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -656,10 +706,10 @@ mod tests {
             AlgorithmId::ChaCha20Poly1305,
             "veil-test".to_string(),
             "test".to_string(),
-            "default".to_string(),
+            "2020-01-02T03:04:05Z".to_string(),
         );
         let mut bytes = header.to_bytes().unwrap();
-        bytes[13..15].copy_from_slice(&2u16.to_le_bytes());
+        bytes[13..15].copy_from_slice(&(VERSION - 1).to_le_bytes());
         assert!(MetaHeader::from_bytes(&bytes).is_err());
     }
 }

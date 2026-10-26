@@ -3,12 +3,10 @@
 use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use veil_core::config::GlobalConfig;
-use veil_core::link::VeilLink;
-use veil_core::volume;
 
-/// 根据现有链接、配置记录或 `.veil-meta` 生成新的 `.veil-link`。
+/// 根据现有链接、配置记录或 `.veil-info` 生成新的 `.veil-link`。
 ///
 /// 已解析链接存在时直接复制其文件；已注册但没有现有链接时重新注册；仅能定位到
 /// 工作区时会读取明文头部身份并构造新链接。
@@ -21,7 +19,12 @@ use veil_core::volume;
 /// 输出已存在、链接复制、配置读取、元数据读取、链接生成或缓存写入失败时返回错误。
 pub fn run(target: &str, output: Option<&str>) -> Result<()> {
     let mut config = GlobalConfig::load()?;
-    let resolved = super::resolve_link_target(target)?;
+    let resolved = config.resolve_link_target(target)?;
+    if resolved.recovered_link
+        && let Some(path) = resolved.link_path.as_deref()
+    {
+        crate::hints::show_link_recovery_hint(path);
+    }
     if resolved.veil_id.is_empty() {
         crate::cli_bail!(LinkMissingVeilId);
     }
@@ -50,26 +53,19 @@ pub fn run(target: &str, output: Option<&str>) -> Result<()> {
             // 已有链接直接逐字节复制，避免重新序列化改变内容。
             std::fs::copy(existing_link, &output_path)?;
             config.cache_link(&output_path)?;
-        } else if config.find_veil_key(&resolved.veil_id).is_some() {
-            // 容器已注册但没有现有链接时，由配置模型生成新链接。
-            config.register_link(&resolved.veil_id, &output_path)?;
         } else {
-            // 未注册的脱离工作区也使用解析阶段确认过的稳定 ID。
-            let volume = volume::volume_for_path(&manager.veil_dir)?;
-            let relative_path = manager
-                .veil_dir
-                .strip_prefix(&volume.mount_path)
-                .unwrap_or(&manager.veil_dir)
-                .to_path_buf();
-            VeilLink::new(
-                resolved.veil_id.clone(),
-                resolved.veil_name.clone(),
-                relative_path,
-                volume.volume_id,
-                volume.volume_label,
-            )
-            .save(Path::new(&output_path))?;
-            config.cache_link(&output_path)?;
+            let header = manager.read_meta_header()?;
+            let root = manager.veil_dir.parent().ok_or_else(|| {
+                veil_core::error::VeilError::WorkError("容器缺少工作区父目录".to_string())
+            })?;
+            let mut owner = GlobalConfig::for_location(root)?;
+            owner.register_work_at(root, false)?;
+            owner.register_link_at(
+                &header.veil_id,
+                &header.veil_name,
+                &manager.veil_dir,
+                &output_path,
+            )?;
         }
         Ok(())
     })();

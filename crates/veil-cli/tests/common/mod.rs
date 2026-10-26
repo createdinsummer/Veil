@@ -68,6 +68,17 @@ impl TestEnv {
         path
     }
 
+    /// 用隔离配置和统一工作区扫描解析链接。
+    #[allow(dead_code)]
+    pub fn veil_dir(&self, link_path: &Path) -> PathBuf {
+        let config = veil_core::config::GlobalConfig::load_from(
+            &self.home.path().join(".veil/config.jsonc"),
+        )
+        .unwrap();
+        let link = veil_core::link::VeilLink::load(link_path).unwrap();
+        config.resolve_link_veil_dir(&link, link_path).unwrap()
+    }
+
     /// 将路径转换为适合传给命令行参数的字符串。
     pub fn path(&self, path: impl AsRef<Path>) -> String {
         path.as_ref().to_string_lossy().into_owned()

@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::config::{GlobalConfig, HintsLevel};
+use veil_core::config::{GlobalConfig, HintLevel};
 
 /// 当前支持的提示场景。
 #[derive(Debug, Clone, Copy)]
@@ -23,18 +23,18 @@ enum HintType {
 }
 
 /// 当前生效的提示级别：`VEIL_HINTS` 环境变量优先，其次读取全局配置。
-pub fn current_level() -> HintsLevel {
+pub fn current_level() -> HintLevel {
     // 环境变量是临时覆盖层，只有合法值才允许覆盖持久化配置。
     if let Ok(value) = std::env::var("VEIL_HINTS")
-        && let Some(level) = HintsLevel::parse(&value)
+        && let Some(level) = HintLevel::parse(&value)
     {
         return level;
     }
 
     // 配置读取失败时回退到完整提示，保证新环境仍能获得帮助信息。
     GlobalConfig::load()
-        .map(|config| config.preferences.hints_level)
-        .unwrap_or(HintsLevel::Full)
+        .map(|config| config.user_settings.hint_level)
+        .unwrap_or(HintLevel::Full)
 }
 
 /// 解析并持久化提示级别。
@@ -42,20 +42,20 @@ pub fn current_level() -> HintsLevel {
 /// # 错误
 /// 级别无效、全局配置加载失败或保存失败时返回错误。
 pub fn set_hint_level(level: &str) -> Result<()> {
-    let parsed = HintsLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
+    let parsed = HintLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
     let mut config = GlobalConfig::load()?;
-    config.preferences.hints_level = parsed;
+    config.user_settings.hint_level = parsed;
     config.save()?;
     Ok(())
 }
 
 /// 判断指定提示在当前级别下是否允许展示。
-fn allowed(hint_type: HintType, level: HintsLevel) -> bool {
+fn allowed(hint_type: HintType, level: HintLevel) -> bool {
     // Brief 只保留解包和异常恢复类关键提示。
     match level {
-        HintsLevel::Off => false,
-        HintsLevel::Brief => matches!(hint_type, HintType::FirstUnpack | HintType::LinkRecovery),
-        HintsLevel::Full => true,
+        HintLevel::Off => false,
+        HintLevel::Brief => matches!(hint_type, HintType::FirstUnpack | HintType::LinkRecovery),
+        HintLevel::Full => true,
     }
 }
 

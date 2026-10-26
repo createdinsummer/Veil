@@ -19,10 +19,10 @@ fn test_work_init_and_operations() {
 
     // 初始化容器
     let password = "test-password-123";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
-    // 验证 .veil-meta 文件存在，并记录实际的 ChaCha20-Poly1305 算法。
-    let meta_path = veil_dir.join(".veil-meta");
+    // 验证 .veil-info 文件存在，并记录实际的 ChaCha20-Poly1305 算法。
+    let meta_path = veil_dir.join(".veil-info");
     assert!(meta_path.exists());
     let header = MetaHeader::from_bytes(&fs::read(meta_path).unwrap()).unwrap();
     assert_eq!(header.algorithm, AlgorithmId::ChaCha20Poly1305);
@@ -30,7 +30,7 @@ fn test_work_init_and_operations() {
     // 读取元数据
     let meta = manager.read_meta(password).unwrap();
     assert_eq!(meta.veil_name, "test-veil");
-    assert_eq!(meta.work_type, "default");
+    assert_eq!(header.created_at, meta.created_at);
     assert_eq!(meta.files.len(), 0);
     assert_eq!(meta.data_keys.len(), 1);
 
@@ -46,7 +46,7 @@ fn test_add_and_extract_file() {
     let manager = VeilManager::new(veil_dir.clone());
 
     let password = "test-password-123";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     // 创建测试文件
     let test_file = temp_dir.path().join("test.txt");
@@ -89,7 +89,7 @@ fn test_added_ciphertext_is_private() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let source = temp_dir.path().join("private.txt");
     fs::write(&source, b"private").unwrap();
@@ -112,7 +112,7 @@ fn test_wrong_password() {
     let manager = VeilManager::new(veil_dir);
 
     let password = "correct-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     // 使用错误密码应该失败
     let result = manager.read_meta("wrong-password");
@@ -130,7 +130,7 @@ fn test_remove_file() {
     let manager = VeilManager::new(veil_dir.clone());
 
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     // 添加文件
     let test_file = temp_dir.path().join("delete-me.txt");
@@ -159,7 +159,7 @@ fn test_add_file_destination_replaces_existing() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     fs::write(&source, b"first").unwrap();
@@ -201,7 +201,7 @@ fn test_add_files_wrong_password_does_not_write_ciphertext() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir.clone());
     let password = "correct-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     fs::write(&source, b"secret").unwrap();
@@ -222,7 +222,7 @@ fn test_remove_directory_recursively() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let top = temp_dir.path().join("top.txt");
     let deep = temp_dir.path().join("deep.txt");
@@ -259,7 +259,7 @@ fn test_move_file_into_directory_and_rename() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir);
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let source = temp_dir.path().join("source.txt");
     let existing = temp_dir.path().join("existing.txt");
@@ -313,7 +313,7 @@ fn test_move_directory_recursively() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir);
     let password = "test-password";
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
 
     let top = temp_dir.path().join("top.txt");
     let deep = temp_dir.path().join("deep.txt");
@@ -365,9 +365,7 @@ fn test_change_password_full_failure_keeps_old_password() {
     let veil_dir = temp_dir.path().join("test-veil");
     let manager = VeilManager::new(veil_dir.clone());
     let old_password = "old-password";
-    manager
-        .init_veil("test-veil", "default", old_password)
-        .unwrap();
+    manager.init_veil("test-veil", old_password).unwrap();
 
     let first = temp_dir.path().join("first.txt");
     let second = temp_dir.path().join("second.txt");
@@ -416,9 +414,7 @@ fn test_change_password_full_can_resume_after_partial_migration() {
     let old_password = "old-password";
     let new_password = "new-password";
 
-    manager
-        .init_veil("test-veil", "default", old_password)
-        .unwrap();
+    manager.init_veil("test-veil", old_password).unwrap();
     let first = temp_dir.path().join("first.txt");
     let second = temp_dir.path().join("second.txt");
     fs::write(&first, b"first").unwrap();
@@ -477,13 +473,13 @@ fn test_metadata_nonce_rotates_on_commit() {
     let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
 
-    manager.init_veil("test-veil", "default", password).unwrap();
-    let first = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-meta")).unwrap())
+    manager.init_veil("test-veil", password).unwrap();
+    let first = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-info")).unwrap())
         .unwrap()
         .nonce;
 
     manager.update_meta(password, |_| {}).unwrap();
-    let second = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-meta")).unwrap())
+    let second = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-info")).unwrap())
         .unwrap()
         .nonce;
 
@@ -499,7 +495,7 @@ fn test_crash_orphans_are_cleaned_after_successful_read() {
     let manager = VeilManager::new(veil_dir.clone());
     let password = "test-password";
 
-    manager.init_veil("test-veil", "default", password).unwrap();
+    manager.init_veil("test-veil", password).unwrap();
     let source = temp_dir.path().join("keep.txt");
     fs::write(&source, b"keep").unwrap();
     let encrypted_name = manager.add_file(&source, password).unwrap();
@@ -526,9 +522,7 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
     let old_password = "old-password";
     let new_password = "new-password";
 
-    manager
-        .init_veil("test-veil", "default", old_password)
-        .unwrap();
+    manager.init_veil("test-veil", old_password).unwrap();
     let source = temp_dir.path().join("data.txt");
     fs::write(&source, b"secret").unwrap();
     manager
@@ -589,9 +583,7 @@ fn test_change_password_full_reencrypts_ciphertext() {
     let old_password = "old-password";
     let new_password = "new-password";
 
-    manager
-        .init_veil("test-veil", "default", old_password)
-        .unwrap();
+    manager.init_veil("test-veil", old_password).unwrap();
     let first = temp_dir.path().join("first.txt");
     let second = temp_dir.path().join("second.txt");
     fs::write(&first, b"first").unwrap();
@@ -654,9 +646,7 @@ fn test_work_streaming_multichunk_full_rekey() {
         .map(|index| (index % 251) as u8)
         .collect();
 
-    manager
-        .init_veil("test-veil", "default", old_password)
-        .unwrap();
+    manager.init_veil("test-veil", old_password).unwrap();
     let source = temp_dir.path().join("large.bin");
     fs::write(&source, &plaintext).unwrap();
     manager
