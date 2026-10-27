@@ -5,14 +5,14 @@ use colored::Colorize;
 
 /// 移动或重命名文件、目录在容器元数据中的原始路径。
 ///
-/// 密文文件本身不移动；目标路径已存在时由 [`veil_core::veil_ops::VeilManager::move_path`] 拒绝。
+/// 密文文件本身不移动；目标路径已存在时由 [`veil_service::veil_ops::VeilManager::move_path`] 拒绝。
 ///
 /// # 错误
 /// 容器解析、密码读取、源不存在、目标冲突、目录循环或元数据写回失败时返回错误。
 pub fn run(veil_name: &str, from: &str, to: &str, password: Option<String>) -> Result<()> {
     // mv 只改变元数据中的原始路径，不复制或重新加密 blob。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
+    let manager = super::container_client(&resolved);
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 

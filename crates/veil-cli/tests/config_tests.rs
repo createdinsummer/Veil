@@ -4,8 +4,8 @@ mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
-use veil_core::config::GlobalConfig;
-use veil_core::link::VeilLink;
+use veil_service::config::GlobalConfig;
+use veil_service::link::VeilLink;
 
 /// 验证不带参数的配置命令与显式 `show` 输出一致。
 #[test]
@@ -142,8 +142,10 @@ fn regenerated_links_preserve_container_creation_time() {
     let original_path = env.init("demo");
     let original = VeilLink::load(&original_path).unwrap();
     let veil_dir = env.veil_dir(&original_path);
-    let manager =
-        veil_core::veil_ops::VeilManager::for_veil(veil_dir.clone(), original.veil.veil_id.clone());
+    let manager = veil_service::veil_ops::VeilManager::for_veil(
+        veil_dir.clone(),
+        original.veil.veil_id.clone(),
+    );
     assert_eq!(
         original.veil.created_at,
         manager.read_meta(&env.password).unwrap().created_at
@@ -433,4 +435,24 @@ fn unpack_restores_original_id_despite_stale_cache() {
             .success()
             .stdout(predicate::str::contains("restored"));
     }
+}
+
+#[test]
+fn pack_hint_is_shown_once_through_service() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("hint-pack");
+    let first = env.work.path().join("first.veil");
+    let second = env.work.path().join("second.veil");
+    env.command()
+        .env("VEIL_HINTS", "full")
+        .args(["pack", &env.path(&link), "-o", &env.path(&first)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".veil-link 和 .veil 的区别"));
+    env.command()
+        .env("VEIL_HINTS", "full")
+        .args(["pack", &env.path(&link), "-o", &env.path(&second)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".veil-link 和 .veil 的区别").not());
 }

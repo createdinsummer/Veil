@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use veil_core::error::VeilError;
 use veil_core::metadata::{AlgorithmId, MetaHeader};
-use veil_core::veil_ops::VeilManager;
-use veil_core::veil_package::{VEIL_PACKAGE_MAGIC, VeilPacker, VeilUnpacker};
+use veil_core::veil_package::{VEIL_PACKAGE_MAGIC, VeilUnpacker};
+use veil_service::package::VeilPacker;
+use veil_service::veil_ops::VeilManager;
 
 fn package_fixture(temp: &TempDir) -> PathBuf {
     veil_core::kdf::enable_fast_test_kdf();

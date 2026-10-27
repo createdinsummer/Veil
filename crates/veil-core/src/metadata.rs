@@ -20,7 +20,7 @@ pub const VEIL_INFO_FILE: &str = ".veil-info";
 /// 元数据文件固定魔数。
 pub const MAGIC: &[u8; 8] = b"VEILMETA";
 /// 当前支持的元数据格式版本。
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 /// 元数据中最多保存的数据主密钥数量。
 ///
@@ -448,6 +448,17 @@ impl MetaData {
                     file.file_id
                 )));
             }
+            if file.version_history.is_empty() {
+                return Err(VeilError::InvalidFormat("文件版本历史为空".to_string()));
+            }
+            let mut versions = HashSet::new();
+            for version in &file.version_history {
+                if !is_uuid_v4(version) || !versions.insert(version) {
+                    return Err(VeilError::InvalidFormat(
+                        "文件版本 UUID 无效或重复".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -542,6 +553,9 @@ pub struct FileEntry {
     /// 不随路径、重命名或完整改密变化的稳定文件 ID。
     pub file_id: String,
 
+    /// 按提交顺序排列的文件内容版本 UUID。
+    pub version_history: Vec<String>,
+
     /// 加密后的文件名（随机 ID）
     pub encrypted_name: String,
 
@@ -583,6 +597,7 @@ impl FileEntry {
     ) -> Self {
         Self {
             file_id,
+            version_history: vec![generate_version_id()],
             encrypted_name,
             original_name,
             size,
@@ -592,6 +607,39 @@ impl FileEntry {
             hash: None,
         }
     }
+
+    /// 基于当前文件生成内容更新后的版本历史。
+    pub fn advance_version(&mut self) {
+        self.version_history.push(generate_version_id());
+    }
+}
+
+/// 使用系统随机源生成标准 UUID v4。
+fn generate_version_id() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("无法生成版本 UUID");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
+
+pub(crate) fn is_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            14 => *byte == b'4',
+            19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+        })
 }
 
 /// 生成 `file-` 前缀的随机逻辑文件身份。
@@ -620,6 +668,24 @@ fn write_tlv(buf: &mut Vec<u8>, tag: MetaTag, value: &[u8]) -> Result<(), VeilEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_history_requires_unique_uuid_v4_values() {
+        let mut metadata = MetaData::new("test".to_string());
+        let mut entry = FileEntry::new("cipher.enc".into(), "file.txt".into(), 0, [0; 12]);
+        assert!(is_uuid_v4(&entry.version_history[0]));
+        entry.advance_version();
+        metadata.add_file(entry);
+        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_ok());
+
+        metadata.files[0].version_history.clear();
+        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
+        metadata.files[0].version_history = vec!["invalid".into()];
+        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
+        let valid = generate_version_id();
+        metadata.files[0].version_history = vec![valid.clone(), valid];
+        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
+    }
 
     /// 无密码读取头部时能取得原始创建时间，缺少该时间的头部会被拒绝。
     #[test]

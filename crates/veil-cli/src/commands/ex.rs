@@ -30,7 +30,7 @@ pub fn run(
 ) -> Result<()> {
     // 链接只负责定位，实际操作绑定到确认后的稳定 ID。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
+    let manager = super::container_client(&resolved);
 
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;

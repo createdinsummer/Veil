@@ -13,6 +13,102 @@ use std::path::Path;
 /// `.veil-link` 文件扩展名。
 pub const LINK_EXTENSION: &str = "veil-link";
 
+/// 已解析容器与输出路径，调用方不能修改计划内容。
+pub struct LinkPlan {
+    resolved: crate::config::ResolvedVeil,
+    output: std::path::PathBuf,
+}
+impl LinkPlan {
+    pub fn recovered_link(&self) -> Option<&Path> {
+        if self.resolved.recovered_link {
+            self.resolved.link_path.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+fn check_link_plan(plan: &LinkPlan) -> Result<(), crate::workflow::WorkflowError> {
+    use crate::workflow::WorkflowError;
+    if plan.resolved.veil_id.is_empty() {
+        return Err(WorkflowError::LinkMissingId);
+    }
+    if plan.output.extension().and_then(|ext| ext.to_str()) != Some(LINK_EXTENSION) {
+        return Err(WorkflowError::LinkInvalidExtension(plan.output.clone()));
+    }
+    if plan.output.exists() {
+        return Err(WorkflowError::LinkExists(plan.output.clone()));
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_link(
+    target: &str,
+    output: Option<&Path>,
+) -> Result<LinkPlan, crate::workflow::WorkflowError> {
+    let mut config = crate::config::GlobalConfig::load()?;
+    let resolved = config.resolve_link_target(target)?;
+    let output = output.map(Path::to_path_buf).unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(format!("{}.veil-link", resolved.veil_name))
+    });
+    let plan = LinkPlan { resolved, output };
+    check_link_plan(&plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn commit_link(
+    plan: LinkPlan,
+) -> Result<std::path::PathBuf, crate::workflow::WorkflowError> {
+    check_link_plan(&plan)?;
+    create_registered_link(&plan.resolved, &plan.output)?;
+    Ok(plan.output)
+}
+
+/// 为已解析的容器创建并登记链接。
+pub(crate) fn create_registered_link(
+    resolved: &crate::config::ResolvedVeil,
+    output: &Path,
+) -> Result<(), VeilError> {
+    if output.exists() {
+        return Err(VeilError::WorkError("链接已存在".into()));
+    }
+    let mut config = crate::config::GlobalConfig::load()?;
+    let result = (|| {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if let Some(existing) = resolved.link_path.as_deref() {
+            fs::copy(existing, output)?;
+            config.cache_link(output)?;
+        } else {
+            let manager = crate::veil_ops::VeilManager::for_veil(
+                resolved.veil_dir.clone(),
+                &resolved.veil_id,
+            );
+            let header = manager.read_meta_header()?;
+            let root = resolved
+                .veil_dir
+                .parent()
+                .ok_or_else(|| VeilError::WorkError("容器缺少工作区父目录".into()))?;
+            let mut owner = crate::config::GlobalConfig::for_location(root)?;
+            owner.register_work_at(root, false)?;
+            owner.register_link_at(
+                &header.veil_id,
+                &header.veil_name,
+                &resolved.veil_dir,
+                output,
+            )?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(output);
+    }
+    result
+}
+
 /// JSONC 格式的便携定位文件，可复制到其他位置或由 `config.jsonc` 中的正文重新生成。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeilLink {

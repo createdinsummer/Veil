@@ -71,11 +71,11 @@ impl TestEnv {
     /// 用隔离配置和统一工作区扫描解析链接。
     #[allow(dead_code)]
     pub fn veil_dir(&self, link_path: &Path) -> PathBuf {
-        let config = veil_core::config::GlobalConfig::load_from(
+        let config = veil_service::config::GlobalConfig::load_from(
             &self.home.path().join(".veil/config.jsonc"),
         )
         .unwrap();
-        let link = veil_core::link::VeilLink::load(link_path).unwrap();
+        let link = veil_service::link::VeilLink::load(link_path).unwrap();
         config.resolve_link_veil_dir(&link, link_path).unwrap()
     }
 

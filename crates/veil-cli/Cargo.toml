@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 # 核心库
 veil-core = { path = "../veil-core" }
+veil-service = { path = "../veil-service" }
 
 # CLI 框架
 clap = { version = "4.5", features = ["derive", "cargo"] }

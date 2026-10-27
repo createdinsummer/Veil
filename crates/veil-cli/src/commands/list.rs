@@ -10,8 +10,8 @@ use colored::Colorize;
 pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // list 只读取容器元数据，不需要打开每个文件 blob。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
-    let display_name = resolved.veil_name;
+    let manager = super::container_client(&resolved);
+    let display_name = resolved.name();
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
@@ -27,7 +27,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
         crate::i18n::t2(
             "list.veil_title",
             "name",
-            &display_name,
+            display_name,
             "count",
             &files.len().to_string()
         )
@@ -53,7 +53,8 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
             file.original_name.bright_white()
         );
         crate::outln!(
-            "     大小: {}  加密时间: {}",
+            "     版本: {}  大小: {}  加密时间: {}",
+            file.version_history.len(),
             format_size(file.size),
             format_time(&file.encrypted_at)
         );

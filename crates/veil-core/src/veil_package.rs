@@ -29,7 +29,7 @@
 
 use crate::error::VeilError;
 use crate::kdf;
-use crate::metadata::{AlgorithmId, MetaData, MetaHeader, VEIL_INFO_FILE};
+use crate::metadata::{AlgorithmId, MetaData, MetaHeader};
 use chacha20poly1305::aead::generic_array::GenericArray;
 use chacha20poly1305::{
     ChaCha20Poly1305,
@@ -249,93 +249,89 @@ impl FileEntryHeader {
     }
 }
 
-/// 将 `veil_dir` 中的内容写入单个 `.veil` 文件。
-pub struct VeilPacker {
-    /// 待创建或覆盖的目标打包文件路径。
-    output_path: std::path::PathBuf,
+/// 按打包格式写入元数据和密文条目的底层写入器。
+///
+/// 调用方负责提供一致的元数据和密文，并在需要时协调并发与清理。
+pub struct VeilPackageWriter {
+    output_path: PathBuf,
+    parent: PathBuf,
+    output: tempfile::NamedTempFile,
+    metadata_size: u32,
+    file_count: u32,
 }
 
-impl VeilPacker {
-    /// 为指定输出路径创建打包器。
-    pub fn new(output_path: impl AsRef<Path>) -> Self {
-        Self {
-            output_path: output_path.as_ref().to_path_buf(),
-        }
-    }
-
-    /// 将 Veil 的加密文件和元数据写入打包文件。
-    ///
-    /// 方法先写入占位头部，再依次写入加密元数据和每个条目；完成后回填包含实际
-    /// 元数据长度与文件数量的头部。
-    ///
-    /// # 参数
-    /// - `veil_dir`：包含 `.veil-info` 和 `.enc` 文件的 Veil 目录。
-    /// - `metadata`：解密后的清单，用于确定文件顺序和原始名称。
-    /// - `encrypted_metadata`：Veil 的 `.veil-info` 完整字节，包含明文头。
-    ///
-    /// # 错误
-    /// 输出文件创建、条目读取、写入或头部回填失败时返回 I/O 错误。
-    pub fn pack(
-        &self,
-        veil_dir: impl AsRef<Path>,
-        metadata: &MetaData,
+impl VeilPackageWriter {
+    /// 创建临时包并写入加密元数据。
+    pub fn new(
+        output_path: impl AsRef<Path>,
         encrypted_metadata: &[u8],
-    ) -> Result<(), VeilError> {
-        let veil_dir = veil_dir.as_ref();
-        let current_metadata = std::fs::read(veil_dir.join(VEIL_INFO_FILE))?;
-        if current_metadata != encrypted_metadata {
-            return Err(VeilError::WorkError(
-                "元数据在打包前发生变化，请重新执行打包".to_string(),
-            ));
-        }
-
-        // 打包文件整体覆写，输出路径冲突由命令层提前拒绝。
-        let parent = self
-            .output_path
+    ) -> Result<Self, VeilError> {
+        let output_path = output_path.as_ref().to_path_buf();
+        let parent = output_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        crate::fsutil::create_dir_all_durable(parent)?;
-        let mut output = tempfile::NamedTempFile::new_in(parent)?;
-
-        // 头部包含后续总长度，先写占位值，完成文件遍历后再回填。
-        let placeholder_header = VeilPackageHeader::new(0, 0);
-        output.write_all(&placeholder_header.to_bytes())?;
-
-        // 元数据直接复用 Veil 目录中的加密字节，不在打包阶段重复加密。
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         let metadata_size = u32::try_from(encrypted_metadata.len())
             .map_err(|_| VeilError::InvalidFormat("打包元数据过长".to_string()))?;
+        crate::fsutil::create_dir_all_durable(&parent)?;
+        let mut output = tempfile::NamedTempFile::new_in(&parent)?;
+        output.write_all(&VeilPackageHeader::new(0, 0).to_bytes())?;
         output.write_all(encrypted_metadata)?;
+        Ok(Self {
+            output_path,
+            parent,
+            output,
+            metadata_size,
+            file_count: 0,
+        })
+    }
 
-        let file_count = u32::try_from(metadata.files.len())
-            .map_err(|_| VeilError::InvalidFormat("打包文件数量过多".to_string()))?;
-
-        for file_entry in &metadata.files {
-            // 每个条目由头部和一段已加密文件字节组成，顺序与元数据清单一致。
-            let encrypted_file_path = veil_dir.join(&file_entry.encrypted_name);
-            let encrypted_data = std::fs::read(&encrypted_file_path)?;
-
-            let entry_header = FileEntryHeader {
-                name: file_entry.original_name.clone(),
-                data_size: encrypted_data.len() as u64,
-            };
-            output.write_all(&entry_header.to_bytes()?)?;
-
-            output.write_all(&encrypted_data)?;
+    /// 流式写入一个密文条目。
+    pub fn add_file(&mut self, name: &str, encrypted_path: &Path) -> Result<(), VeilError> {
+        let count = self
+            .file_count
+            .checked_add(1)
+            .ok_or_else(|| VeilError::InvalidFormat("打包文件数量过多".to_string()))?;
+        let mut encrypted = File::open(encrypted_path)?;
+        let entry = FileEntryHeader {
+            name: name.to_string(),
+            data_size: encrypted.metadata()?.len(),
+        };
+        self.output.write_all(&entry.to_bytes()?)?;
+        if std::io::copy(&mut encrypted, &mut self.output)? != entry.data_size {
+            return Err(VeilError::InvalidFormat("打包时密文长度发生变化".into()));
         }
+        self.file_count = count;
+        Ok(())
+    }
 
-        // 回到文件开头写入真实 metadata_size 和 file_count。
-        output.seek(SeekFrom::Start(0))?;
-        let header = VeilPackageHeader::new(metadata_size, file_count);
-        output.write_all(&header.to_bytes())?;
+    /// 回填头部、同步并发布完整包文件。
+    pub fn finish(self) -> Result<(), VeilError> {
+        self.finish_with_overwrite(true)
+    }
 
-        output.flush()?;
-        output.as_file().sync_all()?;
-        output
-            .persist(&self.output_path)
-            .map_err(|error| VeilError::Io(error.error))?;
-        let _ = crate::fsutil::sync_directory(parent);
+    /// 发布包，若目标已经存在则拒绝覆盖。
+    pub fn finish_without_overwrite(self) -> Result<(), VeilError> {
+        self.finish_with_overwrite(false)
+    }
 
+    fn finish_with_overwrite(mut self, overwrite: bool) -> Result<(), VeilError> {
+        self.output.seek(SeekFrom::Start(0))?;
+        self.output
+            .write_all(&VeilPackageHeader::new(self.metadata_size, self.file_count).to_bytes())?;
+        self.output.flush()?;
+        crate::fsutil::sync_file(self.output.as_file())?;
+        if overwrite {
+            self.output
+                .persist(&self.output_path)
+                .map_err(|error| VeilError::Io(error.error))?;
+        } else {
+            self.output
+                .persist_noclobber(&self.output_path)
+                .map_err(|error| VeilError::Io(error.error))?;
+        }
+        let _ = crate::fsutil::sync_directory(&self.parent);
         Ok(())
     }
 }
@@ -520,7 +516,7 @@ fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(),
             output_path.display()
         )));
     }
-    output.sync_all()?;
+    crate::fsutil::sync_file(&output)?;
     crate::fsutil::sync_directory(parent)?;
     Ok(())
 }

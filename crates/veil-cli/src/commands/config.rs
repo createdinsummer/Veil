@@ -3,8 +3,9 @@
 use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
-use veil_core::config::{GlobalConfig, HintLevel};
-use veil_core::work::WorkConfig;
+use veil_service::config::{GlobalConfig, HintLevel};
+use veil_service::work::WorkConfig;
+use veil_service::{ServiceRequest, ServiceResponse};
 
 /// 根据参数设置提示级别，或展示当前有效配置。
 ///
@@ -29,13 +30,13 @@ pub fn run(hint_level: Option<String>, _show: bool) -> Result<()> {
 /// 全局配置加载失败时返回错误。
 fn show_config() -> Result<()> {
     // effective_level 同时考虑配置文件与 VEIL_HINTS，展示用户真正会看到的级别。
-    let config = GlobalConfig::load()?;
+    let config = crate::hints::load_config()?;
     let effective_level = crate::hints::current_level();
 
     crate::outln!("\n{}", i18n::t("config.title").cyan().bold());
     crate::outln!();
 
-    if let Ok(path) = GlobalConfig::config_path() {
+    if let Ok(ServiceResponse::ConfigPath(path)) = super::request(ServiceRequest::ConfigPath) {
         crate::outln!(
             "  {}",
             i18n::t1("config.path", "path", &path.display().to_string()).bright_black()
@@ -123,10 +124,10 @@ fn show_config() -> Result<()> {
 
 /// 工作区路径始终相对于所属配置目录展示。
 fn display_work_path(config: &GlobalConfig, work: &WorkConfig) -> String {
-    config
-        .resolve_work_root(work)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| work.path.display().to_string())
+    match super::request(ServiceRequest::ResolveWorkPath { config, work }) {
+        Ok(ServiceResponse::WorkPath(path)) => path.display().to_string(),
+        _ => work.path.display().to_string(),
+    }
 }
 
 /// 校验并持久化提示级别，同时报告环境变量是否仍会覆盖该值。
@@ -135,10 +136,7 @@ fn display_work_path(config: &GlobalConfig, work: &WorkConfig) -> String {
 /// 级别无效、配置加载或保存失败时返回错误。
 fn set_hint_level(level: &str) -> Result<()> {
     // 先验证并规范化输入，再写入全局配置。
-    let valid_level =
-        HintLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
-
-    crate::hints::set_hint_level(valid_level.as_str())?;
+    let valid_level = crate::hints::set_hint_level(level)?;
 
     let description = match valid_level {
         HintLevel::Full => i18n::t("config.description_full"),

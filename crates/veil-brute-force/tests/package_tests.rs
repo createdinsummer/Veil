@@ -6,8 +6,8 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use veil_core::veil_ops::VeilManager;
-use veil_core::veil_package::VeilPacker;
+use veil_service::package::VeilPacker;
+use veil_service::veil_ops::VeilManager;
 
 fn create_package(temp: &TempDir) {
     veil_core::kdf::enable_fast_test_kdf();

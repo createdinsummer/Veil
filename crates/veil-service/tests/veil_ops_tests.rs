@@ -4,7 +4,7 @@ use std::fs;
 use tempfile::TempDir;
 use veil_core::kdf;
 use veil_core::metadata::{AlgorithmId, MetaHeader};
-use veil_core::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
+use veil_service::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
 
 /// 验证工作区初始化、元数据读取和空文件列表。
 #[test]
@@ -76,6 +76,124 @@ fn test_add_and_extract_file() {
     assert_eq!(content, "Hello, Veil!");
 
     println!("✓ 文件添加和提取成功");
+}
+
+/// 两个基于同一版本的编辑，先提交者成功，后提交者不能覆盖。
+#[test]
+fn stale_export_cannot_overwrite_a_newer_version() {
+    kdf::enable_fast_test_kdf();
+    let root = TempDir::new().unwrap();
+    let manager = VeilManager::new(root.path().join("veil"));
+    let password = "password";
+    manager.init_veil("test", password).unwrap();
+    let source = root.path().join("source");
+    fs::write(&source, b"original").unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&source, "file.txt")], password)
+        .unwrap();
+    let a = root.path().join("a");
+    let b = root.path().join("b");
+    let base_a = manager
+        .extract_file_with_version("file.txt", &a, password)
+        .unwrap();
+    let base_b = manager
+        .extract_file_with_version("file.txt", &b, password)
+        .unwrap();
+    assert_eq!(base_a, base_b);
+    fs::write(&a, b"edit A").unwrap();
+    fs::write(&b, b"edit B").unwrap();
+    manager
+        .add_files(
+            &[AddFileSpec::new(&a, "file.txt").with_base_version(base_a)],
+            password,
+        )
+        .unwrap();
+    let before = manager.list_files(password).unwrap();
+    let error = manager
+        .add_files(
+            &[AddFileSpec::new(&b, "file.txt").with_base_version(base_b.clone())],
+            password,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        veil_core::error::VeilError::VersionConflict(_)
+    ));
+    let after = manager.list_files(password).unwrap();
+    assert_eq!(after[0].version_history, before[0].version_history);
+    assert_eq!(after[0].encrypted_name, before[0].encrypted_name);
+    let output = root.path().join("result");
+    manager.extract_file("file.txt", &output, password).unwrap();
+    assert_eq!(fs::read(output).unwrap(), b"edit A");
+    let mut wrong_identity = base_b;
+    wrong_identity.veil_id = "wrong".into();
+    assert!(matches!(
+        manager.add_files(
+            &[AddFileSpec::new(&b, "file.txt").with_base_version(wrong_identity)],
+            password
+        ),
+        Err(veil_core::error::VeilError::VersionConflict(_))
+    ));
+}
+
+/// 同一基础版本的并发提交必须恰有一个成功。
+#[test]
+fn concurrent_checked_updates_allow_only_one_writer() {
+    use std::sync::{Arc, Barrier};
+    kdf::enable_fast_test_kdf();
+    let root = TempDir::new().unwrap();
+    let veil_dir = root.path().join("veil");
+    let manager = VeilManager::new(veil_dir.clone());
+    manager.init_veil("test", "password").unwrap();
+    let original = root.path().join("original");
+    fs::write(&original, b"original").unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&original, "file.txt")], "password")
+        .unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    let first_base = manager
+        .extract_file_with_version("file.txt", &first, "password")
+        .unwrap();
+    let second_base = manager
+        .extract_file_with_version("file.txt", &second, "password")
+        .unwrap();
+    fs::write(&first, b"first change").unwrap();
+    fs::write(&second, b"second change").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut threads = Vec::new();
+    for (source, base) in [(first, first_base), (second, second_base)] {
+        let directory = veil_dir.clone();
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            let manager = VeilManager::new(directory);
+            barrier.wait();
+            manager.add_files(
+                &[AddFileSpec::new(source, "file.txt").with_base_version(base)],
+                "password",
+            )
+        }));
+    }
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(veil_core::error::VeilError::VersionConflict(_))))
+            .count(),
+        1
+    );
+    let files = manager.list_files("password").unwrap();
+    assert_eq!(files[0].version_history.len(), 2);
+    let output = root.path().join("output");
+    manager
+        .extract_file("file.txt", &output, "password")
+        .unwrap();
+    let contents = fs::read(output).unwrap();
+    assert!(contents == b"first change" || contents == b"second change");
 }
 
 /// 验证 Unix 下新密文仅当前用户可读写。
@@ -171,6 +289,8 @@ fn test_add_file_destination_replaces_existing() {
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].original_name, "nested/renamed.txt");
     let original_file_id = files[0].file_id.clone();
+    let initial_history = files[0].version_history.clone();
+    assert_eq!(initial_history.len(), 1);
     assert!(veil_dir.join(&first[0]).exists());
 
     fs::write(&source, b"second").unwrap();
@@ -183,6 +303,9 @@ fn test_add_file_destination_replaces_existing() {
     assert_eq!(files[0].original_name, "nested/renamed.txt");
     assert_eq!(files[0].size, 6);
     assert_eq!(files[0].file_id, original_file_id);
+    assert_eq!(files[0].version_history.len(), 2);
+    assert_eq!(files[0].version_history[0], initial_history[0]);
+    assert_ne!(files[0].version_history[0], files[0].version_history[1]);
     assert!(!veil_dir.join(&first[0]).exists());
     assert!(veil_dir.join(&second[0]).exists());
 
@@ -191,6 +314,47 @@ fn test_add_file_destination_replaces_existing() {
         .extract_file("nested/renamed.txt", &output, password)
         .unwrap();
     assert_eq!(fs::read_to_string(output).unwrap(), "second");
+}
+
+/// 重命名、失败的覆盖和完整改密均不产生内容版本。
+#[test]
+fn test_file_version_survives_non_content_changes() {
+    kdf::enable_fast_test_kdf();
+    let temp_dir = TempDir::new().unwrap();
+    let manager = VeilManager::new(temp_dir.path().join("veil"));
+    let password = "test-password";
+    manager.init_veil("test", password).unwrap();
+    let source = temp_dir.path().join("source.txt");
+    fs::write(&source, b"content").unwrap();
+    manager.add_file(&source, password).unwrap();
+    let history = manager.list_files(password).unwrap()[0]
+        .version_history
+        .clone();
+
+    manager
+        .rename_file("source.txt", "renamed.txt", password)
+        .unwrap();
+    assert_eq!(
+        manager.list_files(password).unwrap()[0].version_history,
+        history
+    );
+    let missing = temp_dir.path().join("missing.txt");
+    assert!(
+        manager
+            .add_files(&[AddFileSpec::new(&missing, "renamed.txt")], password)
+            .is_err()
+    );
+    assert_eq!(
+        manager.list_files(password).unwrap()[0].version_history,
+        history
+    );
+    manager
+        .change_password_full(password, "new-password")
+        .unwrap();
+    assert_eq!(
+        manager.list_files("new-password").unwrap()[0].version_history,
+        history
+    );
 }
 
 /// 验证错误密码在任何密文写入前失败。

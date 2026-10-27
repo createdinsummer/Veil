@@ -1,9 +1,9 @@
 //! `veil shell` 子命令：提供针对单个 Veil 的交互式命令循环。
 
+use super::CliContainer;
 use crate::error::Result;
 use colored::Colorize;
 use std::io::{self, Write};
-use veil_core::veil_ops::VeilManager;
 
 /// 验证密码后进入交互式文件管理会话。
 ///
@@ -15,8 +15,8 @@ use veil_core::veil_ops::VeilManager;
 pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // shell 生命周期内复用同一 VeilManager，避免每次命令重新解析链接。
     let resolved = super::resolve_veil(veil_name)?;
-    let display_name = resolved.veil_name.clone();
-    let manager = super::veil_manager(&resolved);
+    let display_name = resolved.name().to_owned();
+    let manager = super::container_client(&resolved);
 
     crate::outln!(
         "{}",
@@ -208,7 +208,7 @@ fn print_help() {
 ///
 /// # 错误
 /// 元数据读取或密码校验失败时返回错误。
-fn list_files(manager: &VeilManager, password: &str) -> Result<()> {
+fn list_files(manager: &CliContainer, password: &str) -> Result<()> {
     let files = manager.list_files(password)?;
 
     // 空容器只显示空状态，不打印表头。

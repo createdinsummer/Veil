@@ -15,6 +15,10 @@ pub enum VeilError {
     #[error("I/O 错误: {0}")]
     Io(#[from] std::io::Error),
 
+    /// 元数据已替换，但无法确认目录同步是否成功。
+    #[error("元数据已发布，但持久化状态不确定: {0}")]
+    CommitUncertain(std::io::Error),
+
     /// 容器字节格式不符合预期。
     #[error("容器格式错误: {0}")]
     Format(String),
@@ -66,6 +70,10 @@ pub enum VeilError {
     /// 目标名称已被容器中的其他文件占用。
     #[error("文件已存在: {0}")]
     FileAlreadyExists(String),
+
+    /// 文件已被其他操作修改，基础版本不再匹配。
+    #[error("文件版本冲突: {0}")]
+    VersionConflict(String),
 
     /// 链接所依赖的磁盘卷当前不可用。
     #[error("卷不可用: {0}")]

@@ -7,7 +7,7 @@ mod common;
 
 use common::TestEnv;
 use predicates::prelude::*;
-use veil_core::link::VeilLink;
+use veil_service::link::VeilLink;
 
 /// 验证初始化会创建工作区和可解析的链接文件。
 #[test]
@@ -23,7 +23,7 @@ fn init_creates_work_and_link() {
     let link = env.link_path("photos");
     assert!(link.exists());
 
-    let link = veil_core::link::VeilLink::load(&link).unwrap();
+    let link = veil_service::link::VeilLink::load(&link).unwrap();
     assert!(link.veil.veil_id.starts_with("veil-"));
     assert_eq!(link.veil.veil_name, "photos");
     assert!(
@@ -215,6 +215,7 @@ fn list_uses_veil_name_and_stable_order() {
         .stdout(predicate::str::contains("容器 'ordered' 包含 3 个文件"))
         .stdout(predicate::str::contains("ordered.veil-link").not());
     let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    assert_eq!(stdout.matches("版本: 1").count(), 3);
 
     let a_index = stdout.find("1. a.txt").unwrap();
     let nested_index = stdout.find("2. nested/file.txt").unwrap();
@@ -717,7 +718,7 @@ fn passwd_uses_separate_new_password_environment_variable() {
 fn pack_and_unpack_create_reusable_links() {
     let env = TestEnv::new("test-password");
     let link = env.init("package");
-    let created_at = veil_core::link::VeilLink::load(&link)
+    let created_at = veil_service::link::VeilLink::load(&link)
         .unwrap()
         .veil
         .created_at;
@@ -770,7 +771,7 @@ fn pack_and_unpack_create_reusable_links() {
     let restored_link = env.link_path("restored");
     assert!(restored_link.exists());
     assert_eq!(
-        veil_core::link::VeilLink::load(&restored_link)
+        veil_service::link::VeilLink::load(&restored_link)
             .unwrap()
             .veil
             .created_at,
@@ -971,6 +972,7 @@ fn add_replaces_existing_file() {
         .success();
     let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
     assert_eq!(stdout.matches("repeat.txt").count(), 1);
+    assert!(stdout.contains("版本: 2"));
 
     let output = env.work.path().join("repeat-output.txt");
     env.command()

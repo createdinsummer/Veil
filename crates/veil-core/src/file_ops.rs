@@ -351,7 +351,7 @@ fn publish_atomic_output(
     destination_path: &Path,
     replace: bool,
 ) -> Result<()> {
-    output.as_file().sync_all()?;
+    crate::fsutil::sync_file(output.as_file())?;
     let parent = parent_or_current(destination_path);
     if replace {
         output

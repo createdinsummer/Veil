@@ -42,7 +42,7 @@ pub(crate) fn to_vec<T: Serialize>(value: &T) -> Result<Vec<u8>, VeilError> {
 /// 更新 JSONC 文件，并通过已有的原子替换流程提交。
 ///
 /// 已有文件按语法树逐字段更新，保留已有字段的注释与排版；无效文件不会被覆盖。
-pub(crate) fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), VeilError> {
+pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<(), VeilError> {
     let content = match fs::read_to_string(path) {
         Ok(previous) => update(&previous, value)?,
         Err(error) if error.kind() == ErrorKind::NotFound => {

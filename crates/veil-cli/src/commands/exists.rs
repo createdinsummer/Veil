@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::veil_ops::normalize_veil_dir;
+use veil_service::veil_ops::ContainerPathKind;
 
 /// 判断容器内路径是否存在。
 ///
@@ -14,43 +14,25 @@ pub fn run(veil_name: &str, path: &str, password: Option<String>) -> Result<bool
 
     use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
-    let manager = super::veil_manager(&resolved);
-    let metadata = manager.read_meta(password)?;
-
-    // 根路径代表容器本身，始终是存在的目录。
-    if path == "." || path == "/" {
-        crate::outln!(
-            "{}",
-            crate::i18n::t1("exists.directory", "path", path).green()
-        );
-        return Ok(true);
+    let manager = super::container_client(&resolved);
+    match manager.path_kind(path, password)? {
+        ContainerPathKind::File(path) => {
+            crate::outln!("{}", crate::i18n::t1("exists.file", "path", &path).green());
+            Ok(true)
+        }
+        ContainerPathKind::Directory(path) => {
+            crate::outln!(
+                "{}",
+                crate::i18n::t1("exists.directory", "path", &path).green()
+            );
+            Ok(true)
+        }
+        ContainerPathKind::Missing(path) => {
+            crate::outln!(
+                "{}",
+                crate::i18n::t1("exists.missing", "path", &path).yellow()
+            );
+            Ok(false)
+        }
     }
-
-    let normalized = normalize_veil_dir(path)?;
-    if metadata.find_file(&normalized).is_some() {
-        crate::outln!(
-            "{}",
-            crate::i18n::t1("exists.file", "path", &normalized).green()
-        );
-        return Ok(true);
-    }
-
-    let directory_prefix = format!("{normalized}/");
-    if metadata
-        .files
-        .iter()
-        .any(|entry| entry.original_name.starts_with(&directory_prefix))
-    {
-        crate::outln!(
-            "{}",
-            crate::i18n::t1("exists.directory", "path", &normalized).green()
-        );
-        return Ok(true);
-    }
-
-    crate::outln!(
-        "{}",
-        crate::i18n::t1("exists.missing", "path", &normalized).yellow()
-    );
-    Ok(false)
 }

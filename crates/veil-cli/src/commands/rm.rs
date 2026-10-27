@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use veil_core::veil_ops::RemovedPathKind;
+use veil_service::veil_ops::RemovedPathKind;
 
 /// 从容器删除文件或目录（工作区架构）。
 ///
@@ -24,7 +24,7 @@ use veil_core::veil_ops::RemovedPathKind;
 pub fn run(veil_name: &str, file_name: &str, password: Option<String>) -> Result<()> {
     // 先解析稳定 ID，确保后续删除针对的是最终工作区而不是输入本身。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
+    let manager = super::container_client(&resolved);
 
     // 删除前先输出目标；真正删除仍需要密码和元数据查找成功。
     crate::outln!(

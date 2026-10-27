@@ -12,7 +12,7 @@ fn named_work_uses_config_relative_location() {
     let env = TestEnv::new("test-password");
     env.init("default-demo");
     let config_path = env.home.path().join(".veil/config.jsonc");
-    let mut config = veil_core::config::GlobalConfig::load_from(&config_path).unwrap();
+    let mut config = veil_service::config::GlobalConfig::load_from(&config_path).unwrap();
     let target = env.work.path().join("archive");
     config
         .register_custom_work("archive".to_string(), target.clone(), None)
@@ -26,7 +26,7 @@ fn named_work_uses_config_relative_location() {
         .args(["init", "named-demo", "--work", "archive"])
         .assert()
         .success();
-    let link = veil_core::link::VeilLink::load(&env.link_path("named-demo")).unwrap();
+    let link = veil_service::link::VeilLink::load(&env.link_path("named-demo")).unwrap();
     assert!(
         work_root
             .join(&link.veil.veil_id)
@@ -43,7 +43,7 @@ fn named_work_uses_config_relative_location() {
         .assert()
         .success();
     // 清除原容器注册记录，使解包可以复用包内稳定 ID。
-    let mut config = veil_core::config::GlobalConfig::load_from(&config_path).unwrap();
+    let mut config = veil_service::config::GlobalConfig::load_from(&config_path).unwrap();
     config
         .veils
         .retain(|_, veil| veil.veil_id != link.veil.veil_id);
@@ -81,7 +81,7 @@ fn named_work_uses_config_relative_location() {
         ])
         .assert()
         .success();
-    let unpacked = veil_core::link::VeilLink::load(&output).unwrap();
+    let unpacked = veil_service::link::VeilLink::load(&output).unwrap();
     assert_eq!(unpacked.veil.veil_id, link.veil.veil_id);
     assert!(
         env.veil_dir(&output)
@@ -260,7 +260,10 @@ fn multiple_links_can_target_the_same_work() {
 fn veil_selector_accepts_name_id_and_link_only() {
     let env = TestEnv::new("test-password");
     let link = env.init("selector");
-    let veil_id = veil_core::link::VeilLink::load(&link).unwrap().veil.veil_id;
+    let veil_id = veil_service::link::VeilLink::load(&link)
+        .unwrap()
+        .veil
+        .veil_id;
 
     env.command().args(["list", "selector"]).assert().success();
     env.command().args(["list", &veil_id]).assert().success();
@@ -295,7 +298,10 @@ fn veil_selector_accepts_name_id_and_link_only() {
 fn missing_config_does_not_use_link_location_or_create_config() {
     let env = TestEnv::new("test-password");
     let link = env.init("configless");
-    let veil_id = veil_core::link::VeilLink::load(&link).unwrap().veil.veil_id;
+    let veil_id = veil_service::link::VeilLink::load(&link)
+        .unwrap()
+        .veil
+        .veil_id;
 
     std::fs::remove_file(env.home.path().join(".veil/config.jsonc")).unwrap();
 
@@ -335,7 +341,7 @@ fn dedicated_work_init_is_available_from_main_cli() {
 
     // 专属模式仍使用 work_root/veil_id，工作区本身只负责容器归属。
     assert!(link.exists());
-    let data = veil_core::link::VeilLink::load(&link).unwrap();
+    let data = veil_service::link::VeilLink::load(&link).unwrap();
     assert!(work.join(&data.veil.veil_id).join(".veil-info").exists());
 
     let source = env.write_file("secret.txt", "secret");
@@ -380,8 +386,8 @@ fn duplicate_veil_names_are_distinguished_by_veil_id() {
         .success();
 
     // 两个容器展示名相同，只有链接中持久化的 veil_id 能区分它们。
-    let first = veil_core::link::VeilLink::load(&first_link).unwrap();
-    let second = veil_core::link::VeilLink::load(&second_link).unwrap();
+    let first = veil_service::link::VeilLink::load(&first_link).unwrap();
+    let second = veil_service::link::VeilLink::load(&second_link).unwrap();
     assert_ne!(first.veil.veil_id, second.veil.veil_id);
 
     // 同名时仅输入展示名无法确定目标，必须通过 ID 或链接区分。
@@ -563,7 +569,7 @@ fn init_rejects_link_path_with_unknown_extension() {
 fn link_does_not_fall_back_from_missing_id_to_name() {
     let env = TestEnv::new("test-password");
     let link = env.init("missing-link");
-    let mut rewritten = veil_core::link::VeilLink::load(&link).unwrap();
+    let mut rewritten = veil_service::link::VeilLink::load(&link).unwrap();
     rewritten.veil.veil_id = "veil-missing".into();
     rewritten.save(&link).unwrap();
     env.command()
@@ -629,7 +635,7 @@ fn init_dedicated_work_requires_empty_directory() {
         ])
         .assert()
         .success();
-    let data = veil_core::link::VeilLink::load(&empty_link).unwrap();
+    let data = veil_service::link::VeilLink::load(&empty_link).unwrap();
     assert!(!empty_work.join(".work-id").exists());
     assert!(
         empty_work

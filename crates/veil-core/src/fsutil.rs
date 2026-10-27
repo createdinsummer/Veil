@@ -7,6 +7,49 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+/// 在 macOS 上请求设备刷新；其他平台使用系统文件同步。
+pub(crate) fn sync_file(file: &fs::File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: 文件描述符来自仍然存活的 File，F_FULLFSYNC 不读取额外参数。
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    file.sync_all()
+}
+
+/// 区分替换前失败和替换后持久化状态不确定。
+pub struct AtomicWriteError {
+    pub error: io::Error,
+    pub published: bool,
+}
+
+#[cfg(any(test, feature = "fault-injection"))]
+#[doc(hidden)]
+pub fn fault_point(stage: &str) {
+    if std::env::var("VEIL_TEST_FAILPOINT").as_deref() == Ok(stage) {
+        std::process::exit(86);
+    }
+    if std::env::var("VEIL_TEST_PAUSEPOINT").as_deref() == Ok(stage) {
+        let root = std::path::PathBuf::from(std::env::var_os("VEIL_FAULT_TEST_ROOT").unwrap());
+        fs::write(root.join("paused"), stage).unwrap();
+        let start = std::time::Instant::now();
+        while !root.join("resume").exists() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
 /// 返回路径的父目录；没有父目录时使用当前目录。
 fn parent_or_current(path: &Path) -> &Path {
     path.parent()
@@ -18,7 +61,7 @@ fn parent_or_current(path: &Path) -> &Path {
 ///
 /// Unix 平台直接对目录执行 `fsync`。Windows 标准库没有稳定暴露目录句柄同步接口，
 /// 因此该平台保留原子重命名语义，并在本函数中不额外执行目录同步。
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let directory = fs::File::open(path)?;
@@ -42,7 +85,7 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
 ///
 /// 普通 `create_dir_all` 只保证进程内可见；断电或系统崩溃后，新目录项可能丢失。
 /// 本函数从最上层缺失目录开始创建，使最终返回时整条目录链已经持久化。
-pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
     if path.as_os_str().is_empty() || path.is_dir() {
         return Ok(());
     }
@@ -81,22 +124,64 @@ pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
 /// 重命名完成后目录同步失败无法再安全回滚：此时正式文件已经是完整的新内容，若
 /// 返回错误，调用方可能错误删除新数据。因此提交后的目录同步按尽力而为处理。
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+    atomic_write_inner(path, data, false).map_err(|error| error.error)
+}
+
+pub fn atomic_write_metadata(path: &Path, data: &[u8]) -> Result<(), AtomicWriteError> {
+    atomic_write_inner(path, data, true)
+}
+
+fn atomic_write_inner(path: &Path, data: &[u8], strict: bool) -> Result<(), AtomicWriteError> {
+    let before = |error| AtomicWriteError {
+        error,
+        published: false,
+    };
     let parent = parent_or_current(path);
-    create_dir_all_durable(parent)?;
+    create_dir_all_durable(parent).map_err(before)?;
 
     let mut temp_file = tempfile::Builder::new()
         .prefix(".veil-tmp-")
-        .tempfile_in(parent)?;
-    temp_file.write_all(data)?;
-    temp_file.as_file().sync_all()?;
-    temp_file.persist(path).map_err(|error| error.error)?;
-    let _ = sync_directory(parent);
+        .tempfile_in(parent)
+        .map_err(before)?;
+    temp_file.write_all(data).map_err(before)?;
+    #[cfg(any(test, feature = "fault-injection"))]
+    if strict {
+        fault_point("config_temp_written");
+    }
+    sync_file(temp_file.as_file()).map_err(before)?;
+    #[cfg(any(test, feature = "fault-injection"))]
+    if strict {
+        fault_point("before_replace");
+    }
+    temp_file
+        .persist(path)
+        .map_err(|error| before(error.error))?;
+    #[cfg(any(test, feature = "fault-injection"))]
+    if strict {
+        fault_point("after_replace");
+    }
+    #[cfg(any(test, feature = "fault-injection"))]
+    if strict && std::env::var("VEIL_TEST_FAILPOINT").as_deref() == Ok("after_replace_error") {
+        return Err(AtomicWriteError {
+            error: io::Error::other("注入目录同步失败"),
+            published: true,
+        });
+    }
+    let synced = sync_directory(parent);
+    if strict {
+        synced.map_err(|error| AtomicWriteError {
+            error,
+            published: true,
+        })?;
+        #[cfg(any(test, feature = "fault-injection"))]
+        fault_point("after_commit");
+    }
 
     Ok(())
 }
 
 /// 判断目录项是否由本项目的临时文件命名规则生成。
-pub(crate) fn is_internal_temp_name(name: &str) -> bool {
+pub fn is_internal_temp_name(name: &str) -> bool {
     name.starts_with(".veil-tmp-")
         || name.starts_with(".veil-pw-")
         || name.starts_with(".veil-file-")

@@ -1137,6 +1137,7 @@ dependencies = [
  "rayon",
  "tempfile",
  "veil-core",
+ "veil-service",
 ]
 
 [[package]]
@@ -1155,6 +1156,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "veil-core",
+ "veil-service",
  "walkdir",
  "winapi",
 ]
@@ -1187,6 +1189,24 @@ dependencies = [
  "clap",
  "png",
  "tempfile",
+]
+
+[[package]]
+name = "veil-service"
+version = "2.0.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "dirs",
+ "getrandom 0.2.17",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "veil-core",
+ "walkdir",
+ "zeroize",
 ]
 
 [[package]]

@@ -425,6 +425,10 @@ impl From<veil_core::error::VeilError> for CommandError {
 
         let (code, detail) = match error {
             VeilError::Io(error) => (ErrorCode::Io, error.to_string()),
+            VeilError::CommitUncertain(error) => (
+                ErrorCode::Io,
+                format!("元数据已发布，但持久化状态不确定: {error}"),
+            ),
             VeilError::Format(error) => (ErrorCode::Format, error),
             VeilError::WorkError(error) => (ErrorCode::Work, error),
             VeilError::ConfigError(error) => (ErrorCode::Config, error),
@@ -436,6 +440,9 @@ impl From<veil_core::error::VeilError> for CommandError {
             VeilError::KeyDerivationError(error) => (ErrorCode::KeyDerivation, error),
             VeilError::FileNotFound(error) => (ErrorCode::FileNotFound, error),
             VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error),
+            VeilError::VersionConflict(error) => {
+                (ErrorCode::Work, format!("文件版本冲突: {error}"))
+            }
             VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
             VeilError::VeilIdConflict(error) => (ErrorCode::VeilIdConflict, error),
             VeilError::VeilNameAmbiguous(error) => (ErrorCode::VeilNameAmbiguous, error),

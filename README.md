@@ -15,13 +15,15 @@ Veil 是一个 Work 模型的加密文件工具。CLI 通过 `.veil-link` 定位
 
 Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依赖云端服务，Veil 身份由稳定的 `veil_id` 表示，展示名称和磁盘路径变化不会改变身份。
 
-项目包含三个主要部分：
+项目包含以下主要部分：
 
 | 组件 | 职责 |
 | --- | --- |
-| `veil-core` | Work/Veil 操作、打包格式、配置、链接、元数据、密钥派生和内容加解密 |
+| `veil-core` | 加密、存储、文件锁、版本比较和打包格式等底层能力 |
+| `veil-service` | 容器操作、工作区、链接及锁和版本控制的业务编排 |
 | `veil-cli` | 用户命令、密码输入、链接恢复、Veil 打包和解包 |
 | `veil-brute-force` | 对自行创建并通过 `veil pack` 生成的 `.veil` 文件进行密码强度测试 |
+| `veil-app` | Tauri 桌面原型，提供容器创建、打开、锁定和文件列表 |
 
 ## 工作模型
 
@@ -68,6 +70,8 @@ Work 模型中的 Veil 使用 Argon2id 从用户密码和 salt 派生密码保�
 
 运行完整测试使用 `cargo test --workspace --all-targets`。生成库文档使用 `cargo doc --workspace --no-deps`。
 
+桌面原型使用 React、TypeScript 和 Tauri，在 `apps/veil-app` 目录执行 `npm ci` 后运行 `npm run tauri dev`。原型已针对 macOS 构建；打开容器时选择包含 `.veil-info` 的目录，新建容器时会在所选位置创建独立目录。原型暂不登记 CLI 工作区，也暂不提供文件添加或导出操作。
+
 ## 关键边界
 
 - CLI 的 `ex` 当前只处理单文件；`add` 支持文件、目录递归导入和目标路径。
@@ -81,10 +85,12 @@ Work 模型中的 Veil 使用 Argon2id 从用户密码和 salt 派生密码保�
 
 | 路径 | 说明 |
 | --- | --- |
-| `crates/veil-core` | 核心库和存储格式 |
+| `crates/veil-core` | 核心能力和存储格式 |
+| `crates/veil-service` | 容器业务服务 |
 | `crates/veil-cli` | `veil` 命令行程序和集成测试 |
 | `crates/veil-brute-force` | 密码强度测试工具 |
 | `crates/veil-scrollshot` | 独立的录屏转长截图模块与命令行程序 |
+| `apps/veil-app` | Tauri 和 React 桌面原型，独立于根 Cargo 工作空间 |
 
 ## 许可证
 

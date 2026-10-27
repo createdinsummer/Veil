@@ -2,8 +2,6 @@
 
 use crate::error::Result;
 use colored::Colorize;
-use std::collections::BTreeMap;
-use std::path::Path;
 
 /// 显示 Veil 详细信息。
 ///
@@ -24,8 +22,8 @@ use std::path::Path;
 pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // info 绑定已确认的 ID，展示名称以加密元数据中的值为准。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
-    let veil_dir = manager.veil_dir.clone();
+    let manager = super::container_client(&resolved);
+    let veil_dir = resolved.directory();
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 
@@ -33,7 +31,8 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     let password = password_str.expose_secret();
 
     // 读取元数据同时完成密码验证；失败时不会打印任何容器内容。
-    let metadata = manager.read_meta(password)?;
+    let info = manager.info(password)?;
+    let metadata = &info.metadata;
 
     crate::outln!("\n{}", crate::i18n::t("info.title").cyan().bold());
     crate::outln!(
@@ -56,7 +55,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // 文件数量来自已解密清单，总大小在内存中累加，不扫描磁盘密文。
     let file_count = metadata.files.len();
     let total_size: u64 = metadata.files.iter().map(|f| f.size).sum();
-    let veil_size = directory_size(&veil_dir)?;
+    let veil_size = info.disk_usage;
 
     crate::outln!("\n{}", crate::i18n::t("info.content_title").cyan());
     crate::outln!(
@@ -88,13 +87,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
         crate::outln!("\n{}", crate::i18n::t("common.empty").bright_black());
     } else {
         crate::outln!("\n{}", crate::i18n::t("info.mime_dist_title").cyan());
-        let mut distribution = BTreeMap::new();
-        for file in &metadata.files {
-            let mime = veil_core::mime::guess_mime(&file.original_name)
-                .unwrap_or_else(|| "application/octet-stream".to_string());
-            *distribution.entry(mime).or_insert(0usize) += 1;
-        }
-        for (mime, count) in distribution {
+        for (mime, count) in &info.mime_distribution {
             crate::outln!(
                 "{}",
                 crate::i18n::t2("info.mime_item", "type", &mime, "count", &count.to_string())
@@ -123,19 +116,4 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
 
     crate::outln!();
     Ok(())
-}
-
-/// 递归统计 `veil_dir` 中实际占用的文件字节数。
-fn directory_size(path: &Path) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            total = total.saturating_add(directory_size(&entry.path())?);
-        } else if file_type.is_file() {
-            total = total.saturating_add(entry.metadata()?.len());
-        }
-    }
-    Ok(total)
 }

@@ -2,6 +2,10 @@
 name = "veil-core"
 edition.workspace = true # 从工作空间继承edition
 version.workspace = true # 从工作空间继承version
+rust-version = "1.89" # 标准库文件锁接口所需的最低 Rust 版本
+
+[features]
+fault-injection = []
 
 [dependencies]
 argon2 = "0.5"

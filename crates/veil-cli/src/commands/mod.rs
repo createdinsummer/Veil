@@ -1,8 +1,7 @@
 //! Veil 子命令实现及命令层公共辅助函数。
 //!
 //! 本模块把全局配置解析、密码输入、链接路径生成和提示展示组合到各子命令中。
-//! 命令实现只负责用户交互与流程编排，Veil 加密、元数据和文件访问由
-//! `veil-core` 提供。
+//! 命令实现负责用户交互与命令适配，容器操作逐步迁移到 `veil-service`。
 
 pub mod add;
 pub mod config;
@@ -20,11 +19,76 @@ pub mod rm;
 pub mod shell;
 pub mod unpack;
 
-use std::path::PathBuf;
-use veil_core::config::{GlobalConfig, ResolvedVeil};
-use veil_core::veil_ops::VeilManager;
+use std::path::Path;
+use veil_core::error::VeilError;
+use veil_core::metadata::{FileEntry, MetaData};
+use veil_service::commands::ContainerHandle;
+use veil_service::veil_ops::{ContainerPathKind, MovedPathKind, RemovedPathKind};
+use veil_service::{
+    ContainerOperation, ContainerOperationResult, ServiceError, ServiceRequest, ServiceResponse,
+    VeilService,
+};
 
 use crate::error::Result;
+
+pub(crate) fn request(request: ServiceRequest<'_>) -> Result<ServiceResponse> {
+    VeilService::default()
+        .execute(request)
+        .map_err(|error| match error {
+            ServiceError::Core(error) => error.into(),
+            ServiceError::Workflow(error) => map_workflow_error(error),
+            ServiceError::Import(error) => match error {
+                veil_service::import::ImportError::SourceNotFound(path) => crate::cli_error!(AddSourceNotFound, "path" => path.display()),
+                veil_service::import::ImportError::NotFile(path) => crate::cli_error!(AddNotFile, "path" => path.display()),
+                veil_service::import::ImportError::InvalidDestination(path) => crate::cli_error!(AddInvalidDestination, "path" => path),
+                veil_service::import::ImportError::DirectoryRead { path, error } => crate::cli_error!(AddDirectoryReadFailed, "path" => path.display(), "error" => error),
+            },
+            other => VeilError::WorkError(other.to_string()).into(),
+        })
+}
+
+fn map_workflow_error(error: veil_service::workflow::WorkflowError) -> crate::error::CommandError {
+    use veil_service::workflow::WorkflowError as E;
+    match error {
+        E::ConflictingWorkOptions => crate::cli_error!(InitConflictingWorkOptions),
+        E::DedicatedRequiresPath => crate::cli_error!(InitDedicatedRequiresWorkPath),
+        E::PortableConflictsWork => crate::cli_error!(InitPortableConflictsWork),
+        E::InvalidLinkName => crate::cli_error!(InitInvalidLinkName),
+        E::InvalidName => crate::cli_error!(InitInvalidVeilName),
+        E::InvalidLinkExtension(path) => {
+            crate::cli_error!(InitInvalidLinkExtension, "path" => path.display())
+        }
+        E::LinkExists(path) => crate::cli_error!(LinkOutputExists, "path" => path.display()),
+        E::ContainerExists(path) => crate::cli_error!(InitVeilExists, "path" => path.display()),
+        E::DedicatedNotEmpty(path) => {
+            crate::cli_error!(InitDedicatedPathNotEmpty, "path" => path.display())
+        }
+        E::PackageNotFound(path) => crate::cli_error!(UnpackVeilNotFound, "path" => path.display()),
+        E::UnpackNameInvalid => crate::cli_error!(UnpackNameExtractFailed),
+        E::UnpackMissingId => crate::cli_error!(UnpackMissingVeilId),
+        E::UnpackDirectoryExists(path) => {
+            crate::cli_error!(UnpackDirectoryExists, "path" => path.display())
+        }
+        E::UnpackInvalidLinkExtension(path) => {
+            crate::cli_error!(UnpackInvalidLinkExtension, "path" => path.display())
+        }
+        E::LinkMissingId => crate::cli_error!(LinkMissingVeilId),
+        E::LinkInvalidExtension(path) => {
+            crate::cli_error!(LinkInvalidExtension, "path" => path.display())
+        }
+        E::PackOutputExists(path) => crate::cli_error!(PackOutputExists, "path" => path.display()),
+        E::PasswordEmpty => crate::cli_error!(PasswordEmpty),
+        E::InvalidHintLevel => crate::cli_error!(ConfigInvalidLevel),
+        E::CreateFailed { directory, source } => {
+            crate::cli_error!(InitWorkCreateFailed, "path" => directory.display(), "error" => source)
+        }
+        E::LinkRegistrationFailed { path, source } => {
+            crate::cli_error!(InitLinkRegistrationFailed, "path" => path.display(), "error" => source)
+        }
+        E::Core(error) => error.into(),
+        E::Io(error) => error.into(),
+    }
+}
 
 /// 所有需要选择已有 Veil 的命令都必须经过这里。
 ///
@@ -35,66 +99,137 @@ use crate::error::Result;
 /// 从配置缓存恢复链接后会展示恢复提示。
 ///
 /// # 错误
-/// 全局配置加载或 [`GlobalConfig::resolve_veil`] 失败时返回错误。
-pub fn resolve_veil(input: &str) -> Result<ResolvedVeil> {
-    let mut config = GlobalConfig::load()?;
-    let resolved = config.resolve_veil(input)?;
+/// 全局配置加载或 [`veil_service::config::GlobalConfig::resolve_veil`] 失败时返回错误。
+pub fn resolve_veil(input: &str) -> Result<ContainerHandle> {
+    let resolved = match VeilService::default()
+        .execute(ServiceRequest::PrepareContainer { selector: input })
+    {
+        Ok(ServiceResponse::ContainerPrepared(resolved)) => resolved,
+        Err(ServiceError::Core(error)) => return Err(error.into()),
+        Err(error) => return Err(VeilError::WorkError(error.to_string()).into()),
+        _ => return Err(VeilError::WorkError("服务响应类型不符合请求".into()).into()),
+    };
 
     // 已恢复的链接需要提示用户。
-    if resolved.recovered_link
-        && let Some(link_path) = resolved.link_path.as_deref()
-    {
+    if let Some(link_path) = resolved.recovered_link() {
         crate::hints::show_link_recovery_hint(link_path);
     }
 
     Ok(resolved)
 }
 
-/// 为解析结果创建 Veil 管理器，并绑定已经确认的稳定 Veil ID。
-pub fn veil_manager(resolved: &ResolvedVeil) -> VeilManager {
-    VeilManager::for_veil(resolved.veil_dir.clone(), resolved.veil_id.clone())
+/// 命令层适配器：所有容器操作都交给服务请求入口。
+pub struct CliContainer {
+    container: ContainerHandle,
+    service: VeilService,
 }
 
-/// 返回当前目录下默认的 `<veil_name>.veil-link` 路径。
-///
-/// 当前目录不可读取时以 `.` 作为回退目录；函数不检查该路径是否已存在。
-pub fn default_link_path(veil_name: &str) -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(format!("{}.veil-link", veil_name))
-}
-
-/// 当前本地时间，精确到秒，用于重名时生成后缀。
-pub fn creation_timestamp() -> String {
-    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
-}
-
-/// 为重名容器分配不会覆盖现有文件的默认链接路径。
-pub fn default_link_path_for_time(veil_name: &str, creation_time: &str) -> PathBuf {
-    // 默认名称未冲突时直接使用，保持日常路径最简短。
-    let default_path = default_link_path(veil_name);
-    if !default_path.exists() {
-        return default_path;
+pub fn container_client(resolved: &ContainerHandle) -> CliContainer {
+    CliContainer {
+        container: resolved.clone(),
+        service: VeilService::default(),
     }
+}
 
-    // 冲突后加入创建时间，尽量让不同批次生成的链接保持可读顺序。
-    let base_name = veil_core::work::veil_name_with_suffix(veil_name, creation_time);
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    // 同一秒内继续重名时追加递增序号，直到找到不存在的路径。
-    for index in 1u32.. {
-        let file_name = if index == 1 {
-            format!("{}.veil-link", base_name)
-        } else {
-            format!("{}-{}.veil-link", base_name, index)
-        };
-        let candidate = current_dir.join(file_name);
-        if !candidate.exists() {
-            return candidate;
+impl CliContainer {
+    fn info(
+        &self,
+        password: &str,
+    ) -> std::result::Result<veil_service::operations::ContainerInfo, VeilError> {
+        match self.execute(ContainerOperation::ReadInfo { password })? {
+            ContainerOperationResult::Info(value) => Ok(value),
+            _ => unreachable!(),
         }
     }
-
-    unreachable!("默认链接名称序号不可能耗尽")
+    fn execute(
+        &self,
+        operation: ContainerOperation<'_>,
+    ) -> std::result::Result<ContainerOperationResult, VeilError> {
+        match self.service.execute(ServiceRequest::OperatePrepared {
+            container: &self.container,
+            operation,
+        }) {
+            Ok(ServiceResponse::Operation(result)) => Ok(result),
+            Err(ServiceError::Core(error)) => Err(error),
+            Err(error) => Err(VeilError::WorkError(error.to_string())),
+            _ => Err(VeilError::WorkError("服务响应类型不符合请求".into())),
+        }
+    }
+    fn read_meta(&self, password: &str) -> std::result::Result<MetaData, VeilError> {
+        match self.execute(ContainerOperation::ReadMetadata { password })? {
+            ContainerOperationResult::Metadata(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+    fn list_files(&self, password: &str) -> std::result::Result<Vec<FileEntry>, VeilError> {
+        match self.execute(ContainerOperation::ListFiles { password })? {
+            ContainerOperationResult::Files(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+    fn path_kind(
+        &self,
+        path: &str,
+        password: &str,
+    ) -> std::result::Result<ContainerPathKind, VeilError> {
+        match self.execute(ContainerOperation::PathKind { path, password })? {
+            ContainerOperationResult::PathKind(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+    fn add_file(&self, source: &Path, password: &str) -> std::result::Result<String, VeilError> {
+        match self.execute(ContainerOperation::AddFile { source, password })? {
+            ContainerOperationResult::AddedFile(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+    fn extract_file(
+        &self,
+        name: &str,
+        output: &Path,
+        password: &str,
+    ) -> std::result::Result<(), VeilError> {
+        match self.execute(ContainerOperation::ExtractFile {
+            name,
+            output,
+            password,
+        })? {
+            ContainerOperationResult::Done => Ok(()),
+            _ => unreachable!(),
+        }
+    }
+    fn remove_path(
+        &self,
+        path: &str,
+        password: &str,
+    ) -> std::result::Result<RemovedPathKind, VeilError> {
+        match self.execute(ContainerOperation::RemovePath { path, password })? {
+            ContainerOperationResult::Removed(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+    fn move_path(
+        &self,
+        from: &str,
+        to: &str,
+        password: &str,
+    ) -> std::result::Result<(MovedPathKind, String), VeilError> {
+        match self.execute(ContainerOperation::MovePath { from, to, password })? {
+            ContainerOperationResult::Moved(k, p) => Ok((k, p)),
+            _ => unreachable!(),
+        }
+    }
+    fn change_password(
+        &self,
+        old: &str,
+        new: &str,
+        full: bool,
+    ) -> std::result::Result<(), VeilError> {
+        match self.execute(ContainerOperation::ChangePassword { old, new, full })? {
+            ContainerOperationResult::Done => Ok(()),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// 显示提示词并读取一行无回显密码。
@@ -226,8 +361,11 @@ fn validate_password_confirmation(
 fn validate_new_password(password: secrecy::SecretString) -> Result<secrecy::SecretString> {
     use secrecy::ExposeSecret;
 
-    if password.expose_secret().is_empty() {
-        crate::cli_bail!(PasswordEmpty);
+    match request(ServiceRequest::ValidateNewPassword {
+        password: password.expose_secret(),
+    })? {
+        ServiceResponse::PasswordValid => {}
+        _ => return Err(VeilError::WorkError("服务响应类型不符合请求".into()).into()),
     }
 
     Ok(password)

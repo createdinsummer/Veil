@@ -19,7 +19,7 @@ enum TreeNode {
 pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
     // 解析后绑定稳定 ID，展示名称以实际元数据为准。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
+    let manager = super::container_client(&resolved);
 
     let password_str = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
 

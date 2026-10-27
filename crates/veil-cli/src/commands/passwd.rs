@@ -18,7 +18,7 @@ pub fn run(
 ) -> Result<()> {
     // 密码修改必须作用于容器工作区，而不是链接文件本身。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::veil_manager(&resolved);
+    let manager = super::container_client(&resolved);
 
     crate::outln!("{}", crate::i18n::t("passwd.changing").cyan());
 
@@ -33,11 +33,7 @@ pub fn run(
     let new_password_str = new_pwd.expose_secret();
 
     // core 在修改过程中保持原始 veil_id 和工作区结构不变。
-    if full {
-        manager.change_password_full(old_password_str, new_password_str)?;
-    } else {
-        manager.change_password(old_password_str, new_password_str)?;
-    }
+    manager.change_password(old_password_str, new_password_str, full)?;
 
     crate::outln!("{}", crate::i18n::t("passwd.changed").green());
 

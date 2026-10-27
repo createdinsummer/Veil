@@ -7,98 +7,50 @@ use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
 use std::path::Path;
-use veil_core::config::{GlobalConfig, HintLevel};
+use veil_service::config::{GlobalConfig, HintLevel};
+use veil_service::hints::HintKind;
+use veil_service::{ServiceRequest, ServiceResponse};
 
-/// 当前支持的提示场景。
-#[derive(Debug, Clone, Copy)]
-enum HintType {
-    /// 首次创建容器后的使用说明。
-    FirstInit,
-    /// 首次打包后的文件用途说明。
-    FirstPack,
-    /// 首次解包后的文件映射说明。
-    FirstUnpack,
-    /// 链接缺失并完成恢复后的说明。
-    LinkRecovery,
+pub(crate) fn load_config() -> Result<GlobalConfig> {
+    match crate::commands::request(ServiceRequest::LoadConfig)? {
+        ServiceResponse::Config(config) => Ok(config),
+        _ => Err(veil_core::error::VeilError::WorkError("服务响应类型不符合请求".into()).into()),
+    }
 }
 
-/// 当前生效的提示级别：`VEIL_HINTS` 环境变量优先，其次读取全局配置。
+/// 当前生效的提示级别。
 pub fn current_level() -> HintLevel {
-    // 环境变量是临时覆盖层，只有合法值才允许覆盖持久化配置。
-    if let Ok(value) = std::env::var("VEIL_HINTS")
-        && let Some(level) = HintLevel::parse(&value)
-    {
-        return level;
-    }
-
-    // 配置读取失败时回退到完整提示，保证新环境仍能获得帮助信息。
-    GlobalConfig::load()
-        .map(|config| config.user_settings.hint_level)
-        .unwrap_or(HintLevel::Full)
-}
-
-/// 解析并持久化提示级别。
-///
-/// # 错误
-/// 级别无效、全局配置加载失败或保存失败时返回错误。
-pub fn set_hint_level(level: &str) -> Result<()> {
-    let parsed = HintLevel::parse(level).ok_or_else(|| crate::cli_error!(ConfigInvalidLevel))?;
-    let mut config = GlobalConfig::load()?;
-    config.user_settings.hint_level = parsed;
-    config.save()?;
-    Ok(())
-}
-
-/// 判断指定提示在当前级别下是否允许展示。
-fn allowed(hint_type: HintType, level: HintLevel) -> bool {
-    // Brief 只保留解包和异常恢复类关键提示。
-    match level {
-        HintLevel::Off => false,
-        HintLevel::Brief => matches!(hint_type, HintType::FirstUnpack | HintType::LinkRecovery),
-        HintLevel::Full => true,
+    let value = std::env::var("VEIL_HINTS").ok();
+    match crate::commands::request(ServiceRequest::EffectiveHintLevel {
+        override_value: value.as_deref(),
+    }) {
+        Ok(ServiceResponse::EffectiveHintLevel(level)) => level,
+        _ => HintLevel::Full,
     }
 }
 
-/// 对需要记录状态的提示执行级别检查和一次性判定。
-///
-/// 返回 `true` 时立即把对应展示标记写回配置；配置读写失败时回退到仅按级别判断。
-fn should_show_once(hint_type: HintType) -> bool {
-    let mut config = match GlobalConfig::load() {
-        Ok(config) => config,
-        Err(_) => return allowed(hint_type, current_level()),
-    };
-
-    if !allowed(hint_type, current_level()) {
-        return false;
+/// 请求服务层保存提示级别。
+pub fn set_hint_level(level: &str) -> Result<HintLevel> {
+    match crate::commands::request(ServiceRequest::SetHintLevel { level })? {
+        ServiceResponse::HintLevelSet(level) => Ok(level),
+        _ => Err(veil_core::error::VeilError::WorkError("服务响应类型不符合请求".into()).into()),
     }
+}
 
-    // 只有首次使用类提示需要写回“已展示”状态，条件提示每次都允许出现。
-    let already_shown = match hint_type {
-        HintType::FirstInit => config.system.init_hint_shown,
-        HintType::FirstPack => config.system.pack_hint_shown,
-        HintType::FirstUnpack => config.system.unpack_hint_shown,
-        HintType::LinkRecovery => return true,
-    };
-
-    if already_shown {
-        return false;
+fn should_show(kind: HintKind) -> bool {
+    let value = std::env::var("VEIL_HINTS").ok();
+    match crate::commands::request(ServiceRequest::ShouldShowHint {
+        kind,
+        override_value: value.as_deref(),
+    }) {
+        Ok(ServiceResponse::ShowHint(show)) => show,
+        _ => false,
     }
-
-    // 标记成功后才尝试保存；保存失败不会阻止本次提示展示。
-    match hint_type {
-        HintType::FirstInit => config.system.init_hint_shown = true,
-        HintType::FirstPack => config.system.pack_hint_shown = true,
-        HintType::FirstUnpack => config.system.unpack_hint_shown = true,
-        HintType::LinkRecovery => {}
-    }
-
-    let _ = config.save();
-    true
 }
 
 /// 展示首次创建容器后的链接、工作区和打包/解包说明。
 pub fn show_first_init_hint(veil_name: &str, link_path: &Path, veil_dir: &Path) {
-    if !allowed(HintType::FirstInit, current_level()) {
+    if !should_show(HintKind::FirstInit) {
         return;
     }
 
@@ -136,7 +88,7 @@ pub fn show_pack_explain_hint(
     output_path: &str,
     size: u64,
 ) {
-    if !should_show_once(HintType::FirstPack) {
+    if !should_show(HintKind::FirstPack) {
         return;
     }
 
@@ -166,7 +118,7 @@ pub fn show_pack_explain_hint(
 
 /// 展示首次解包后链接、文件数量和容器名称的对应关系。
 pub fn show_unpack_explain_hint(veil_name: &str, link_path: &Path, file_count: usize) {
-    if !should_show_once(HintType::FirstUnpack) {
+    if !should_show(HintKind::FirstUnpack) {
         return;
     }
 
@@ -199,7 +151,7 @@ pub fn show_unpack_explain_hint(veil_name: &str, link_path: &Path, file_count: u
 
 /// 提示指定链接已通过配置缓存恢复。
 pub fn show_link_recovery_hint(link_path: &Path) {
-    if !allowed(HintType::LinkRecovery, current_level()) {
+    if !should_show(HintKind::LinkRecovery) {
         return;
     }
 
