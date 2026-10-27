@@ -28,6 +28,8 @@ pub struct AddFileSpec {
     /// 可选的编辑基础版本；指定后必须与当前文件版本完全一致。
     /// 不指定时，同路径添加会直接覆盖已有文件。
     pub base_version: Option<VersionSnapshot>,
+    /// 禁止覆盖容器内已存在的同名文件。
+    pub reject_existing: bool,
 }
 
 impl AddFileSpec {
@@ -37,12 +39,19 @@ impl AddFileSpec {
             source: source.into(),
             target: target.into(),
             base_version: None,
+            reject_existing: false,
         }
     }
 
     /// 指定导出时取得的基础版本，用于阻止过期修改覆盖新内容。
     pub fn with_base_version(mut self, base_version: VersionSnapshot) -> Self {
         self.base_version = Some(base_version);
+        self
+    }
+
+    /// 在持锁提交期间拒绝同名文件。
+    pub fn without_overwrite(mut self) -> Self {
+        self.reject_existing = true;
         self
     }
 }
@@ -376,6 +385,7 @@ impl VeilManager {
             let normalized_target = normalize_veil_dir(&file.target)?;
             let mut spec = AddFileSpec::new(&file.source, normalized_target.clone());
             spec.base_version = file.base_version.clone();
+            spec.reject_existing = file.reject_existing;
             if let Some(index) = positions.get(&normalized_target).copied() {
                 deduplicated[index] = spec;
             } else {
@@ -538,6 +548,26 @@ impl VeilManager {
         output_path: &Path,
         password: &str,
     ) -> Result<VersionSnapshot, VeilError> {
+        self.extract_file_inner(original_name, output_path, password, true)
+    }
+
+    /// 导出文件并拒绝覆盖已存在的目标。
+    pub fn extract_file_without_overwrite(
+        &self,
+        original_name: &str,
+        output_path: &Path,
+        password: &str,
+    ) -> Result<VersionSnapshot, VeilError> {
+        self.extract_file_inner(original_name, output_path, password, false)
+    }
+
+    fn extract_file_inner(
+        &self,
+        original_name: &str,
+        output_path: &Path,
+        password: &str,
+        overwrite: bool,
+    ) -> Result<VersionSnapshot, VeilError> {
         let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
         let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
         let (snapshot, _, _) = self.read_meta_context(password)?;
@@ -567,19 +597,76 @@ impl VeilManager {
             &entry.nonce,
             entry.size,
         )?;
-        file_ops::decrypt_file_streaming(
-            &encrypted_path,
-            output_path,
-            &meta_data.data_keys[key_index],
-            &entry.nonce,
-            entry.size,
-        )?;
+        if overwrite {
+            file_ops::decrypt_file_streaming(
+                &encrypted_path,
+                output_path,
+                &meta_data.data_keys[key_index],
+                &entry.nonce,
+                entry.size,
+            )?;
+        } else {
+            file_ops::decrypt_file_streaming_without_overwrite(
+                &encrypted_path,
+                output_path,
+                &meta_data.data_keys[key_index],
+                &entry.nonce,
+                entry.size,
+            )?;
+        }
 
         Ok(VersionSnapshot {
             veil_id: meta_data.veil_id.clone(),
             file_id: entry.file_id.clone(),
             version_history: entry.version_history.clone(),
         })
+    }
+
+    /// 持共享锁读取指定文件的明文到内存，并限制最大大小。
+    pub fn read_file_bytes(
+        &self,
+        original_name: &str,
+        password: &str,
+        max_size: u64,
+    ) -> Result<Vec<u8>, VeilError> {
+        let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
+        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
+        let (snapshot, _, _) = self.read_meta_context(password)?;
+        let file_id = snapshot
+            .find_file(original_name)
+            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?
+            .file_id
+            .clone();
+        drop(config);
+        let _file = locking::file(&self.veil_dir, &file_id, true, &self.lock_options)?;
+        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
+        let (metadata, _, _) = self.read_meta_context(password)?;
+        drop(config);
+        let entry = metadata
+            .find_file(original_name)
+            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?;
+        if entry.file_id != file_id {
+            return Err(VeilError::WorkError("文件在读取期间被替换，请重试".into()));
+        }
+        if entry.size > max_size {
+            return Err(VeilError::WorkError("文件过大，暂不支持预览".into()));
+        }
+        let encrypted_path = self.veil_dir.join(&entry.encrypted_name);
+        let key_index = file_ops::detect_key_index(
+            &encrypted_path,
+            &metadata.data_keys,
+            &entry.nonce,
+            entry.size,
+        )?;
+        let mut bytes = Zeroizing::new(Vec::new());
+        file_ops::decrypt_file_to_writer(
+            &encrypted_path,
+            &mut *bytes,
+            &metadata.data_keys[key_index],
+            &entry.nonce,
+            entry.size,
+        )?;
+        Ok(std::mem::take(&mut *bytes))
     }
 
     /// 删除指定文件。
@@ -1049,6 +1136,22 @@ impl VeilManager {
 
 /// 持有目标文件独占锁时校验调用方的编辑基础版本。
 fn validate_base_version(metadata: &MetaData, file: &AddFileSpec) -> Result<(), VeilError> {
+    if file.reject_existing
+        && metadata.files.iter().any(|entry| {
+            entry.original_name == file.target
+                || entry
+                    .original_name
+                    .starts_with(&format!("{}/", file.target))
+                || file
+                    .target
+                    .starts_with(&format!("{}/", entry.original_name))
+        })
+    {
+        return Err(VeilError::FileAlreadyExists(format!(
+            "文件或目录 '{}' 已存在",
+            file.target
+        )));
+    }
     let Some(base) = &file.base_version else {
         return Ok(());
     };

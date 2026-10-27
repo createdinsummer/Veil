@@ -1,0 +1,41 @@
+.button {
+  border: 1px solid transparent;
+  border-radius: 9px;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 16px;
+  white-space: nowrap;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+.button.primary {
+  background: #3f4240;
+  color: #fff;
+}
+.button.primary:hover:not(:disabled) {
+  background: #535654;
+}
+.button.secondary {
+  background: #fff;
+  color: #4d4e4e;
+  border-color: #e6e6e6;
+}
+.button.secondary:hover:not(:disabled) {
+  background: #f8f8f8;
+  border-color: #d6d7d7;
+}
+
+.modal-backdrop { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 22px; background: #232424b8; }
+.modal { width: min(430px, 100%); background: #fff; border-radius: 14px; padding: 24px; box-shadow: 0 18px 60px #1e1f1f33; }
+.modal h2 { color: #343534; font-size: 18px; }
+.modal p { color: #969796; font-size: 13px; line-height: 1.7; margin: 9px 0 20px; }
+.modal label { display: flex; flex-direction: column; gap: 8px; color: #616261; font-size: 12px; }
+.modal input { border: 1px solid #e5e5e5; border-radius: 8px; padding: 11px 12px; background: #fff; color: #353635; font: inherit; font-size: 14px; }
+.modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.button.danger { color: #fff; background: #a64139; border-color: #a64139; }

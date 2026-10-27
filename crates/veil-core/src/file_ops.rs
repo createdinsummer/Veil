@@ -89,6 +89,38 @@ pub fn decrypt_file_streaming(
     publish_atomic_output(output, destination_path, true)
 }
 
+/// 解密到不存在的目标文件；目标已存在时拒绝覆盖。
+pub fn decrypt_file_streaming_without_overwrite(
+    source_path: &Path,
+    destination_path: &Path,
+    data_key: &[u8; DATA_KEY_LEN],
+    base_nonce: &[u8; NONCE_LEN],
+    plaintext_size: u64,
+) -> Result<()> {
+    let mut source = File::open(source_path)?;
+    let mut output = create_atomic_output(destination_path)?;
+    decrypt_reader(
+        &mut source,
+        output.as_file_mut(),
+        data_key,
+        base_nonce,
+        plaintext_size,
+    )?;
+    publish_atomic_output(output, destination_path, false)
+}
+
+/// 将密文流式解密到调用方提供的写入器；调用方负责处理失败时的部分输出。
+pub fn decrypt_file_to_writer(
+    source_path: &Path,
+    writer: &mut impl Write,
+    data_key: &[u8; DATA_KEY_LEN],
+    base_nonce: &[u8; NONCE_LEN],
+    plaintext_size: u64,
+) -> Result<()> {
+    let mut source = File::open(source_path)?;
+    decrypt_reader(&mut source, writer, data_key, base_nonce, plaintext_size)
+}
+
 /// 在读取旧密文的同时用新密钥写入新密文文件。
 ///
 /// 这是完整改密使用的单遍重写入口：逐块完成“旧密钥解密、新密钥加密、写入新

@@ -24,6 +24,29 @@ pub enum ServiceRequest<'a> {
     },
     RefreshContainer,
     LockContainer,
+    ListSpaces,
+    CreateSpace {
+        name: String,
+    },
+    CreateInSpace {
+        space: String,
+        name: String,
+        password: String,
+    },
+    ImportSessionFiles {
+        sources: Vec<String>,
+        directory: String,
+    },
+    PreviewSessionFile {
+        name: String,
+    },
+    ExportSessionFile {
+        name: String,
+        destination: String,
+    },
+    RemoveSessionPath {
+        name: String,
+    },
     OperateContainer {
         directory: &'a Path,
         veil_id: &'a str,
@@ -113,6 +136,9 @@ pub enum ServiceRequest<'a> {
 pub enum ServiceResponse {
     Container(ContainerView),
     Locked,
+    Spaces(Vec<crate::spaces::SpaceView>),
+    Preview(Vec<u8>),
+    Done,
     Operation(crate::operations::ContainerOperationResult),
     ContainerPrepared(crate::commands::ContainerHandle),
     ImportPrepared(crate::commands::ImportPlan),
@@ -193,6 +219,8 @@ pub struct FileView {
     pub size: u64,
     pub version: usize,
     pub encrypted_at: String,
+    pub category: &'static str,
+    pub preview_mime: Option<&'static str>,
 }
 
 impl VeilService {
@@ -213,6 +241,39 @@ impl VeilService {
             ServiceRequest::LockContainer => {
                 self.lock()?;
                 Ok(ServiceResponse::Locked)
+            }
+            ServiceRequest::ListSpaces => {
+                Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
+            }
+            ServiceRequest::CreateSpace { name } => {
+                crate::spaces::create_space(&name)?;
+                Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
+            }
+            ServiceRequest::CreateInSpace {
+                space,
+                name,
+                password,
+            } => {
+                let password = Zeroizing::new(password);
+                let created = crate::spaces::create_container(&space, &name, password.as_str())?;
+                self.open(
+                    created.directory.to_string_lossy().into_owned(),
+                    password.to_string(),
+                )
+                .map(ServiceResponse::Container)
+            }
+            ServiceRequest::ImportSessionFiles { sources, directory } => self
+                .import_sources(sources, directory)
+                .map(ServiceResponse::Container),
+            ServiceRequest::PreviewSessionFile { name } => {
+                self.preview_file(&name).map(ServiceResponse::Preview)
+            }
+            ServiceRequest::ExportSessionFile { name, destination } => {
+                self.export_file(&name, &destination)?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::RemoveSessionPath { name } => {
+                self.remove_path(&name).map(ServiceResponse::Container)
             }
             ServiceRequest::OperateContainer {
                 directory,
@@ -406,6 +467,108 @@ impl VeilService {
         Ok(container_view(&session.path, &metadata))
     }
 
+    fn import_sources(
+        &self,
+        sources: Vec<String>,
+        directory: String,
+    ) -> Result<ContainerView, ServiceError> {
+        if sources.is_empty() {
+            return Err(ServiceError::InvalidInput("请选择文件或文件夹"));
+        }
+        let directory = if directory.is_empty() {
+            String::new()
+        } else {
+            crate::veil_ops::normalize_veil_dir(&directory)?
+        };
+        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let mut files = Vec::new();
+        let mut targets = std::collections::HashSet::new();
+        for source in sources {
+            let path = Path::new(&source);
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(ServiceError::InvalidInput("文件名称无效"))?;
+            let destination = if path.is_dir() {
+                if directory.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{directory}/{name}")
+                }
+            } else if directory.is_empty() {
+                String::new()
+            } else {
+                format!("{directory}/")
+            };
+            for spec in crate::import::collect_add_specs(
+                path,
+                if destination.is_empty() {
+                    None
+                } else {
+                    Some(&destination)
+                },
+            )? {
+                if !targets.insert(spec.target.clone()) {
+                    return Err(ServiceError::InvalidInput("选择的文件包含相同目标路径"));
+                }
+                files.push(spec.without_overwrite());
+            }
+        }
+        if files.is_empty() {
+            return Err(ServiceError::InvalidInput("选择的文件夹没有可添加的文件"));
+        }
+        for target in &targets {
+            for (index, _) in target.match_indices('/') {
+                if targets.contains(&target[..index]) {
+                    return Err(ServiceError::InvalidInput("选择的文件包含冲突的目标路径"));
+                }
+            }
+        }
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+        manager.add_files(&files, session.password.as_str())?;
+        Ok(container_view(
+            &session.path,
+            &manager.read_meta(session.password.as_str())?,
+        ))
+    }
+
+    fn preview_file(&self, name: &str) -> Result<Vec<u8>, ServiceError> {
+        if file_kind(name).1.is_none() {
+            return Err(ServiceError::InvalidInput("暂不支持预览此文件类型"));
+        }
+        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+        Ok(manager.read_file_bytes(name, session.password.as_str(), 16 * 1024 * 1024)?)
+    }
+
+    fn export_file(&self, name: &str, destination: &str) -> Result<(), ServiceError> {
+        if destination.is_empty() {
+            return Err(ServiceError::InvalidInput("请选择导出位置"));
+        }
+        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+        manager.extract_file_without_overwrite(
+            name,
+            Path::new(destination),
+            session.password.as_str(),
+        )?;
+        Ok(())
+    }
+
+    fn remove_path(&self, name: &str) -> Result<ContainerView, ServiceError> {
+        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+        manager.remove_path(name, session.password.as_str())?;
+        Ok(container_view(
+            &session.path,
+            &manager.read_meta(session.password.as_str())?,
+        ))
+    }
+
     fn lock(&self) -> Result<(), ServiceError> {
         *self.0.lock().map_err(|_| ServiceError::StateUnavailable)? = None;
         Ok(())
@@ -422,6 +585,8 @@ fn container_view(path: &Path, metadata: &MetaData) -> ContainerView {
             size: file.size,
             version: file.version_history.len(),
             encrypted_at: file.encrypted_at.clone(),
+            category: file_kind(&file.original_name).0,
+            preview_mime: file_kind(&file.original_name).1,
         })
         .collect();
     files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -431,6 +596,31 @@ fn container_view(path: &Path, metadata: &MetaData) -> ContainerView {
         path: path.to_string_lossy().into_owned(),
         created_at: metadata.created_at.clone(),
         files,
+    }
+}
+
+/// 分类根据扩展名判断；只有列出的类型支持内置预览。
+fn file_kind(name: &str) -> (&'static str, Option<&'static str>) {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => ("photo", Some("image/jpeg")),
+        "png" => ("photo", Some("image/png")),
+        "gif" => ("photo", Some("image/gif")),
+        "webp" => ("photo", Some("image/webp")),
+        "heic" | "bmp" | "tif" | "tiff" => ("photo", None),
+        "mp4" | "m4v" => ("video", Some("video/mp4")),
+        "webm" => ("video", Some("video/webm")),
+        "mov" => ("video", Some("video/quicktime")),
+        "avi" | "mkv" => ("video", None),
+        "pdf" => ("document", Some("application/pdf")),
+        "txt" | "md" | "csv" | "log" => ("document", Some("text/plain")),
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => ("document", None),
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" => ("archive", None),
+        _ => ("other", None),
     }
 }
 

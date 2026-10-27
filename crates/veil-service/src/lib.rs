@@ -9,6 +9,7 @@ pub mod link;
 pub mod operations;
 pub mod package;
 pub mod session;
+pub mod spaces;
 pub mod veil_ops;
 pub mod work;
 pub mod workflow;
