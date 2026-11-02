@@ -11,12 +11,14 @@ use thiserror::Error;
 /// 用于补充由库内部判断出的上下文。各错误来源保持原始错误信息，便于上层记录日志。
 #[derive(Debug, Error)]
 pub enum VeilError {
+    #[error("数据库错误: {0}")]
+    Database(#[from] rusqlite::Error),
     /// 文件系统或字节流读写失败。
     #[error("I/O 错误: {0}")]
     Io(#[from] std::io::Error),
 
-    /// 元数据已替换，但无法确认目录同步是否成功。
-    #[error("元数据已发布，但持久化状态不确定: {0}")]
+    /// 无法确认提交结果或持久化状态，调用方应重新读取权威状态。
+    #[error("提交结果或持久化状态不确定: {0}")]
     CommitUncertain(std::io::Error),
 
     /// 容器字节格式不符合预期。

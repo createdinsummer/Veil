@@ -13,10 +13,8 @@ fn create_package(temp: &TempDir) {
     veil_core::kdf::enable_fast_test_kdf();
     let manager = VeilManager::new(temp.path().join("work"));
     manager.init_veil("test", "1").unwrap();
-    let metadata = manager.read_meta("1").unwrap();
-    let bytes = fs::read(manager.veil_dir.join(".veil-info")).unwrap();
     VeilPacker::new(temp.path().join("test.veil"))
-        .pack(&manager.veil_dir, &metadata, &bytes)
+        .pack_container(&manager, "1")
         .unwrap();
 }
 
@@ -92,7 +90,7 @@ fn dictionary_miss_finishes_without_modifying_package() {
 fn raw_metadata_is_rejected_with_package_usage_hint() {
     let temp = TempDir::new().unwrap();
     create_package(&temp);
-    let output = run_tool(&temp, &temp.path().join("work/.veil-info"), "q\n");
+    let output = run_tool(&temp, &temp.path().join("work/veil.db"), "q\n");
     assert!(output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("仅支持 veil pack"), "{error}");

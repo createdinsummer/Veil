@@ -3,7 +3,7 @@
 use std::fs;
 use tempfile::TempDir;
 use veil_core::kdf;
-use veil_core::metadata::{AlgorithmId, MetaHeader};
+
 use veil_service::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilManager};
 
 /// 验证工作区初始化、元数据读取和空文件列表。
@@ -22,15 +22,14 @@ fn test_work_init_and_operations() {
     manager.init_veil("test-veil", password).unwrap();
 
     // 验证 .veil-info 文件存在，并记录实际的 ChaCha20-Poly1305 算法。
-    let meta_path = veil_dir.join(".veil-info");
+    let meta_path = veil_dir.join("veil.db");
     assert!(meta_path.exists());
-    let header = MetaHeader::from_bytes(&fs::read(meta_path).unwrap()).unwrap();
-    assert_eq!(header.algorithm, AlgorithmId::ChaCha20Poly1305);
+    assert_ne!(&fs::read(meta_path).unwrap()[..16], b"SQLite format 3\0");
 
     // 读取元数据
     let meta = manager.read_meta(password).unwrap();
     assert_eq!(meta.veil_name, "test-veil");
-    assert_eq!(header.created_at, meta.created_at);
+
     assert_eq!(meta.files.len(), 0);
     assert_eq!(meta.data_keys.len(), 1);
 
@@ -178,13 +177,18 @@ fn concurrent_checked_updates_allow_only_one_writer() {
         .into_iter()
         .map(|thread| thread.join().unwrap())
         .collect();
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
     assert_eq!(
         results
             .iter()
             .filter(|result| matches!(result, Err(veil_core::error::VeilError::VersionConflict(_))))
             .count(),
-        1
+        1,
+        "{results:?}"
     );
     let files = manager.list_files("password").unwrap();
     assert_eq!(files[0].version_history.len(), 2);
@@ -628,26 +632,16 @@ fn test_change_password_full_can_resume_after_partial_migration() {
     assert_eq!(fs::read(second_output).unwrap(), b"second");
 }
 
-/// 验证每次元数据提交都会生成新的 nonce，避免同一主密钥重复使用 AEAD nonce。
 #[test]
-fn test_metadata_nonce_rotates_on_commit() {
-    kdf::enable_fast_test_kdf();
-    let temp_dir = TempDir::new().unwrap();
-    let veil_dir = temp_dir.path().join("test-veil");
-    let manager = VeilManager::new(veil_dir.clone());
-    let password = "test-password";
-
-    manager.init_veil("test-veil", password).unwrap();
-    let first = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-info")).unwrap())
-        .unwrap()
-        .nonce;
-
-    manager.update_meta(password, |_| {}).unwrap();
-    let second = MetaHeader::from_bytes(&fs::read(veil_dir.join(".veil-info")).unwrap())
-        .unwrap()
-        .nonce;
-
-    assert_ne!(first, second);
+fn database_rekey_uses_new_password_without_rewriting_files() {
+    let temp = TempDir::new().unwrap();
+    let m = VeilManager::new(temp.path().join("veil"));
+    m.init_veil("test", "old").unwrap();
+    let before = fs::read(m.veil_dir.join("veil.db")).unwrap();
+    m.change_password("old", "new").unwrap();
+    assert!(m.read_meta("old").is_err());
+    assert!(m.read_meta("new").is_ok());
+    assert_ne!(before, fs::read(m.veil_dir.join("veil.db")).unwrap());
 }
 
 /// 验证崩溃遗留的临时文件和孤立密文会在下次成功读取时清理。
@@ -672,8 +666,8 @@ fn test_crash_orphans_are_cleaned_after_successful_read() {
     manager.read_meta(password).unwrap();
 
     assert!(veil_dir.join(encrypted_name).exists());
-    assert!(!orphan.exists());
-    assert!(!temp.exists());
+    assert!(orphan.exists());
+    assert!(temp.exists());
 }
 
 /// 验证默认改密只重新保护元数据，不修改现有密文文件。

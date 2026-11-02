@@ -8,6 +8,7 @@ Veil 是一个 Work 模型的加密文件工具。CLI 通过 `.veil-link` 定位
 | --- | --- | --- |
 | [CLI 使用说明](crates/veil-cli/README.md) | 命令使用者、运维和脚本维护者 | 参数、工作流、配置、链接、打包解包和 CLI 限制 |
 | [核心库说明](crates/veil-core/README.md) | 库维护者、格式维护者 | 存储模型、模块职责、磁盘格式、密钥流程、恢复和并发语义 |
+| [SQLite 存储改造设计](docs/sqlite-storage-design.md) | 后续开发者 | 目标表结构、SQLCipher、文件级并发、双密钥轮值及开发验收清单；已接入新存储及恢复测试 |
 | [密码强度测试工具](crates/veil-brute-force/README.md) | 授权测试者、安全评审者 | 支持范围、攻击模式、线程模型、历史记录和安全边界 |
 | [录屏转长截图](crates/veil-scrollshot/README.md) | 独立工具使用者、库集成开发者 | 垂直滚动录屏拼接、固定栏识别和回滚去重 |
 
@@ -19,7 +20,7 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 
 | 组件 | 职责 |
 | --- | --- |
-| `veil-core` | 加密、存储、文件锁、版本比较和打包格式等底层能力 |
+| `veil-core` | 加密、数据库连接、版本比较、执行身份和打包格式等底层能力 |
 | `veil-service` | 容器操作、工作区、链接及锁和版本控制的业务编排 |
 | `veil-cli` | 用户命令、密码输入、链接恢复、Veil 打包和解包 |
 | `veil-brute-force` | 对自行创建并通过 `veil pack` 生成的 `.veil` 文件进行密码强度测试 |
@@ -33,11 +34,13 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 | --- | --- | --- |
 | `.veil-link` | 容器 ID、展示名称、容器创建时间和链接创建时间 | 只是入口和定位信息，不保存文件内容 |
 | Work 目录 `work_root` | 以 `veil_id` 命名的容器目录 | 仅作为存放容器的目录 |
-| Veil 目录 `veil_dir` | `.veil-info` 和随机命名的 `.enc` 文件 | 真正的数据存储位置 |
+| Veil 目录 `veil_dir` | SQLCipher `veil.db` 和随机命名的 `.enc` 文件 | 真正的数据存储位置 |
 
-默认 `work_root` 位于 `~/.veil/works/default`，每个 Veil 使用独立 `veil_dir`。本机配置位于 `~/.veil/config.jsonc`，移动盘配置位于 `<盘根目录>/.veil/config.jsonc`；配置登记工作区，并缓存容器信息和链接正文。相对工作区路径基于所属配置目录解析，默认值为 `works/default`。程序遍历已登记工作区，以 `.veil-info` 中的容器 ID 核验身份；容器整体移动到已登记工作区后，原链接继续有效。同 ID 的多个副本报告歧义，目标盘未挂载时报未找到。配置文件与 `.veil-link` 均使用 JSONC，支持注释和尾逗号，更新时保留已有字段的注释。链接被删除时，如果配置中仍有对应的结构化正文，Veil 会尝试重新生成链接。
+默认空间位于各平台应用数据目录的 `Veil/spaces/<space_id>`，本机索引和设置位于 `Veil/app.db`。桌面端与 CLI 使用一致的目录定位策略，移动端注入应用私有目录。空间具有稳定 ID，实际路径由应用数据库登记。容器身份、目录树、内容版本和文件密钥由各容器的 `veil.db` 管理。
 
-`veil pack` 会把 Veil 整理为一个便于传输的 `.veil` 文件。该文件包含加密元数据和已有密文，不会在打包时重新加密文件内容。`veil unpack` 使用原 Veil 密码验证并还原目录，然后生成新的链接和 Veil 记录。
+`.veil-link` 正文仍使用 JSONC，本机数据库缓存完整结构化正文以恢复缺失链接。未解锁时通过本机登记展示容器；解锁后核验实际身份并刷新缓存。没有缓存时，可以用目录和密码重新登记。
+
+`veil pack` 导出加密数据库一致快照及引用的密文，`veil unpack` 验证密码、身份和文件认证后在新设备独立还原。
 
 ## 命令入口
 
@@ -56,21 +59,19 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 
 ## 安全模型
 
-Work 模型中的 Veil 使用 Argon2id 从用户密码和 salt 派生密码保护密钥，元数据中保存随机数据主密钥。文件内容使用数据主密钥进行分块流式认证加密，元数据使用密码保护密钥加密。默认修改密码只重新保护元数据；`veil passwd --full` 会轮换数据主密钥并流式重写全部文件。
+容器数据库使用固定 SQLCipher 4 参数和原生密码派生，整库加密。独立文件使用随机文件数据密钥与分块 ChaCha20-Poly1305。普通改密只修改数据库密码保护；`veil passwd --full` 以两把文件密钥轮换并支持中断恢复。
 
-项目只保留 Work/Veil 目录模型和对应的 `.veil` 打包格式，两者使用同一套元数据和数据主密钥。密码强度工具验证包内加密元数据，不需要解包或读取文件内容。格式和恢复语义详见 [Core 文档](crates/veil-core/README.md)。
+业务并发采用数据库中的文件级租约，提交同时检查基础版本与持锁凭证。打包格式及一致性边界见 [Core 文档](crates/veil-core/README.md)。
 
-`.enc` 文件和加密元数据均通过认证加密识别密文损坏。
-
-旧的独立单文件格式不再读取。若已有这类数据，应先使用支持该格式的旧版本导出内容，再用当前版本的 `init`、`add` 和 `pack` 重建；当前 `.veil` 打包文件无需转换。
+旧 JSONC 配置、旧 `.veil-info` 容器和第 1 版打包文件均不读取，也不自动迁移。
 
 ## 构建与测试
 
 开发环境需要 Rust 工具链和 Cargo。构建 CLI 使用 `cargo build --package veil-cli`，发布构建使用 `cargo build --release --package veil-cli`。
 
-运行完整测试使用 `cargo test --workspace --all-targets`。生成库文档使用 `cargo doc --workspace --no-deps`。
+运行完整测试使用 `cargo test --workspace --all-targets`；故障恢复测试使用 `cargo test -p veil-service --features fault-injection --test storage_fault_tests`。生成库文档使用 `cargo doc --workspace --no-deps`。
 
-桌面原型使用 React、TypeScript 和 Tauri，在 `apps/veil-app` 目录执行 `npm ci` 后运行 `npm run tauri dev`。原型已针对 macOS 构建；打开容器时选择包含 `.veil-info` 的目录，新建容器时会在所选位置创建独立目录。原型暂不登记 CLI 工作区，也暂不提供文件添加或导出操作。
+桌面端使用 React、TypeScript 和 Tauri。在 `apps/veil-app` 执行 `npm ci`、`npm run build` 或 `npm run tauri dev`。打开容器时选择包含 `veil.db` 的目录；空间、最近记录和偏好均通过 service 使用本机数据库。支持添加、预览、导出和删除文件。
 
 ## 关键边界
 

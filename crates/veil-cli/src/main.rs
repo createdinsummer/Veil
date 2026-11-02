@@ -847,19 +847,11 @@ fn require_veil(veil: Option<String>, cmd_name: &str) -> String {
     veil.unwrap_or_else(|| exit_with_help(crate::error::ErrorCode::MissingVeil, cmd_name))
 }
 
-/// 显示程序版本，并根据构建模式输出安全提示。
-///
-/// Debug 构建会额外说明测试 KDF 和暴力尝试风险；Release 构建只显示发布状态。
-fn show_version_and_security_info() {
+/// 显示程序版本；数据库派生参数在不同构建模式下保持一致。
+fn show_version_banner() {
     use colored::Colorize;
 
     const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-    // 检测构建模式
-    #[cfg(debug_assertions)]
-    let is_debug = true;
-    #[cfg(not(debug_assertions))]
-    let is_debug = false;
 
     // 检测版本类型
     let is_dev = VERSION.contains("dev") || VERSION.contains("alpha") || VERSION.contains("beta");
@@ -872,20 +864,6 @@ fn show_version_and_security_info() {
 
     if is_dev {
         crate::outln!("{}", i18n::t("version.dev_warning").yellow().bold());
-    }
-
-    if is_debug {
-        crate::outln!();
-        crate::outln!("{}", i18n::t("version.debug_warning").yellow().bold());
-        crate::outln!("{}", i18n::t("version.debug_key_strength").yellow());
-        crate::outln!("{}", i18n::t("version.debug_crack_speed").yellow());
-        crate::outln!();
-        crate::outln!("{}", i18n::t("version.debug_recommend").bright_yellow());
-        crate::outln!("{}", i18n::t("version.debug_command"));
-        crate::outln!("{}", i18n::t("version.debug_release_strength").green());
-        crate::outln!();
-    } else {
-        crate::outln!("{}", i18n::t("version.release_status").green());
     }
 
     crate::outln!();
@@ -913,7 +891,7 @@ fn main() {
 
     i18n::init();
 
-    show_version_and_security_info();
+    show_version_banner();
 
     let cmd = build_localized_command();
     let matches = parse_matches(cmd.clone());

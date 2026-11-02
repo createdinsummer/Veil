@@ -217,3 +217,128 @@ mod tests {
         assert!(nested.is_dir());
     }
 }
+
+/// 原子移动且拒绝覆盖目标，适用于密文发布和容器目录移动。
+pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "路径包含 NUL"))?;
+        let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "路径包含 NUL"))?;
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        // SAFETY: 两个 C 字符串在调用期间有效；RENAME_EXCL 禁止替换目标。
+        let result = unsafe {
+            libc::renameatx_np(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: syscall 仅在目标平台定义；参数来自仍有效的路径字符串。
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android"
+        )))]
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "此平台尚未实现排他重命名",
+        ));
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android"
+        ))]
+        return if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileW(source: *const u16, destination: *const u16) -> i32;
+        }
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        if source[..source.len() - 1].contains(&0)
+            || destination[..destination.len() - 1].contains(&0)
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "路径包含 NUL"));
+        }
+        // SAFETY: UTF-16 路径以 NUL 结束，调用期间不会释放；MoveFileW 不覆盖目标。
+        return if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } != 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        };
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "此平台尚未实现排他重命名",
+    ))
+}
+
+/// 向全新文件复制密文并持久化，禁止覆盖并保持私有文件权限。
+pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        output.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    io::copy(&mut input, &mut output)?;
+    sync_file(&output)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod exclusive_publish_tests {
+    use super::*;
+    #[test]
+    fn existing_file_and_existing_directory_are_never_replaced() {
+        let root = tempfile::TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&target, b"keep").unwrap();
+        assert!(rename_no_replace(&source, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
+        fs::remove_file(&source).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(rename_no_replace(&source, &target).is_err());
+        assert!(source.is_dir());
+        assert!(target.is_dir());
+    }
+}

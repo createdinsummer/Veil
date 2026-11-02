@@ -1,345 +1,11 @@
-//! 工作区容器元数据模型。
-//!
-//! .veil-info 文件格式：
-//! - 明文头部（TLV 格式）：magic, header_len, salt, nonce, algorithm 等
-//! - 加密数据：JSONC 格式的元数据（文件列表、容器信息、数据主密钥等）
-//!
-//! `.veil-info` 是容器身份和内容清单的权威来源，不保存任何绝对路径。明文头部
-//! 仅保留恢复和识别所需字段，文件清单与业务元数据统一加密。
-
+//! service 查询得到的容器展示快照与稳定身份、版本 UUID 工具。
+//! 此处的 DTO 不定义磁盘格式；容器业务状态由 SQLCipher 数据库管理。
 use crate::error::VeilError;
 pub use crate::file_ops::DATA_KEY_LEN;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fmt;
+use std::{collections::HashSet, fmt};
 use zeroize::Zeroize;
-
-/// 每个 Veil 容器目录中的信息文件名。
-pub const VEIL_INFO_FILE: &str = ".veil-info";
-
-/// 元数据文件固定魔数。
-pub const MAGIC: &[u8; 8] = b"VEILMETA";
-/// 当前支持的元数据格式版本。
-pub const VERSION: u16 = 7;
-
-/// 元数据中最多保存的数据主密钥数量。
-///
-/// 第一个是当前主密钥，第二个只用于完整改密过程中兼容尚未迁移的文件。
 pub const MAX_DATA_KEYS: usize = 2;
-
-/// `.veil-info` 明文 TLV 头部使用的字段标签。
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetaTag {
-    /// 元数据格式版本。
-    Version = 0x01,
-    /// 密码保护密钥派生使用的盐值。
-    Salt = 0x02,
-    /// 元数据加密算法 ID。
-    Algorithm = 0x03,
-    /// 预留的 KDF 参数标签；当前写入流程不生成该字段。
-    KdfParams = 0x04,
-    /// 元数据加密使用的 nonce。
-    Nonce = 0x05,
-    /// 容器稳定身份。
-    VeilId = 0x06,
-    /// 明文容器展示名称。
-    VeilName = 0x07,
-    /// 容器原始创建时间，用于无密码重建链接。
-    CreatedAt = 0x09,
-    /// 供扩展字段使用的预留标签。
-    Custom = 0xF0,
-    /// 预留的 TLV 结束标记；当前写入流程不生成该字段。
-    EndMarker = 0xFF,
-}
-
-impl MetaTag {
-    /// 将 TLV 标签字节转换为已知标签。
-    pub fn from_u8(value: u8) -> Option<Self> {
-        // 标签值与磁盘格式一一对应；未知值返回 None 由解析器跳过。
-        match value {
-            0x01 => Some(Self::Version),
-            0x02 => Some(Self::Salt),
-            0x03 => Some(Self::Algorithm),
-            0x04 => Some(Self::KdfParams),
-            0x05 => Some(Self::Nonce),
-            0x06 => Some(Self::VeilId),
-            0x07 => Some(Self::VeilName),
-            0x09 => Some(Self::CreatedAt),
-            0xF0 => Some(Self::Custom),
-            0xFF => Some(Self::EndMarker),
-            _ => None,
-        }
-    }
-}
-
-/// 元数据加密算法 ID。
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlgorithmId {
-    /// AES-256-GCM 标识值。
-    Aes256Gcm = 0x01,
-    /// ChaCha20-Poly1305 标识值。
-    ChaCha20Poly1305 = 0x02,
-}
-
-impl AlgorithmId {
-    /// 将字节值转换为已知算法 ID。
-    pub fn from_u8(value: u8) -> Option<Self> {
-        // 未知算法只表示当前解析器不识别，不代表文件一定损坏。
-        match value {
-            0x01 => Some(Self::Aes256Gcm),
-            0x02 => Some(Self::ChaCha20Poly1305),
-            _ => None,
-        }
-    }
-
-    /// 返回用于展示的算法名称。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Aes256Gcm => "AES-256-GCM",
-            Self::ChaCha20Poly1305 => "ChaCha20-Poly1305",
-        }
-    }
-}
-
-/// `.veil-info` 的明文头部和恢复身份信息。
-#[derive(Debug, Clone)]
-pub struct MetaHeader {
-    /// Salt（用于密钥派生）
-    pub salt: [u8; 32],
-
-    /// Nonce（用于加密元数据）
-    pub nonce: [u8; 12],
-
-    /// 加密元数据时使用的算法标识。
-    pub algorithm: AlgorithmId,
-
-    /// 格式版本
-    pub version: u16,
-
-    /// 恢复用明文容器 ID；不包含路径或敏感内容。
-    pub veil_id: String,
-
-    /// 恢复用明文容器名称；仅用于识别容器。
-    pub veil_name: String,
-
-    /// RFC 3339 格式的容器原始创建时间，与加密正文保持一致。
-    pub created_at: String,
-}
-
-impl MetaHeader {
-    /// 使用当前格式版本构造元数据头部。
-    ///
-    /// `veil_id`、`veil_name` 和 `created_at` 必须非空，具体约束在
-    /// [`MetaHeader::to_bytes`] 中统一校验。
-    pub fn new(
-        salt: [u8; 32],
-        nonce: [u8; 12],
-        algorithm: AlgorithmId,
-        veil_id: String,
-        veil_name: String,
-        created_at: String,
-    ) -> Self {
-        Self {
-            salt,
-            nonce,
-            algorithm,
-            version: VERSION,
-            veil_id,
-            veil_name,
-            created_at,
-        }
-    }
-
-    /// 将头部编码为 `magic + header_len + TLV 字段`。
-    ///
-    /// # 错误
-    /// 明文身份字段任一为空或容器创建时间为空时返回 [`VeilError::InvalidFormat`]。
-    pub fn to_bytes(&self) -> Result<Vec<u8>, VeilError> {
-        if self.veil_id.is_empty() {
-            return Err(VeilError::InvalidFormat("缺少 veil_id".to_string()));
-        }
-        if self.veil_name.is_empty() {
-            return Err(VeilError::InvalidFormat("缺少容器名称".to_string()));
-        }
-        if self.created_at.is_empty() {
-            return Err(VeilError::InvalidFormat("缺少容器创建时间".to_string()));
-        }
-
-        let mut buf = Vec::new();
-
-        buf.extend_from_slice(MAGIC);
-
-        // 先保留长度字段，待所有 TLV 写完后回填。
-        let header_len_pos = buf.len();
-        buf.extend_from_slice(&[0u8; 2]);
-
-        write_tlv(&mut buf, MetaTag::Version, &self.version.to_le_bytes())?;
-        write_tlv(&mut buf, MetaTag::Salt, &self.salt)?;
-        write_tlv(&mut buf, MetaTag::Algorithm, &[self.algorithm as u8])?;
-        write_tlv(&mut buf, MetaTag::Nonce, &self.nonce)?;
-        write_tlv(&mut buf, MetaTag::VeilId, self.veil_id.as_bytes())?;
-        write_tlv(&mut buf, MetaTag::VeilName, self.veil_name.as_bytes())?;
-        write_tlv(&mut buf, MetaTag::CreatedAt, self.created_at.as_bytes())?;
-
-        // header_len 只统计 TLV 区域，不包含 magic 和长度字段本身。
-        let header_len = u16::try_from(buf.len() - 10)
-            .map_err(|_| VeilError::InvalidFormat("元数据头部过长".to_string()))?;
-        buf[header_len_pos..header_len_pos + 2].copy_from_slice(&header_len.to_le_bytes());
-
-        Ok(buf)
-    }
-
-    /// 从字节解析元数据头部。
-    ///
-    /// 解析器忽略未知标签和字段长度不匹配的已知标签，最后统一校验必需字段。
-    ///
-    /// # 错误
-    /// 输入过短、魔数无效、声明的头部超过输入、文本字段不是 UTF-8，或必需字段缺失时
-    /// 返回 [`VeilError::InvalidFormat`]。
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VeilError> {
-        if bytes.len() < 10 {
-            return Err(VeilError::InvalidFormat("元数据文件过小".to_string()));
-        }
-
-        if &bytes[0..8] != MAGIC {
-            return Err(VeilError::InvalidFormat("无效的元数据文件魔数".to_string()));
-        }
-
-        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-        let header_end = 10 + header_len;
-
-        if bytes.len() < header_end {
-            return Err(VeilError::InvalidFormat("元数据文件头部不完整".to_string()));
-        }
-
-        let mut version = None;
-        let mut salt = None;
-        let mut algorithm = None;
-        let mut nonce = None;
-        let mut veil_id = String::new();
-        let mut veil_name = String::new();
-        let mut created_at = String::new();
-        let mut pos = 10;
-
-        // TLV 区域按 tag、u16 长度、value 的固定布局连续解析。
-        while pos < header_end {
-            let tag_end = pos
-                .checked_add(3)
-                .ok_or_else(|| VeilError::InvalidFormat("元数据头部长度溢出".to_string()))?;
-            if tag_end > header_end {
-                return Err(VeilError::InvalidFormat(
-                    "元数据头部包含不完整的 TLV 字段".to_string(),
-                ));
-            }
-
-            let tag = bytes[pos];
-            let len = u16::from_le_bytes([bytes[pos + 1], bytes[pos + 2]]) as usize;
-            let value_end = tag_end
-                .checked_add(len)
-                .ok_or_else(|| VeilError::InvalidFormat("元数据字段长度溢出".to_string()))?;
-            if value_end > header_end {
-                return Err(VeilError::InvalidFormat(
-                    "元数据字段长度超出头部范围".to_string(),
-                ));
-            }
-            let value = &bytes[tag_end..value_end];
-
-            match MetaTag::from_u8(tag) {
-                Some(MetaTag::Version) if len == 2 => {
-                    version = Some(u16::from_le_bytes([value[0], value[1]]));
-                }
-                Some(MetaTag::Salt) if len == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(value);
-                    salt = Some(arr);
-                }
-                Some(MetaTag::Algorithm) if len == 1 => {
-                    algorithm = AlgorithmId::from_u8(value[0]);
-                }
-                Some(MetaTag::Nonce) if len == 12 => {
-                    let mut arr = [0u8; 12];
-                    arr.copy_from_slice(value);
-                    nonce = Some(arr);
-                }
-                Some(MetaTag::VeilId) => {
-                    veil_id = String::from_utf8(value.to_vec()).map_err(|error| {
-                        VeilError::InvalidFormat(format!("veil_id 不是有效的 UTF-8: {}", error))
-                    })?;
-                }
-                Some(MetaTag::VeilName) => {
-                    veil_name = String::from_utf8(value.to_vec()).map_err(|error| {
-                        VeilError::InvalidFormat(format!("容器名称不是有效的 UTF-8: {}", error))
-                    })?;
-                }
-                Some(MetaTag::CreatedAt) => {
-                    created_at = String::from_utf8(value.to_vec()).map_err(|error| {
-                        VeilError::InvalidFormat(format!("容器创建时间不是有效的 UTF-8: {error}"))
-                    })?;
-                }
-                // 未知标签和长度不符的已知标签都跳过，为后续格式扩展保留空间。
-                _ => {}
-            }
-
-            // 无论是否识别该字段，都按声明的长度推进到下一个 TLV。
-            pos = value_end;
-        }
-
-        let version = version.ok_or_else(|| VeilError::InvalidFormat("缺少版本号".to_string()))?;
-        if version != VERSION {
-            return Err(VeilError::InvalidFormat(format!(
-                "不支持的元数据版本: {}",
-                version
-            )));
-        }
-
-        Ok(Self {
-            salt: salt.ok_or_else(|| VeilError::InvalidFormat("缺少 salt".to_string()))?,
-            nonce: nonce.ok_or_else(|| VeilError::InvalidFormat("缺少 nonce".to_string()))?,
-            algorithm: algorithm
-                .ok_or_else(|| VeilError::InvalidFormat("缺少算法 ID".to_string()))?,
-            version,
-            veil_id: (!veil_id.is_empty())
-                .then_some(veil_id)
-                .ok_or_else(|| VeilError::InvalidFormat("缺少 veil_id".to_string()))?,
-            veil_name: (!veil_name.is_empty())
-                .then_some(veil_name)
-                .ok_or_else(|| VeilError::InvalidFormat("缺少容器名称".to_string()))?,
-            created_at: (!created_at.is_empty())
-                .then_some(created_at)
-                .ok_or_else(|| VeilError::InvalidFormat("缺少容器创建时间".to_string()))?,
-        })
-    }
-
-    /// 读取头部声明的总长度，用于定位加密数据起点。
-    ///
-    /// # 错误
-    /// 输入不足 10 字节、魔数不匹配，或声明长度超出实际输入时返回
-    /// [`VeilError::InvalidFormat`]。
-    pub fn header_len(bytes: &[u8]) -> Result<usize, VeilError> {
-        if bytes.len() < 10 {
-            return Err(VeilError::InvalidFormat("元数据文件过小".to_string()));
-        }
-        if &bytes[0..8] != MAGIC {
-            return Err(VeilError::InvalidFormat("无效的元数据文件魔数".to_string()));
-        }
-
-        // 长度字段只覆盖 TLV 区域，总偏移需再加 magic 与长度字段自身。
-        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-        let total_len = 10usize
-            .checked_add(header_len)
-            .ok_or_else(|| VeilError::InvalidFormat("元数据头部长度溢出".to_string()))?;
-        if total_len > bytes.len() {
-            return Err(VeilError::InvalidFormat(
-                "元数据头部长度超出文件范围".to_string(),
-            ));
-        }
-
-        Ok(total_len)
-    }
-}
-
 /// 容器元数据（加密存储）。
 ///
 /// 这是容器的权威身份与内容清单：身份字段用于恢复和去重，`files` 记录逻辑
@@ -361,6 +27,8 @@ pub struct MetaData {
     /// 分段表达，支持多级目录和文件；物理上使用扁平列表，便于逐文件加密、
     /// 随机访问和增量增删。不得保存绝对路径。
     pub files: Vec<FileEntry>,
+    /// 从父子关系查询生成的目录展示路径，不作为持久化状态。
+    pub directories: Vec<DirectoryEntry>,
 
     /// 按优先级排列的数据主密钥。
     ///
@@ -408,6 +76,7 @@ impl MetaData {
             // 初始清单为空，文件条目由后续 add_file 逐步追加。
             created_at: chrono::Utc::now().to_rfc3339(),
             files: Vec::new(),
+            directories: Vec::new(),
             data_keys: vec![data_key],
         }
     }
@@ -547,7 +216,7 @@ pub fn generate_veil_id() -> String {
     format!("veil-{}", hex::encode(bytes))
 }
 
-/// `.veil-info` 中记录的文件条目。
+/// 从容器业务表查询生成的文件展示条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     /// 不随路径、重命名或完整改密变化的稳定文件 ID。
@@ -615,7 +284,7 @@ impl FileEntry {
 }
 
 /// 使用系统随机源生成标准 UUID v4。
-fn generate_version_id() -> String {
+pub fn generate_version_id() -> String {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes).expect("无法生成版本 UUID");
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -631,7 +300,7 @@ fn generate_version_id() -> String {
     )
 }
 
-pub(crate) fn is_uuid_v4(value: &str) -> bool {
+pub fn is_uuid_v4(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| match index {
@@ -652,130 +321,8 @@ pub fn generate_file_id() -> String {
     format!("file-{}", hex::encode(bytes))
 }
 
-/// 将一个 TLV 字段追加到头部缓冲区。
-///
-/// 字段长度使用 `u16` 编码，调用方需保证 `value` 不超过该上限。
-fn write_tlv(buf: &mut Vec<u8>, tag: MetaTag, value: &[u8]) -> Result<(), VeilError> {
-    // TLV 顺序固定为 tag、u16 长度、value 原文。
-    let value_len = u16::try_from(value.len())
-        .map_err(|_| VeilError::InvalidFormat("元数据字段过长".to_string()))?;
-    buf.push(tag as u8);
-    buf.extend_from_slice(&value_len.to_le_bytes());
-    buf.extend_from_slice(value);
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_history_requires_unique_uuid_v4_values() {
-        let mut metadata = MetaData::new("test".to_string());
-        let mut entry = FileEntry::new("cipher.enc".into(), "file.txt".into(), 0, [0; 12]);
-        assert!(is_uuid_v4(&entry.version_history[0]));
-        entry.advance_version();
-        metadata.add_file(entry);
-        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_ok());
-
-        metadata.files[0].version_history.clear();
-        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
-        metadata.files[0].version_history = vec!["invalid".into()];
-        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
-        let valid = generate_version_id();
-        metadata.files[0].version_history = vec![valid.clone(), valid];
-        assert!(MetaData::from_jsonc(&metadata.to_jsonc().unwrap()).is_err());
-    }
-
-    /// 无密码读取头部时能取得原始创建时间，缺少该时间的头部会被拒绝。
-    #[test]
-    fn header_requires_container_creation_time() {
-        let header = MetaHeader::new(
-            [8u8; 32],
-            [9u8; 12],
-            AlgorithmId::ChaCha20Poly1305,
-            "veil-test".to_string(),
-            "test".to_string(),
-            "2020-01-02T03:04:05Z".to_string(),
-        );
-        let mut bytes = header.to_bytes().unwrap();
-        assert_eq!(
-            MetaHeader::from_bytes(&bytes).unwrap().created_at,
-            header.created_at
-        );
-
-        // 创建时间位于最后一个 TLV；移除后仍保留合法的头部长度，验证必需字段校验。
-        bytes.truncate(bytes.len() - 3 - header.created_at.len());
-        let header_len = (bytes.len() - 10) as u16;
-        bytes[8..10].copy_from_slice(&header_len.to_le_bytes());
-        let error = MetaHeader::from_bytes(&bytes).unwrap_err();
-        assert!(error.to_string().contains("缺少容器创建时间"));
-    }
-
-    /// 加密正文的 JSONC 解析支持注释、尾逗号，并完整保留数据主密钥。
-    #[test]
-    fn metadata_jsonc_round_trip_accepts_comments() {
-        let metadata = MetaData::with_veil_id("veil-jsonc".to_string(), "photos".to_string());
-        let mut body = String::from_utf8(metadata.to_jsonc().unwrap()).unwrap();
-        body.insert(body.len() - 1, ',');
-        let content = format!("// 元数据说明\n/* 正文 */ {body}\n");
-        let loaded = MetaData::from_jsonc(content.as_bytes()).unwrap();
-        assert_eq!(loaded.veil_id, metadata.veil_id);
-        assert_eq!(loaded.veil_name, metadata.veil_name);
-        assert_eq!(loaded.data_keys, metadata.data_keys);
-        let document = serde_json::to_value(&loaded).unwrap();
-        for field in ["work_id", "work_type", "path", "volume_id"] {
-            assert!(document.get(field).is_none());
-        }
-    }
-
-    /// 解密后正文不是有效 UTF-8 时仍返回可处理的序列化错误。
-    #[test]
-    fn metadata_rejects_invalid_utf8() {
-        assert!(matches!(
-            MetaData::from_jsonc(&[0xff, 0xfe]),
-            Err(VeilError::SerializationError(_))
-        ));
-    }
-
-    /// 构造一个头部长度合法、但末尾 TLV 被截断的元数据文件。
-    fn truncated_tlv_header() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&3u16.to_le_bytes());
-        bytes.extend_from_slice(&[MetaTag::Version as u8, 2, 0]);
-        bytes
-    }
-
-    /// 验证截断 TLV 返回格式错误而不是 panic。
-    #[test]
-    fn truncated_tlv_is_rejected() {
-        let bytes = truncated_tlv_header();
-        assert!(MetaHeader::from_bytes(&bytes).is_err());
-    }
-
-    /// 验证声明长度超出实际文件时会被拒绝。
-    #[test]
-    fn header_length_beyond_file_is_rejected() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
-        assert!(MetaHeader::header_len(&bytes).is_err());
-    }
-
-    /// 验证旧元数据版本不会被静默接受。
-    #[test]
-    fn old_metadata_version_is_rejected() {
-        let header = MetaHeader::new(
-            [8u8; 32],
-            [9u8; 12],
-            AlgorithmId::ChaCha20Poly1305,
-            "veil-test".to_string(),
-            "test".to_string(),
-            "2020-01-02T03:04:05Z".to_string(),
-        );
-        let mut bytes = header.to_bytes().unwrap();
-        bytes[13..15].copy_from_slice(&(VERSION - 1).to_le_bytes());
-        assert!(MetaHeader::from_bytes(&bytes).is_err());
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+    pub id: String,
+    pub path: String,
 }

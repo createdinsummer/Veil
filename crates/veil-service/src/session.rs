@@ -13,6 +13,11 @@ pub struct VeilService(Arc<Mutex<Option<Session>>>);
 
 /// 容器会话请求；密码只用于本次操作，不应写入日志。
 pub enum ServiceRequest<'a> {
+    CheckExecution {
+        owner: &'a crate::execution::ExecutionOwner,
+        endpoint: Option<&'a crate::execution::ExecutionEndpoint>,
+        timeout: std::time::Duration,
+    },
     CreateContainer {
         parent: String,
         name: String,
@@ -25,6 +30,29 @@ pub enum ServiceRequest<'a> {
     RefreshContainer,
     LockContainer,
     ListSpaces,
+    ListRecents,
+    GetUserSetting {
+        key: &'a str,
+    },
+    SetUserSetting {
+        key: &'a str,
+        value: &'a serde_json::Value,
+    },
+    RenameSpace {
+        id: &'a str,
+        name: &'a str,
+    },
+    SetDefaultSpace {
+        id: &'a str,
+    },
+    UnregisterContainer {
+        id: &'a str,
+    },
+    MoveContainer {
+        id: &'a str,
+        target_space: &'a str,
+        password: &'a str,
+    },
     CreateSpace {
         name: String,
     },
@@ -79,10 +107,10 @@ pub enum ServiceRequest<'a> {
     ResolveContainer {
         selector: &'a str,
     },
-    LoadConfig,
-    ResolveWorkPath {
-        config: &'a crate::config::GlobalConfig,
-        work: &'a crate::work::WorkConfig,
+    ReadConfigSummary,
+    RegisterContainer {
+        directory: &'a Path,
+        password: &'a str,
     },
     ConfigPath,
     GuessMime {
@@ -134,9 +162,12 @@ pub enum ServiceRequest<'a> {
 
 /// 业务请求的结果。
 pub enum ServiceResponse {
+    ExecutionStatus(crate::execution::Liveness),
     Container(ContainerView),
     Locked,
     Spaces(Vec<crate::spaces::SpaceView>),
+    Recents(Vec<crate::storage::app::RecentContainer>),
+    Setting(serde_json::Value),
     Preview(Vec<u8>),
     Done,
     Operation(crate::operations::ContainerOperationResult),
@@ -146,8 +177,7 @@ pub enum ServiceResponse {
     ContainerPackPrepared(crate::commands::PackPlan),
     ContainerPacked(crate::commands::PackResult),
     Resolved(crate::config::ResolvedVeil),
-    Config(crate::config::GlobalConfig),
-    WorkPath(PathBuf),
+    ConfigSummary(crate::config::ConfigSummary),
     EffectiveHintLevel(crate::config::HintLevel),
     ShowHint(bool),
     HintLevelSet(crate::config::HintLevel),
@@ -209,6 +239,7 @@ pub struct ContainerView {
     pub path: String,
     pub created_at: String,
     pub files: Vec<FileView>,
+    pub directories: Vec<veil_core::metadata::DirectoryEntry>,
 }
 
 #[derive(Serialize)]
@@ -224,9 +255,90 @@ pub struct FileView {
 }
 
 impl VeilService {
+    /// 调用方需持有返回的句柄，供其他进程查询本进程的线程或任务。
+    pub fn listen_execution(&self) -> std::io::Result<crate::execution::ExecutionServer> {
+        crate::execution::ExecutionService::global()?.listen()
+    }
+
     /// 接收容器会话请求，执行对应的参数校验和业务流程。
     pub fn execute(&self, request: ServiceRequest<'_>) -> Result<ServiceResponse, ServiceError> {
+        let execution =
+            crate::execution::ExecutionService::global().map_err(|source| ServiceError::Io {
+                operation: "无法初始化执行上下文",
+                source,
+            })?;
+        let _scope = execution.enter_task("VeilService::execute");
+        self.execute_registered(request)
+    }
+
+    fn execute_registered(
+        &self,
+        request: ServiceRequest<'_>,
+    ) -> Result<ServiceResponse, ServiceError> {
         match request {
+            ServiceRequest::GetUserSetting { key } => Ok(ServiceResponse::Setting(
+                crate::storage::app::AppStore::global()?.user_setting(key)?,
+            )),
+            ServiceRequest::SetUserSetting { key, value } => {
+                crate::storage::app::AppStore::global()?.set_user_setting(key, value)?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::RenameSpace { id, name } => {
+                crate::storage::app::AppStore::global()?.rename_space(id, name)?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::SetDefaultSpace { id } => {
+                crate::storage::app::AppStore::global()?.set_default_space(id)?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::UnregisterContainer { id } => {
+                crate::storage::app::AppStore::global()?.unregister(id)?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::MoveContainer {
+                id,
+                target_space,
+                password,
+            } => {
+                crate::spaces::move_container(id, target_space, password)?;
+                let store = crate::storage::app::AppStore::global()?;
+                let destination = store
+                    .spaces()?
+                    .into_iter()
+                    .find(|s| s.id == target_space)
+                    .and_then(|s| s.local_path)
+                    .ok_or(ServiceError::StateUnavailable)?
+                    .join(id);
+                if let Some(session) = self
+                    .0
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .as_mut()
+                    .filter(|s| s.veil_id == id)
+                {
+                    session.path = destination;
+                    session.password = Zeroizing::new(password.into());
+                }
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::ListRecents => Ok(ServiceResponse::Recents(
+                crate::storage::app::AppStore::global()?.records("recent_div", 6)?,
+            )),
+            ServiceRequest::CheckExecution {
+                owner,
+                endpoint,
+                timeout,
+            } => {
+                let execution = crate::execution::ExecutionService::global().map_err(|source| {
+                    ServiceError::Io {
+                        operation: "无法初始化执行上下文",
+                        source,
+                    }
+                })?;
+                Ok(ServiceResponse::ExecutionStatus(
+                    execution.check_owner(owner, endpoint, timeout),
+                ))
+            }
             ServiceRequest::CreateContainer {
                 parent,
                 name,
@@ -313,17 +425,27 @@ impl VeilService {
                 ServiceResponse::ContainerPacked(crate::commands::commit_pack(plan, password)?),
             ),
             ServiceRequest::ResolveContainer { selector } => {
-                let mut config = crate::config::GlobalConfig::load()?;
+                let mut config = crate::config::AppConfig::load()?;
                 Ok(ServiceResponse::Resolved(config.resolve_veil(selector)?))
             }
-            ServiceRequest::LoadConfig => {
-                Ok(ServiceResponse::Config(crate::config::GlobalConfig::load()?))
+            ServiceRequest::ReadConfigSummary => {
+                Ok(ServiceResponse::ConfigSummary(crate::config::summary()?))
             }
-            ServiceRequest::ResolveWorkPath { config, work } => {
-                Ok(ServiceResponse::WorkPath(config.resolve_work_root(work)?))
+            ServiceRequest::RegisterContainer {
+                directory,
+                password,
+            } => {
+                let metadata = VeilManager::new(directory.into()).read_meta(password)?;
+                crate::config::AppConfig::load()?.register_directory(
+                    directory,
+                    &metadata.veil_id,
+                    &metadata.veil_name,
+                    &metadata.created_at,
+                )?;
+                Ok(ServiceResponse::Done)
             }
             ServiceRequest::ConfigPath => Ok(ServiceResponse::ConfigPath(
-                crate::config::GlobalConfig::config_path()?,
+                crate::config::AppConfig::config_path()?,
             )),
             ServiceRequest::GuessMime { path } => {
                 Ok(ServiceResponse::Mime(veil_core::mime::guess_mime(path)))
@@ -341,9 +463,8 @@ impl VeilService {
             ServiceRequest::SetHintLevel { level } => {
                 let level = crate::config::HintLevel::parse(level)
                     .ok_or(crate::workflow::WorkflowError::InvalidHintLevel)?;
-                let mut config = crate::config::GlobalConfig::load()?;
-                config.user_settings.hint_level = level;
-                config.save()?;
+                crate::storage::app::AppStore::global()?
+                    .set_user_setting("hint_level", &serde_json::json!(level.as_str()))?;
                 Ok(ServiceResponse::HintLevelSet(level))
             }
             ServiceRequest::PrepareLink { target, output } => Ok(ServiceResponse::LinkPrepared(
@@ -426,6 +547,12 @@ impl VeilService {
                 path: path.clone(),
                 source,
             })?;
+        crate::config::AppConfig::load()?.register_directory(
+            &path,
+            &metadata.veil_id,
+            &metadata.veil_name,
+            &metadata.created_at,
+        )?;
         let view = container_view(&path, &metadata);
         *session = Some(Session {
             path,
@@ -450,6 +577,12 @@ impl VeilService {
         })?;
         let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let metadata = VeilManager::new(path.clone()).read_meta(password.as_str())?;
+        crate::config::AppConfig::load()?.register_directory(
+            &path,
+            &metadata.veil_id,
+            &metadata.veil_name,
+            &metadata.created_at,
+        )?;
         let view = container_view(&path, &metadata);
         *session = Some(Session {
             path,
@@ -596,6 +729,7 @@ fn container_view(path: &Path, metadata: &MetaData) -> ContainerView {
         path: path.to_string_lossy().into_owned(),
         created_at: metadata.created_at.clone(),
         files,
+        directories: metadata.directories.clone(),
     }
 }
 
@@ -650,7 +784,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(created.name, "我的容器");
-        assert!(Path::new(&created.path).join(".veil-info").exists());
+        assert!(Path::new(&created.path).join("veil.db").exists());
         assert_eq!(
             container(app.execute(ServiceRequest::RefreshContainer).unwrap()).id,
             created.id

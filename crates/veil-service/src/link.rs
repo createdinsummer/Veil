@@ -46,7 +46,7 @@ pub(crate) fn prepare_link(
     target: &str,
     output: Option<&Path>,
 ) -> Result<LinkPlan, crate::workflow::WorkflowError> {
-    let mut config = crate::config::GlobalConfig::load()?;
+    let mut config = crate::config::AppConfig::load()?;
     let resolved = config.resolve_link_target(target)?;
     let output = output.map(Path::to_path_buf).unwrap_or_else(|| {
         std::env::current_dir()
@@ -74,42 +74,28 @@ pub(crate) fn create_registered_link(
     if output.exists() {
         return Err(VeilError::WorkError("链接已存在".into()));
     }
-    let mut config = crate::config::GlobalConfig::load()?;
+    let mut config = crate::config::AppConfig::load()?;
     let result = (|| {
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
         if let Some(existing) = resolved.link_path.as_deref() {
-            fs::copy(existing, output)?;
+            VeilLink::load(existing)?.save_new(output)?;
             config.cache_link(output)?;
         } else {
-            let manager = crate::veil_ops::VeilManager::for_veil(
-                resolved.veil_dir.clone(),
+            config.register_link_at(
                 &resolved.veil_id,
-            );
-            let header = manager.read_meta_header()?;
-            let root = resolved
-                .veil_dir
-                .parent()
-                .ok_or_else(|| VeilError::WorkError("容器缺少工作区父目录".into()))?;
-            let mut owner = crate::config::GlobalConfig::for_location(root)?;
-            owner.register_work_at(root, false)?;
-            owner.register_link_at(
-                &header.veil_id,
-                &header.veil_name,
+                &resolved.veil_name,
                 &resolved.veil_dir,
                 output,
             )?;
         }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(output);
-    }
     result
 }
 
-/// JSONC 格式的便携定位文件，可复制到其他位置或由 `config.jsonc` 中的正文重新生成。
+/// JSONC 格式的便携定位文件，可复制到其他位置或由本机数据库中的正文缓存重新生成。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeilLink {
     /// 链接文件格式版本。
@@ -128,7 +114,7 @@ pub struct LinkVeil {
     /// 面向用户的容器名称。
     pub veil_name: String,
 
-    /// RFC 3339 格式的容器原始创建时间，来自 `.veil-info`。
+    /// RFC 3339 格式的容器原始创建时间，来自解锁后的容器数据库。
     pub created_at: String,
 }
 
@@ -176,6 +162,26 @@ impl VeilLink {
         self.validate()?;
 
         crate::jsonc::save(path, self)
+    }
+
+    pub fn save_new(&self, path: &Path) -> Result<(), VeilError> {
+        use std::io::Write;
+        self.validate()?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        crate::fsutil::create_dir_all_durable(parent)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(
+            &serde_json::to_vec_pretty(self)
+                .map_err(|e| VeilError::SerializationError(e.to_string()))?,
+        )?;
+        temp.as_file().sync_all()?;
+        temp.persist_noclobber(path)
+            .map_err(|e| VeilError::Io(e.error))?;
+        crate::fsutil::sync_directory(parent)?;
+        Ok(())
     }
 
     /// 返回链接记录的 Veil 展示名称。

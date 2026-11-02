@@ -1,4 +1,4 @@
-//! 工作区只是存放容器的目录，不具有独立身份。
+//! CLI Work 参数的空间目录适配视图；稳定空间身份保存在应用数据库。
 
 use crate::error::VeilError;
 use serde::{Deserialize, Serialize};
@@ -25,10 +25,6 @@ pub struct WorkConfig {
 }
 
 impl WorkConfig {
-    pub fn default_work() -> Result<Self, VeilError> {
-        Self::from_path(PathBuf::from("works/default"), WorkType::Default, None)
-    }
-
     pub fn custom_work(
         name: String,
         path: PathBuf,
@@ -78,13 +74,6 @@ impl WorkConfig {
             return Err(VeilError::WorkError("配置目录必须是绝对路径".to_string()));
         }
         Ok(config_dir.join(&self.path))
-    }
-
-    pub fn default_work_root() -> Result<PathBuf, VeilError> {
-        Ok(crate::config::GlobalConfig::config_path()?
-            .parent()
-            .unwrap()
-            .join("works/default"))
     }
 }
 
@@ -147,13 +136,6 @@ mod tests {
     #[test]
     fn paths_are_relative_to_config_directory() {
         let dir = tempfile::TempDir::new().unwrap();
-        let work = WorkConfig::default_work().unwrap();
-        assert_eq!(work.path, Path::new("works/default"));
-        assert_eq!(
-            work.resolve_root(dir.path()).unwrap(),
-            dir.path().join("works/default")
-        );
-        assert!(!dir.path().join("works").exists());
         let custom =
             WorkConfig::custom_work("archive".into(), PathBuf::from("../archive"), None).unwrap();
         assert_eq!(

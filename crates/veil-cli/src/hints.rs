@@ -7,16 +7,9 @@ use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
 use std::path::Path;
-use veil_service::config::{GlobalConfig, HintLevel};
+use veil_service::config::HintLevel;
 use veil_service::hints::HintKind;
 use veil_service::{ServiceRequest, ServiceResponse};
-
-pub(crate) fn load_config() -> Result<GlobalConfig> {
-    match crate::commands::request(ServiceRequest::LoadConfig)? {
-        ServiceResponse::Config(config) => Ok(config),
-        _ => Err(veil_core::error::VeilError::WorkError("服务响应类型不符合请求".into()).into()),
-    }
-}
 
 /// 当前生效的提示级别。
 pub fn current_level() -> HintLevel {

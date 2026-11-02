@@ -28,7 +28,7 @@ fn init_creates_work_and_link() {
     assert_eq!(link.veil.veil_name, "photos");
     assert!(
         env.veil_dir(&env.link_path("photos"))
-            .join(".veil-info")
+            .join("veil.db")
             .is_file()
     );
 }
@@ -756,6 +756,7 @@ fn pack_and_unpack_create_reusable_links() {
     let restored_home = tempfile::TempDir::new().unwrap();
     env.command()
         .env("HOME", restored_home.path())
+        .env("VEIL_APP_DATA_DIR", restored_home.path().join("app"))
         .args([
             "unpack",
             &env.path(&package),
@@ -780,6 +781,7 @@ fn pack_and_unpack_create_reusable_links() {
 
     env.command()
         .env("HOME", restored_home.path())
+        .env("VEIL_APP_DATA_DIR", restored_home.path().join("app"))
         .args(["free", &env.path(&restored_link)])
         .assert()
         .success()
@@ -1059,12 +1061,17 @@ fn nonexistent_veil_fails_cleanly() {
         .args(["free", "missing.veil-link"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("当前未找到容器"));
+        .stderr(predicate::str::contains("容器未找到"));
 }
 
 /// 统计默认工作区中单个容器的密文文件数量。
 fn encrypted_file_count(env: &TestEnv) -> usize {
-    let work_root = env.home.path().join(".veil/works/default");
+    let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .default_space()
+        .unwrap()
+        .local_path
+        .unwrap();
     std::fs::read_dir(work_root)
         .unwrap()
         .filter_map(Result::ok)
@@ -1088,7 +1095,12 @@ fn encrypted_file_count(env: &TestEnv) -> usize {
 
 /// 统计默认工作区中的容器目录数量。
 fn default_veil_count(env: &TestEnv) -> usize {
-    let work_root = env.home.path().join(".veil/works/default");
+    let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .default_space()
+        .unwrap()
+        .local_path
+        .unwrap();
     let Ok(entries) = std::fs::read_dir(work_root) else {
         return 0;
     };

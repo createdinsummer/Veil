@@ -1,12 +1,12 @@
 //! 容器创建与解包的准备、校验及执行。
 
-use crate::config::GlobalConfig;
+use crate::config::AppConfig;
 use crate::lifecycle::{self, CreationError};
+use crate::package::VeilUnpacker;
 use crate::work::WorkType;
 use std::path::{Path, PathBuf};
 use veil_core::error::VeilError;
-use veil_core::metadata::{MetaHeader, generate_veil_id};
-use veil_core::veil_package::VeilUnpacker;
+use veil_core::metadata::generate_veil_id;
 
 /// 创建容器使用的原始参数。
 pub struct CreateOptions<'a> {
@@ -87,7 +87,7 @@ pub enum WorkflowError {
 
 /// 经服务层准备的创建计划，字段不能由调用方修改。
 pub struct CreatePlan {
-    config: GlobalConfig,
+    config: AppConfig,
     veil_id: String,
     name: String,
     link_path: PathBuf,
@@ -107,7 +107,7 @@ impl CreatePlan {
 
 /// 经服务层准备的解包计划，字段不能由调用方修改。
 pub struct UnpackPlan {
-    config: GlobalConfig,
+    config: AppConfig,
     package_path: PathBuf,
     veil_id: String,
     name: String,
@@ -226,7 +226,7 @@ pub(crate) fn prepare_create(options: CreateOptions<'_>) -> Result<CreatePlan, W
         std::env::current_dir()?.join(&link_path)
     };
     let link_dir = absolute.parent().unwrap_or_else(|| Path::new("."));
-    let (config, work) = GlobalConfig::creation_work(
+    let (config, work) = AppConfig::creation_work(
         link_dir,
         options.work_name,
         options.work_root,
@@ -280,8 +280,14 @@ pub(crate) fn commit_create(
         },
         CreationError::Link(source) => WorkflowError::LinkRegistrationFailed {
             path: plan.link_path.clone(),
-            source,
+            source: VeilError::WorkError(format!(
+                "{source}；容器保留在 {}",
+                plan.directory.display()
+            )),
         },
+        CreationError::RegisterInitialized { directory, source } => {
+            WorkflowError::CreateFailed { directory, source }
+        }
         CreationError::Register(source) => WorkflowError::Core(source),
     })?;
     Ok(CreatedContainer {
@@ -306,10 +312,9 @@ fn check_unpack_paths(plan: &UnpackPlan) -> Result<(), WorkflowError> {
     if plan.link_path.exists() {
         return Err(WorkflowError::LinkExists(plan.link_path.clone()));
     }
-    if plan.directory.exists() {
-        return Err(WorkflowError::UnpackDirectoryExists(plan.directory.clone()));
+    if !plan.veil_id.is_empty() {
+        plan.config.ensure_veil_id_available(&plan.veil_id)?;
     }
-    plan.config.ensure_veil_id_available(&plan.veil_id)?;
     Ok(())
 }
 
@@ -335,28 +340,22 @@ pub(crate) fn prepare_unpack(options: UnpackOptions<'_>) -> Result<UnpackPlan, W
         .link_output
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let (config, work) = GlobalConfig::creation_work(&location, options.work_name, None, false)?;
+    let (config, work) = AppConfig::creation_work(&location, options.work_name, None, false)?;
     let work_root = config.resolve_work_root(&work)?;
     let dedicated = matches!(work.work_type, WorkType::Dedicated);
     if dedicated && work_root.exists() && !directory_is_empty(&work_root)? {
         return Err(WorkflowError::UnpackDirectoryExists(work_root));
     }
-    let encrypted = VeilUnpacker::new(&package_path).read_encrypted_metadata()?;
-    let header = MetaHeader::from_bytes(&encrypted)?;
-    if header.veil_id.is_empty() {
-        return Err(WorkflowError::UnpackMissingId);
-    }
-    config.ensure_veil_id_available(&header.veil_id)?;
+    VeilUnpacker::new(&package_path).read_encrypted_metadata()?;
     let link_path = options
         .link_output
         .map(PathBuf::from)
         .unwrap_or_else(|| default_link_path(&name));
-    crate::work::validate_veil_id(&header.veil_id)?;
-    let directory = work_root.join(&header.veil_id);
+    let directory = work_root.join("pending");
     let plan = UnpackPlan {
         config,
         package_path,
-        veil_id: header.veil_id,
+        veil_id: String::new(),
         name,
         link_path,
         work_root,
@@ -372,6 +371,11 @@ pub(crate) fn commit_unpack(
     mut plan: UnpackPlan,
     password: &str,
 ) -> Result<UnpackedContainer, WorkflowError> {
+    check_unpack_paths(&plan)?;
+    let (metadata, _) = VeilUnpacker::new(&plan.package_path).read_metadata(password)?;
+    plan.veil_id = metadata.veil_id.clone();
+    crate::work::validate_veil_id(&plan.veil_id)?;
+    plan.directory = plan.work_root.join(&plan.veil_id);
     check_unpack_paths(&plan)?;
     let count = crate::package::unpack_registered(
         &plan.package_path,
@@ -461,7 +465,7 @@ mod tests {
         let link = temporary.path().join("test.veil-link");
         let id = generate_veil_id();
         let plan = UnpackPlan {
-            config: GlobalConfig::load_from(&temporary.path().join("config.jsonc")).unwrap(),
+            config: AppConfig::load_from(&temporary.path().join("app.db")).unwrap(),
             package_path: package,
             directory: work.join(&id),
             veil_id: id,

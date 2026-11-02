@@ -1,574 +1,250 @@
-//! 可分享 `.veil` 打包文件格式。
-//!
-//! 该格式把 Veil 的加密元数据和各文件密文依次装入单个文件，用于备份、分享和
-//! 跨 Work 传输。包内不重新加密内容，只定义头部、元数据段和文件条目的布局，
-//! 因而解包后仍需使用原 Veil 密码解密。
-//!
-//! 文件结构：
-//! ```text
-//! [Header]
-//!   magic: "VEILPKG\0" (8 bytes)
-//!   version: u16 (2 bytes)
-//!   header_size: u32 (4 bytes)
-//!   metadata_size: u32 (4 bytes)
-//!   file_count: u32 (4 bytes)
-//!
-//! [Metadata Section]
-//!   完整 .veil-info 字节（明文 TLV 头部 + 加密 JSONC）
-//!
-//! [File Data Section]
-//!   [File 1 Header]
-//!     name_len: u16
-//!     name: [u8; name_len]
-//!     data_size: u64
-//!   [File 1 Data]
-//!     encrypted data
-//!   [File 2 Header]
-//!     ...
-//! ```
-
-use crate::error::VeilError;
-use crate::kdf;
-use crate::metadata::{AlgorithmId, MetaData, MetaHeader};
-use chacha20poly1305::aead::generic_array::GenericArray;
-use chacha20poly1305::{
-    ChaCha20Poly1305,
-    aead::{Aead, KeyInit},
+//! 第 2 版便携包：加密数据库快照与独立密文，拒绝旧元数据格式。
+use crate::{
+    database,
+    error::{Result, VeilError},
 };
-use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
-
-/// Veil 打包文件魔数。
+use std::{
+    collections::HashSet,
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 pub const VEIL_PACKAGE_MAGIC: &[u8; 8] = b"VEILPKG\0";
-
-/// 当前打包文件版本。
-pub const VEIL_PACKAGE_VERSION: u16 = 1;
-
-/// `.veil` 打包文件头部。
+pub const VEIL_PACKAGE_VERSION: u16 = 2;
+const MAX_DB: u32 = 512 * 1024 * 1024;
+fn invalid(s: &str) -> VeilError {
+    VeilError::InvalidFormat(s.into())
+}
 #[derive(Debug, Clone)]
 pub struct VeilPackageHeader {
-    /// 打包文件格式版本。
     pub version: u16,
-    /// 以字节计的头部长度。
     pub header_size: u32,
-    /// 紧随头部之后的加密元数据长度。
     pub metadata_size: u32,
-    /// 元数据声明的文件条目数量。
     pub file_count: u32,
 }
-
 impl VeilPackageHeader {
-    /// 使用当前版本构造固定长度 22 字节的头部。
     pub fn new(metadata_size: u32, file_count: u32) -> Self {
         Self {
-            version: VEIL_PACKAGE_VERSION,
+            version: 2,
             header_size: 22,
             metadata_size,
             file_count,
         }
     }
-
-    /// 将头部按小端序序列化为 22 字节。
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.header_size as usize);
-
-        // 固定字段按写入顺序排列，读取端无需额外查找即可顺序解析。
-        buf.extend_from_slice(VEIL_PACKAGE_MAGIC);
-        buf.extend_from_slice(&self.version.to_le_bytes());
-        buf.extend_from_slice(&self.header_size.to_le_bytes());
-        buf.extend_from_slice(&self.metadata_size.to_le_bytes());
-        buf.extend_from_slice(&self.file_count.to_le_bytes());
-
-        buf
+        let mut b = Vec::new();
+        b.extend_from_slice(VEIL_PACKAGE_MAGIC);
+        b.extend_from_slice(&self.version.to_le_bytes());
+        for n in [self.header_size, self.metadata_size, self.file_count] {
+            b.extend_from_slice(&n.to_le_bytes());
+        }
+        b
     }
-
-    /// 从至少 22 字节的输入解析头部并校验魔数。
-    ///
-    /// # 错误
-    /// 输入不足、魔数不匹配、版本不支持或头部长度不符合当前打包格式时返回
-    /// [`VeilError::InvalidFormat`]。
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VeilError> {
-        if bytes.len() < 22 {
-            return Err(VeilError::InvalidFormat("打包文件头部不完整".to_string()));
+    pub fn from_bytes(b: &[u8]) -> Result<Self> {
+        if b.len() < 22 || &b[..8] != VEIL_PACKAGE_MAGIC {
+            return Err(invalid("仅支持 veil pack 生成的新格式打包文件"));
         }
-
-        if &bytes[0..8] != VEIL_PACKAGE_MAGIC {
-            return Err(VeilError::InvalidFormat("无效的打包文件魔数".to_string()));
-        }
-
-        // 字段偏移与 to_bytes 一致，全部采用小端序。
-        let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        let header_size = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
-        let metadata_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
-        let file_count = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
-
-        let header = Self {
-            version,
-            header_size,
-            metadata_size,
-            file_count,
+        let h = Self {
+            version: u16::from_le_bytes(b[8..10].try_into().unwrap()),
+            header_size: u32::from_le_bytes(b[10..14].try_into().unwrap()),
+            metadata_size: u32::from_le_bytes(b[14..18].try_into().unwrap()),
+            file_count: u32::from_le_bytes(b[18..22].try_into().unwrap()),
         };
-        if header.version != VEIL_PACKAGE_VERSION {
-            return Err(VeilError::InvalidFormat(format!(
-                "不支持的打包文件版本: {}",
-                header.version
-            )));
+        if h.version != 2
+            || h.header_size != 22
+            || h.metadata_size < 4096
+            || !h.metadata_size.is_multiple_of(4096)
+            || h.metadata_size > MAX_DB
+        {
+            return Err(invalid(
+                "仅支持 veil pack 生成的新格式打包文件；格式或数据库大小无效",
+            ));
         }
-        if header.header_size != 22 {
-            return Err(VeilError::InvalidFormat(format!(
-                "不支持的打包文件头部大小: {}；仅支持 veil pack 生成的 .veil 包，旧独立单文件需先用旧版本导出内容",
-                header.header_size
-            )));
-        }
-
-        Ok(header)
+        Ok(h)
     }
 }
-
-/// 缓存包内加密元数据的密码验证器。
-///
-/// 不保存密码或解密后的数据主密钥。读取一次打包文件后即可在线程间共享，
-/// 每次尝试仅派生密码保护密钥并解密元数据，不读取文件密文、不执行解包。
-pub struct VeilPasswordVerifier {
-    header: MetaHeader,
-    encrypted_data: Vec<u8>,
-}
-
-impl VeilPasswordVerifier {
-    fn from_metadata(bytes: &[u8]) -> Result<Self, VeilError> {
-        let header = MetaHeader::from_bytes(bytes)?;
-        if header.algorithm != AlgorithmId::ChaCha20Poly1305 {
-            return Err(VeilError::InvalidFormat(format!(
-                "不支持的元数据加密算法: {}",
-                header.algorithm.as_str()
-            )));
-        }
-        let header_len = MetaHeader::header_len(bytes)?;
-        let encrypted_data = bytes[header_len..].to_vec();
-        if encrypted_data.len() < crate::file_ops::TAG_LEN {
-            return Err(VeilError::InvalidFormat("加密元数据不完整".to_string()));
-        }
-        Ok(Self {
-            header,
-            encrypted_data,
-        })
-    }
-
-    /// 判断候选密码能否解密并解析当前元数据。
-    pub fn matches_password(&self, password: &str) -> bool {
-        self.decrypt_metadata(password).is_ok()
-    }
-
-    fn decrypt_metadata(&self, password: &str) -> Result<MetaData, VeilError> {
-        let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
-        kdf::derive_key(password.as_bytes(), &self.header.salt, &mut *master_key)
-            .map_err(|error| VeilError::KeyDerivationError(error.to_string()))?;
-
-        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&*master_key));
-        let decrypted = zeroize::Zeroizing::new(
-            cipher
-                .decrypt(
-                    GenericArray::from_slice(&self.header.nonce),
-                    self.encrypted_data.as_slice(),
-                )
-                .map_err(|error| {
-                    VeilError::DecryptionError(format!("解密失败（密码错误或数据损坏）: {}", error))
-                })?,
-        );
-        MetaData::from_jsonc(decrypted.as_slice())
-    }
-}
-
-/// 打包文件中的单个文件条目头部。
-#[derive(Debug, Clone)]
-pub struct FileEntryHeader {
-    /// Veil 元数据中的原始相对路径。
-    pub name: String,
-    /// 紧随条目头部之后的密文字节数。
-    pub data_size: u64,
-}
-
-impl FileEntryHeader {
-    /// 将名称长度、名称和密文长度序列化为一个小端序条目。
-    ///
-    /// 名称长度使用 `u16`，调用方需保证名称字节长度不超过该字段容量。
-    pub fn to_bytes(&self) -> Result<Vec<u8>, VeilError> {
-        let name_bytes = self.name.as_bytes();
-        // 名称长度只占 2 字节，条目名总长度由该字段限制。
-        let name_len = u16::try_from(name_bytes.len())
-            .map_err(|_| VeilError::InvalidFormat("打包文件条目名称过长".to_string()))?;
-
-        let mut buf = Vec::with_capacity(2 + name_bytes.len() + 8);
-
-        buf.extend_from_slice(&name_len.to_le_bytes());
-        buf.extend_from_slice(name_bytes);
-        buf.extend_from_slice(&self.data_size.to_le_bytes());
-
-        Ok(buf)
-    }
-
-    /// 从字节解析文件条目。
-    ///
-    /// # 返回
-    /// 返回条目本身以及本次解析消耗的字节数。
-    ///
-    /// # 错误
-    /// 长度字段超出输入、名称不是 UTF-8 或数据不足时返回
-    /// [`VeilError::InvalidFormat`]。
-    pub fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), VeilError> {
-        if bytes.len() < 2 {
-            return Err(VeilError::InvalidFormat("文件条目头部不完整".to_string()));
-        }
-
-        // 先读名称长度，再据此确定名称、数据长度字段和总消耗量。
-        let name_len = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
-
-        if bytes.len() < 2 + name_len + 8 {
-            return Err(VeilError::InvalidFormat("文件条目头部不完整".to_string()));
-        }
-
-        let name = String::from_utf8(bytes[2..2 + name_len].to_vec())
-            .map_err(|e| VeilError::InvalidFormat(format!("文件名不是有效的 UTF-8: {}", e)))?;
-
-        let data_size = u64::from_le_bytes([
-            bytes[2 + name_len],
-            bytes[2 + name_len + 1],
-            bytes[2 + name_len + 2],
-            bytes[2 + name_len + 3],
-            bytes[2 + name_len + 4],
-            bytes[2 + name_len + 5],
-            bytes[2 + name_len + 6],
-            bytes[2 + name_len + 7],
-        ]);
-
-        let consumed = 2 + name_len + 8;
-
-        Ok((Self { name, data_size }, consumed))
-    }
-}
-
-/// 按打包格式写入元数据和密文条目的底层写入器。
-///
-/// 调用方负责提供一致的元数据和密文，并在需要时协调并发与清理。
 pub struct VeilPackageWriter {
-    output_path: PathBuf,
-    parent: PathBuf,
-    output: tempfile::NamedTempFile,
-    metadata_size: u32,
-    file_count: u32,
+    output: PathBuf,
+    temp: tempfile::NamedTempFile,
+    count: u32,
+    names: HashSet<String>,
 }
-
 impl VeilPackageWriter {
-    /// 创建临时包并写入加密元数据。
-    pub fn new(
-        output_path: impl AsRef<Path>,
-        encrypted_metadata: &[u8],
-    ) -> Result<Self, VeilError> {
-        let output_path = output_path.as_ref().to_path_buf();
-        let parent = output_path
+    pub fn new(output: impl AsRef<Path>, database: &[u8]) -> Result<Self> {
+        let output = output.as_ref();
+        let parent = output
             .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let metadata_size = u32::try_from(encrypted_metadata.len())
-            .map_err(|_| VeilError::InvalidFormat("打包元数据过长".to_string()))?;
-        crate::fsutil::create_dir_all_durable(&parent)?;
-        let mut output = tempfile::NamedTempFile::new_in(&parent)?;
-        output.write_all(&VeilPackageHeader::new(0, 0).to_bytes())?;
-        output.write_all(encrypted_metadata)?;
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let size = u32::try_from(database.len()).map_err(|_| invalid("数据库快照过大"))?;
+        if size == 0 || size > MAX_DB {
+            return Err(invalid("数据库快照大小无效"));
+        }
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        temp.write_all(&VeilPackageHeader::new(size, 0).to_bytes())?;
+        temp.write_all(database)?;
         Ok(Self {
-            output_path,
-            parent,
-            output,
-            metadata_size,
-            file_count: 0,
+            output: output.into(),
+            temp,
+            count: 0,
+            names: HashSet::new(),
         })
     }
-
-    /// 流式写入一个密文条目。
-    pub fn add_file(&mut self, name: &str, encrypted_path: &Path) -> Result<(), VeilError> {
-        let count = self
-            .file_count
+    pub fn add_file(&mut self, name: &str, path: &Path) -> Result<()> {
+        validate_name(name)?;
+        if !self.names.insert(name.into()) {
+            return Err(invalid("打包密文名称重复"));
+        }
+        let bytes = name.as_bytes();
+        let len = u16::try_from(bytes.len()).map_err(|_| invalid("名称过长"))?;
+        let mut source = File::open(path)?;
+        let size = source.metadata()?.len();
+        self.temp.write_all(&len.to_le_bytes())?;
+        self.temp.write_all(bytes)?;
+        self.temp.write_all(&size.to_le_bytes())?;
+        if std::io::copy(&mut Read::by_ref(&mut source).take(size), &mut self.temp)? != size {
+            return Err(invalid("源密文长度变化"));
+        }
+        self.count = self
+            .count
             .checked_add(1)
-            .ok_or_else(|| VeilError::InvalidFormat("打包文件数量过多".to_string()))?;
-        let mut encrypted = File::open(encrypted_path)?;
-        let entry = FileEntryHeader {
-            name: name.to_string(),
-            data_size: encrypted.metadata()?.len(),
-        };
-        self.output.write_all(&entry.to_bytes()?)?;
-        if std::io::copy(&mut encrypted, &mut self.output)? != entry.data_size {
-            return Err(VeilError::InvalidFormat("打包时密文长度发生变化".into()));
-        }
-        self.file_count = count;
+            .ok_or_else(|| invalid("文件过多"))?;
         Ok(())
     }
-
-    /// 回填头部、同步并发布完整包文件。
-    pub fn finish(self) -> Result<(), VeilError> {
-        self.finish_with_overwrite(true)
+    pub fn finish(self) -> Result<()> {
+        self.publish(true)
     }
-
-    /// 发布包，若目标已经存在则拒绝覆盖。
-    pub fn finish_without_overwrite(self) -> Result<(), VeilError> {
-        self.finish_with_overwrite(false)
+    pub fn finish_without_overwrite(self) -> Result<()> {
+        self.publish(false)
     }
-
-    fn finish_with_overwrite(mut self, overwrite: bool) -> Result<(), VeilError> {
-        self.output.seek(SeekFrom::Start(0))?;
-        self.output
-            .write_all(&VeilPackageHeader::new(self.metadata_size, self.file_count).to_bytes())?;
-        self.output.flush()?;
-        crate::fsutil::sync_file(self.output.as_file())?;
+    fn publish(mut self, overwrite: bool) -> Result<()> {
+        self.temp.seek(SeekFrom::Start(18))?;
+        self.temp.write_all(&self.count.to_le_bytes())?;
+        self.temp.as_file().sync_all()?;
         if overwrite {
-            self.output
-                .persist(&self.output_path)
-                .map_err(|error| VeilError::Io(error.error))?;
+            self.temp
+                .persist(&self.output)
+                .map_err(|e| VeilError::Io(e.error))?;
         } else {
+            self.temp
+                .persist_noclobber(&self.output)
+                .map_err(|e| VeilError::Io(e.error))?;
+        }
+        crate::fsutil::sync_directory(
             self.output
-                .persist_noclobber(&self.output_path)
-                .map_err(|error| VeilError::Io(error.error))?;
-        }
-        let _ = crate::fsutil::sync_directory(&self.parent);
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?;
         Ok(())
     }
 }
-
-/// 从 `.veil` 打包文件读取元数据和文件内容。
+pub struct VeilPasswordVerifier {
+    database: tempfile::NamedTempFile,
+}
+impl VeilPasswordVerifier {
+    pub fn matches_password(&self, password: &str) -> bool {
+        database::open(self.database.path(), Some(password), false).is_ok()
+    }
+}
 pub struct VeilUnpacker {
-    /// 待读取的打包文件路径。
-    package_path: std::path::PathBuf,
+    path: PathBuf,
 }
-
 impl VeilUnpacker {
-    /// 为指定打包文件创建解包器。
-    pub fn new(package_path: impl AsRef<Path>) -> Self {
+    pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
-            package_path: package_path.as_ref().to_path_buf(),
+            path: path.as_ref().into(),
         }
     }
-
-    /// 只读取包内加密元数据，不创建目录或写入文件。
-    ///
-    /// # 错误
-    /// 打包文件无法打开、头部无效或元数据长度不足时返回错误。
-    pub fn read_encrypted_metadata(&self) -> Result<Vec<u8>, VeilError> {
-        let mut file = File::open(&self.package_path)?;
-
-        // 头部长度固定 22 字节，元数据长度从头部字段取得。
-        let mut header_buf = vec![0u8; 22];
-        file.read_exact(&mut header_buf)?;
-        let header = VeilPackageHeader::from_bytes(&header_buf)?;
-
-        ensure_remaining_length(&mut file, u64::from(header.metadata_size))?;
-        let mut metadata_buf = vec![0u8; header.metadata_size as usize];
-        file.read_exact(&mut metadata_buf)?;
-        Ok(metadata_buf)
+    pub fn read_encrypted_metadata(&self) -> Result<Vec<u8>> {
+        let mut file = File::open(&self.path)?;
+        let header = read_header(&mut file)?;
+        let remaining = file.metadata()?.len().saturating_sub(22);
+        if header.metadata_size as u64 > remaining {
+            return Err(invalid("包内数据库被截断"));
+        }
+        let mut bytes = vec![0; header.metadata_size as usize];
+        file.read_exact(&mut bytes)?;
+        Ok(bytes)
     }
-
-    /// 验证密码并返回解密后的元数据及原始元数据字节。
-    ///
-    /// 该入口不创建目录或写入文件，调用方可以先完成身份验证再开始解包。
-    pub fn read_metadata(&self, password: &str) -> Result<(MetaData, Vec<u8>), VeilError> {
-        let encrypted_metadata = self.read_encrypted_metadata()?;
-        let metadata =
-            VeilPasswordVerifier::from_metadata(&encrypted_metadata)?.decrypt_metadata(password)?;
-
-        Ok((metadata, encrypted_metadata))
+    pub fn read_password_verifier(&self) -> Result<VeilPasswordVerifier> {
+        let mut database = tempfile::NamedTempFile::new()?;
+        database.write_all(&self.read_encrypted_metadata()?)?;
+        database.as_file().sync_all()?;
+        Ok(VeilPasswordVerifier { database })
     }
-
-    /// 只读取一次包内元数据，构造可重复使用的密码验证器。
-    ///
-    /// 不创建目录、不写出明文，也不读取包中的文件内容。
-    pub fn read_password_verifier(&self) -> Result<VeilPasswordVerifier, VeilError> {
-        VeilPasswordVerifier::from_metadata(&self.read_encrypted_metadata()?)
-    }
-
-    /// 将打包文件中的加密条目写入 `veil_dir`。
-    ///
-    /// 条目以元数据中的原始名称落盘，调用方随后需依据解密后的清单将其重命名为
-    /// 加密文件名。方法最后返回 `.veil-info` 的完整字节。
-    ///
-    /// # 错误
-    /// 目录创建、条目解析、内容读取或文件写入失败时返回错误。
-    pub fn unpack(&self, veil_dir: impl AsRef<Path>) -> Result<Vec<u8>, VeilError> {
-        let veil_dir = veil_dir.as_ref();
-        let mut file = File::open(&self.package_path)?;
-        let (header, metadata_buf) = read_package_prefix(&mut file)?;
-        crate::fsutil::create_dir_all_durable(veil_dir)?;
-
+    /// 输出只包含加密数据；名称、长度、重复条目及尾部均严格校验。
+    pub fn unpack(&self, directory: impl AsRef<Path>) -> Result<Vec<u8>> {
+        let directory = directory.as_ref();
+        let bytes = self.read_encrypted_metadata()?;
+        let mut file = File::open(&self.path)?;
+        let header = read_header(&mut file)?;
+        file.seek(SeekFrom::Current(header.metadata_size as i64))?;
+        std::fs::create_dir_all(directory)?;
+        let mut names = HashSet::new();
         for _ in 0..header.file_count {
-            let entry = read_file_entry(&mut file)?;
-            let relative_path = validate_package_path(&entry.name)?;
-            copy_entry_data(&mut file, entry.data_size, &veil_dir.join(relative_path))?;
-        }
-
-        Ok(metadata_buf)
-    }
-
-    /// 将包内密文按解密元数据中的加密文件名直接写入 `veil_dir`。
-    ///
-    /// 该入口避免先使用包内原始路径落盘，能够阻止目录穿越并避免二次重命名。
-    pub fn unpack_encrypted_files(
-        &self,
-        veil_dir: impl AsRef<Path>,
-        metadata: &MetaData,
-    ) -> Result<(), VeilError> {
-        let veil_dir = veil_dir.as_ref();
-        let mut file = File::open(&self.package_path)?;
-        let (header, _) = read_package_prefix(&mut file)?;
-        crate::fsutil::create_dir_all_durable(veil_dir)?;
-
-        let expected: BTreeMap<&str, &str> = metadata
-            .files
-            .iter()
-            .map(|entry| (entry.original_name.as_str(), entry.encrypted_name.as_str()))
-            .collect();
-        if expected.len() != metadata.files.len() {
-            return Err(VeilError::InvalidFormat(
-                "元数据包含重复的原始文件路径".to_string(),
-            ));
-        }
-
-        let mut seen = HashSet::new();
-        for _ in 0..header.file_count {
-            let entry = read_file_entry(&mut file)?;
-            let encrypted_name = expected.get(entry.name.as_str()).ok_or_else(|| {
-                VeilError::InvalidFormat(format!("打包条目不在元数据清单中: {}", entry.name))
-            })?;
-            if !seen.insert(entry.name.clone()) {
-                return Err(VeilError::InvalidFormat(format!(
-                    "打包文件包含重复条目: {}",
-                    entry.name
-                )));
+            let mut len = [0; 2];
+            file.read_exact(&mut len)?;
+            let len = u16::from_le_bytes(len) as usize;
+            if len == 0 || len > 128 {
+                return Err(invalid("包内文件名称无效"));
             }
-
-            let relative_path = validate_package_path(encrypted_name)?;
-            copy_entry_data(&mut file, entry.data_size, &veil_dir.join(relative_path))?;
+            let mut name = vec![0; len];
+            file.read_exact(&mut name)?;
+            let name = String::from_utf8(name).map_err(|_| invalid("包内名称不是 UTF-8"))?;
+            validate_name(&name)?;
+            if !names.insert(name.clone()) {
+                return Err(invalid("包内密文名称重复"));
+            }
+            let mut size = [0; 8];
+            file.read_exact(&mut size)?;
+            let size = u64::from_le_bytes(size);
+            if size
+                > file
+                    .metadata()?
+                    .len()
+                    .saturating_sub(file.stream_position()?)
+            {
+                return Err(invalid("包内密文被截断"));
+            }
+            let mut output = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(&name))?;
+            if std::io::copy(&mut Read::by_ref(&mut file).take(size), &mut output)? != size {
+                return Err(invalid("包内密文被截断"));
+            }
+            output.sync_all()?;
         }
-
-        if seen.len() != expected.len() {
-            return Err(VeilError::InvalidFormat(
-                "打包文件缺少元数据中声明的文件".to_string(),
-            ));
+        let mut tail = [0; 1];
+        if file.read(&mut tail)? != 0 {
+            return Err(invalid("打包文件存在多余数据"));
         }
-
-        Ok(())
+        let mut database = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(database::CONTAINER_DB))?;
+        database.write_all(&bytes)?;
+        database.sync_all()?;
+        crate::fsutil::sync_directory(directory)?;
+        Ok(bytes)
     }
 }
-
-/// 读取打包文件头部和加密元数据。
-fn read_package_prefix(file: &mut File) -> Result<(VeilPackageHeader, Vec<u8>), VeilError> {
-    let mut header_buf = [0u8; 22];
-    file.read_exact(&mut header_buf)?;
-    let header = VeilPackageHeader::from_bytes(&header_buf)?;
-
-    let metadata_size = usize::try_from(header.metadata_size)
-        .map_err(|_| VeilError::InvalidFormat("元数据长度超出平台限制".to_string()))?;
-    ensure_remaining_length(file, header.metadata_size as u64)?;
-    let mut metadata = vec![0u8; metadata_size];
-    file.read_exact(&mut metadata)?;
-    Ok((header, metadata))
+fn read_header(file: &mut File) -> Result<VeilPackageHeader> {
+    let mut bytes = [0; 22];
+    file.read_exact(&mut bytes)?;
+    VeilPackageHeader::from_bytes(&bytes)
 }
-
-/// 在按声明长度分配缓冲区前，确认文件中确实还有足够字节。
-fn ensure_remaining_length(file: &mut File, required: u64) -> Result<(), VeilError> {
-    let current = file.stream_position()?;
-    let total = file.metadata()?.len();
-    let remaining = total.saturating_sub(current);
-    if required > remaining {
-        return Err(VeilError::InvalidFormat(format!(
-            "声明长度超过剩余文件大小: 需要 {} 字节，实际只有 {} 字节",
-            required, remaining
-        )));
+fn validate_name(name: &str) -> Result<()> {
+    let base = name
+        .strip_suffix(".enc")
+        .ok_or_else(|| invalid("仅允许密文条目"))?;
+    let mut parts = base.split('_');
+    if !parts.next().is_some_and(crate::metadata::is_uuid_v4)
+        || !parts.next().is_some_and(crate::metadata::is_uuid_v4)
+        || parts.next().is_some()
+    {
+        return Err(invalid("密文名称不符合新格式"));
     }
     Ok(())
-}
-
-/// 读取一个变长文件条目头。
-fn read_file_entry(file: &mut File) -> Result<FileEntryHeader, VeilError> {
-    let mut name_len_buf = [0u8; 2];
-    file.read_exact(&mut name_len_buf)?;
-    let name_len = u16::from_le_bytes(name_len_buf) as usize;
-    let mut entry_buf = vec![0u8; 2 + name_len + 8];
-    entry_buf[..2].copy_from_slice(&name_len_buf);
-    file.read_exact(&mut entry_buf[2..])?;
-    let (entry, _) = FileEntryHeader::from_bytes(&entry_buf)?;
-    Ok(entry)
-}
-
-/// 将指定长度的条目数据原样复制到目标路径。
-fn copy_entry_data(file: &mut File, size: u64, output_path: &Path) -> Result<(), VeilError> {
-    let parent = output_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    crate::fsutil::create_dir_all_durable(parent)?;
-
-    let mut output = crate::temp::create_private_file(output_path)?;
-    let copied = std::io::copy(&mut file.take(size), &mut output)?;
-    if copied != size {
-        let _ = std::fs::remove_file(output_path);
-        return Err(VeilError::InvalidFormat(format!(
-            "打包条目数据不完整: {}",
-            output_path.display()
-        )));
-    }
-    crate::fsutil::sync_file(&output)?;
-    crate::fsutil::sync_directory(parent)?;
-    Ok(())
-}
-
-/// 校验包内名称是安全的相对路径。
-fn validate_package_path(name: &str) -> Result<PathBuf, VeilError> {
-    if name.is_empty() {
-        return Err(VeilError::InvalidFormat("打包条目路径不能为空".to_string()));
-    }
-
-    let mut output = PathBuf::new();
-    for component in Path::new(name).components() {
-        match component {
-            Component::Normal(part) => output.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(VeilError::InvalidFormat(format!(
-                    "打包条目包含不安全路径: {}",
-                    name
-                )));
-            }
-        }
-    }
-
-    if output.as_os_str().is_empty() {
-        return Err(VeilError::InvalidFormat("打包条目路径不能为空".to_string()));
-    }
-    Ok(output)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// 验证包内路径拒绝绝对路径和目录穿越。
-    #[test]
-    fn rejects_unsafe_package_paths() {
-        assert!(validate_package_path("dir/file.txt").is_ok());
-        assert!(validate_package_path("../escape.txt").is_err());
-        assert!(validate_package_path("/absolute.txt").is_err());
-        assert!(validate_package_path("").is_err());
-    }
-
-    /// 验证未知打包版本和头部大小被拒绝。
-    #[test]
-    fn rejects_unknown_header_layout() {
-        let mut bytes = VeilPackageHeader::new(10, 1).to_bytes();
-        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
-        assert!(VeilPackageHeader::from_bytes(&bytes).is_err());
-
-        let mut bytes = VeilPackageHeader::new(10, 1).to_bytes();
-        bytes[10..14].copy_from_slice(&23u32.to_le_bytes());
-        assert!(VeilPackageHeader::from_bytes(&bytes).is_err());
-    }
 }

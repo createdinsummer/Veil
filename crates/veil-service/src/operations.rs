@@ -5,7 +5,7 @@ use crate::veil_ops::{
 };
 use std::path::Path;
 use veil_core::error::VeilError;
-use veil_core::metadata::{FileEntry, MetaData, MetaHeader};
+use veil_core::metadata::{FileEntry, MetaData};
 use veil_core::version::VersionSnapshot;
 
 /// 单次容器操作；密码由调用方保管，仅在调用期间借用。
@@ -20,8 +20,17 @@ pub enum ContainerOperation<'a> {
     ReadMetadataSnapshot {
         password: &'a str,
     },
-    ReadHeader,
     ListFiles {
+        password: &'a str,
+    },
+    CreateDirectory {
+        path: &'a str,
+        password: &'a str,
+    },
+    ListChildren {
+        parent: &'a str,
+        offset: u32,
+        limit: u32,
         password: &'a str,
     },
     PathKind {
@@ -72,8 +81,9 @@ pub enum ContainerOperationResult {
     DiskUsage(u64),
     Metadata(MetaData),
     MetadataSnapshot(MetaData, Vec<u8>),
-    Header(MetaHeader),
     Files(Vec<FileEntry>),
+    Nodes(Vec<crate::storage::container::Node>),
+    DirectoryCreated(String),
     PathKind(ContainerPathKind),
     Added(Vec<String>),
     AddedFile(String),
@@ -119,8 +129,16 @@ pub(crate) fn execute(
             let (meta, bytes) = manager.read_meta_snapshot(password)?;
             Out::MetadataSnapshot(meta, bytes)
         }
-        Op::ReadHeader => Out::Header(manager.read_meta_header()?),
         Op::ListFiles { password } => Out::Files(manager.list_files(password)?),
+        Op::CreateDirectory { path, password } => {
+            Out::DirectoryCreated(manager.create_directory(path, password)?)
+        }
+        Op::ListChildren {
+            parent,
+            offset,
+            limit,
+            password,
+        } => Out::Nodes(manager.list_children(parent, offset, limit, password)?),
         Op::PathKind { path, password } => Out::PathKind(manager.path_kind(path, password)?),
         Op::AddFiles { files, password } => Out::Added(manager.add_files(files, password)?),
         Op::AddFile { source, password } => Out::AddedFile(manager.add_file(source, password)?),
@@ -151,12 +169,11 @@ pub(crate) fn execute(
             Out::Done
         }
         Op::Pack { output, password } => {
-            let (metadata, bytes) = manager.read_meta_snapshot(password)?;
-            crate::package::VeilPacker::new(output)
+            let count = crate::package::VeilPacker::new(output)
                 .without_overwrite()
-                .pack(&manager.veil_dir, &metadata, &bytes)?;
+                .pack_container(manager, password)?;
             Out::Packed {
-                file_count: metadata.files.len(),
+                file_count: count,
                 size: std::fs::metadata(output)?.len(),
             }
         }

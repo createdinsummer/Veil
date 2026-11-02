@@ -1,6 +1,6 @@
 //! Veil 子命令实现及命令层公共辅助函数。
 //!
-//! 本模块把全局配置解析、密码输入、链接路径生成和提示展示组合到各子命令中。
+//! 本模块通过 service 查询本机登记，并组合密码输入、链接和提示展示。
 //! 命令实现负责用户交互与命令适配，容器操作逐步迁移到 `veil-service`。
 
 pub mod add;
@@ -93,13 +93,12 @@ fn map_workflow_error(error: veil_service::workflow::WorkflowError) -> crate::er
 /// 所有需要选择已有 Veil 的命令都必须经过这里。
 ///
 /// 普通命令支持显式 `.veil-link` 路径、唯一 Veil 名称和唯一 `veil_id`。`veil_dir`
-/// 仅由 `veil link` 用于恢复链接。无论输入形式如何，返回前都会读取
-/// `.veil-info` 确认真实 `veil_id`。
+/// 也可用于已登记容器的定位。容器操作解锁数据库后校验真实 `veil_id`。
 ///
 /// 从配置缓存恢复链接后会展示恢复提示。
 ///
 /// # 错误
-/// 全局配置加载或 [`veil_service::config::GlobalConfig::resolve_veil`] 失败时返回错误。
+/// 全局配置加载或 [`veil_service::config::AppConfig::resolve_veil`] 失败时返回错误。
 pub fn resolve_veil(input: &str) -> Result<ContainerHandle> {
     let resolved = match VeilService::default()
         .execute(ServiceRequest::PrepareContainer { selector: input })
@@ -356,8 +355,7 @@ fn validate_password_confirmation(
 
 /// 拒绝可用于新容器的空密码。
 ///
-/// 旧容器仍可使用空密码打开，以保持对历史数据的兼容；只有创建或修改密码时
-/// 禁止产生新的无密码容器。
+/// 创建、解锁和修改密码均拒绝空密码；不读取旧容器格式。
 fn validate_new_password(password: secrecy::SecretString) -> Result<secrecy::SecretString> {
     use secrecy::ExposeSecret;
 

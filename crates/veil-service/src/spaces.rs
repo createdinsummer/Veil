@@ -1,19 +1,18 @@
-//! 供桌面端使用的空间与容器登记流程。
-use crate::config::GlobalConfig;
-use crate::veil_ops::VeilManager;
-use crate::work::WorkType;
-use crate::workflow::{self, CreateOptions, CreatedContainer, WorkflowError};
+//! 空间与容器登记的客户端视图。
+use crate::{
+    config::AppConfig,
+    error::VeilError,
+    storage::app::AppStore,
+    workflow::{self, CreateOptions, CreatedContainer, WorkflowError},
+};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
-use veil_core::error::VeilError;
-use veil_core::metadata::generate_veil_id;
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceView {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub is_default: bool,
     pub containers: Vec<ContainerSummary>,
 }
 #[derive(Serialize)]
@@ -23,112 +22,45 @@ pub struct ContainerSummary {
     pub name: String,
     pub path: String,
 }
-
-/// 读取现有工作区，并通过容器明文头发现目录中的容器。
 pub(crate) fn list_spaces() -> Result<Vec<SpaceView>, VeilError> {
-    let mut config = GlobalConfig::load()?;
-    config.ensure_default_work()?;
-    let mut spaces = Vec::new();
-    let works = config
-        .work
-        .default
-        .iter()
-        .map(|work| ("default", "默认空间", work))
-        .chain(config.work.custom.iter().map(|(key, work)| {
-            (
-                key.as_str(),
-                match &work.work_type {
-                    WorkType::Custom(name) => name.as_str(),
-                    _ => key.as_str(),
-                },
-                work,
-            )
-        }));
-    for (id, name, work) in works {
-        let root = config.resolve_work_root(work)?;
-        let root = if root.exists() {
-            std::fs::canonicalize(root)?
-        } else {
-            root
-        };
-        let mut containers = Vec::new();
-        let entries = match std::fs::read_dir(&root) {
-            Ok(entries) => Some(entries),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        if let Some(entries) = entries {
-            for entry in entries {
-                let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
-                }
-                let directory = std::fs::canonicalize(entry.path())?;
-                let header = match VeilManager::new(directory.clone()).read_meta_header() {
-                    Ok(header) => header,
-                    Err(_) => continue,
-                };
-                if entry.file_name() != std::ffi::OsStr::new(&header.veil_id) {
-                    continue;
-                }
-                containers.push(ContainerSummary {
-                    id: header.veil_id,
-                    name: header.veil_name,
-                    path: directory.to_string_lossy().into_owned(),
-                });
+    let mut store = AppStore::global()?;
+    let default = store.default_space()?.id;
+    let registrations = store.registrations()?;
+    Ok(store
+        .spaces()?
+        .into_iter()
+        .map(|s| {
+            let path = s.local_path.unwrap_or_default();
+            let containers = registrations
+                .iter()
+                .filter(|r| r.space_id == s.id)
+                .map(|r| ContainerSummary {
+                    id: r.div_id.clone(),
+                    name: r.cached_name.clone(),
+                    path: path.join(&r.div_id).to_string_lossy().into_owned(),
+                })
+                .collect();
+            SpaceView {
+                is_default: s.id == default,
+                id: s.id,
+                name: s.name,
+                path: path.to_string_lossy().into_owned(),
+                containers,
             }
-        }
-        containers.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-        spaces.push(SpaceView {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            path: root.to_string_lossy().into_owned(),
-            containers,
-        });
-    }
-    if spaces.len() > 1 {
-        spaces[1..].sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    }
-    Ok(spaces)
+        })
+        .collect())
 }
-
-/// 创建命名空间以及对应的本机文件夹。
 pub(crate) fn create_space(name: &str) -> Result<(), VeilError> {
-    let name = name.trim();
-    if name.is_empty()
-        || name.chars().count() > 80
-        || name.chars().any(char::is_control)
-        || name == "default"
-        || name == "默认空间"
-    {
+    if name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err(VeilError::WorkError("空间名称无效".into()));
     }
-    let mut config = GlobalConfig::load()?;
-    if config.work.custom.contains_key(name) {
+    let mut store = AppStore::global()?;
+    if store.spaces()?.iter().any(|s| s.name == name) {
         return Err(VeilError::WorkError("空间名称已存在".into()));
     }
-    let relative = PathBuf::from("works").join(generate_veil_id());
-    config.register_custom_work(name.to_owned(), relative, None)?;
-    let root = config.resolve_work_root(
-        config
-            .work
-            .custom
-            .get(name)
-            .ok_or_else(|| VeilError::WorkError("空间登记失败".into()))?,
-    )?;
-    let parent = root
-        .parent()
-        .ok_or_else(|| VeilError::WorkError("空间位置无效".into()))?;
-    crate::fsutil::create_dir_all_durable(parent)?;
-    std::fs::create_dir(&root)?;
-    if let Err(error) = config.save() {
-        let _ = std::fs::remove_dir(&root);
-        return Err(error);
-    }
+    store.create_space(name, None, false)?;
     Ok(())
 }
-
-/// 使用已有工作区和标准创建流程注册容器与链接。
 pub(crate) fn create_container(
     space: &str,
     name: &str,
@@ -141,26 +73,144 @@ pub(crate) fn create_container(
     {
         return Err(WorkflowError::InvalidName);
     }
-    let link = GlobalConfig::config_path()?
+    let link = AppConfig::config_path()?
         .parent()
-        .ok_or_else(|| VeilError::ConfigError("配置目录无效".into()))?
+        .unwrap()
         .join("links")
-        .join(format!("{}.veil-link", generate_veil_id()));
-    let link = link
-        .to_str()
-        .ok_or_else(|| VeilError::WorkError("链接路径不是有效的 UTF-8".into()))?;
-    let work_name = if space == "default" {
-        None
-    } else {
-        Some(space)
-    };
+        .join(format!("{}.veil-link", crate::storage::id()));
     let plan = workflow::prepare_create(CreateOptions {
         target: name,
-        link_output: Some(link),
-        work_name,
-        work_root: None::<&Path>,
+        link_output: link.to_str(),
+        work_name: Some(space),
+        work_root: None,
         dedicated: false,
         portable: false,
     })?;
     workflow::commit_create(plan, password)
+}
+
+/// 同设备原子移动；意图保存在本机库，进程中断后可用同一请求恢复登记。
+/// 跨文件系统由系统明确拒绝，调用方可使用一致打包和独立导入。
+pub fn move_container(identity: &str, target_space: &str, password: &str) -> Result<(), VeilError> {
+    use crate::storage::{container::ContainerDb, invalid, json, now};
+    use rusqlite::{TransactionBehavior, params};
+    let mut store = AppStore::global()?;
+    let registration = store
+        .registrations()?
+        .into_iter()
+        .find(|r| r.div_id == identity)
+        .ok_or_else(|| invalid("容器尚未登记"))?;
+    let spaces = store.spaces()?;
+    let source_space = spaces
+        .iter()
+        .find(|s| s.id == registration.space_id)
+        .ok_or_else(|| invalid("原空间不存在"))?;
+    let target = spaces
+        .iter()
+        .find(|s| s.id == target_space)
+        .ok_or_else(|| invalid("目标空间不存在"))?;
+    if source_space.id == target.id {
+        return Ok(());
+    }
+    let source = source_space
+        .local_path
+        .as_ref()
+        .ok_or_else(|| invalid("原空间未绑定"))?
+        .join(identity);
+    let destination = target
+        .local_path
+        .as_ref()
+        .ok_or_else(|| invalid("目标空间未绑定"))?
+        .join(identity);
+    let mut state: serde_json::Value = store
+        .record("div_state", identity)?
+        .ok_or_else(|| invalid("请先解锁登记容器身份"))?;
+    if let Some(movement) = state.get("movement") {
+        if movement["source"] != source.to_string_lossy().as_ref()
+            || movement["destination"] != destination.to_string_lossy().as_ref()
+        {
+            return Err(invalid("存在待恢复的移动，请先恢复原移动请求"));
+        }
+    }
+    let actual = match (source.is_dir(), destination.is_dir()) {
+        (true, false) => &source,
+        (false, true) if state.get("movement").is_some() => &destination,
+        (true, true) => return Err(VeilError::VeilIdConflict("原位置与目标位置同时存在".into())),
+        _ => return Err(invalid("无法确认容器实际位置")),
+    };
+    let mut db = ContainerDb::open(actual, password, Some(identity))?;
+    let container_tx = db
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let count: i64 =
+        container_tx.query_row("SELECT count(*) FROM operation_locks", [], |r| r.get(0))?;
+    if count != 0 {
+        return Err(invalid("容器存在文件操作，请结束操作或清理失效锁后再移动"));
+    }
+    let app_tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: String = app_tx.query_row(
+        "SELECT space_id FROM space_div WHERE div_id=?1",
+        [identity],
+        |r| r.get(0),
+    )?;
+    if current != source_space.id {
+        return Err(invalid("容器归属已变化"));
+    }
+    if target.storage_mode == "dedicated"
+        && app_tx.query_row(
+            "SELECT count(*) FROM space_div WHERE space_id=?1",
+            [target_space],
+            |r| r.get::<_, i64>(0),
+        )? > 0
+    {
+        return Err(invalid("专属空间已有容器"));
+    }
+    state["movement"] = serde_json::json!({"source":source,"destination":destination});
+    app_tx.execute("UPDATE local_record SET value_json=?1,updated_at=?2 WHERE record_type='div_state' AND record_key=?3",params![json(&state)?,now(),identity])?;
+    app_tx.commit()?;
+    if actual == &source {
+        if let Err(error) = crate::fsutil::rename_no_replace(&source, &destination) {
+            if source.is_dir() && !destination.exists() {
+                state.as_object_mut().unwrap().remove("movement");
+                store.set_record("div_state", identity, &state)?;
+            }
+            return Err(error.into());
+        }
+        crate::fsutil::sync_directory(source.parent().unwrap())?;
+        crate::fsutil::sync_directory(destination.parent().unwrap())?;
+    }
+    #[cfg(feature = "fault-injection")]
+    veil_core::fsutil::fault_point("after_container_move");
+    // 无业务更新的容器事务在移动后结束；不清空其他进程的锁。
+    container_tx.commit()?;
+    drop(db);
+    ContainerDb::open(&destination, password, Some(identity))?;
+    let tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if target.storage_mode == "dedicated"
+        && tx.query_row(
+            "SELECT count(*) FROM space_div WHERE space_id=?1",
+            [target_space],
+            |r| r.get::<_, i64>(0),
+        )? > 0
+    {
+        return Err(invalid("目标专属空间发生登记竞争，请恢复移动"));
+    }
+    tx.execute(
+        "UPDATE space_div SET space_id=?1,updated_at=?2 WHERE div_id=?3 AND space_id=?4",
+        params![target_space, now(), identity, source_space.id],
+    )?;
+    state.as_object_mut().unwrap().remove("movement");
+    tx.execute("UPDATE local_record SET value_json=?1,updated_at=?2 WHERE record_type='div_state' AND record_key=?3",params![json(&state)?,now(),identity])?;
+    let recent = crate::storage::app::RecentContainer {
+        id: identity.into(),
+        name: registration.cached_name,
+        path: destination.to_string_lossy().into_owned(),
+    };
+    tx.execute("INSERT INTO local_record VALUES ('recent_div',?1,?2,?3) ON CONFLICT(record_type,record_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![identity,json(&recent)?,now()])?;
+    tx.commit()?;
+    Ok(())
 }

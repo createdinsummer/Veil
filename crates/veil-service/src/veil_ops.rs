@@ -1,21 +1,20 @@
-//! Veil 的高层读写操作。
-//!
-//! [`VeilManager`] 把 `.veil-info` 与同目录下的 `.enc` 文件组合成一个 Veil。
-//! 密码和 salt 经 Argon2id 派生出密码保护密钥，只用于加密元数据 JSONC；文件内容
-//! 使用元数据中的随机数据主密钥按固定大小分块流式加密。两者均使用
-//! ChaCha20-Poly1305，文件各自保存独立 base nonce。`.veil-info` 中记录对应的
-//! 算法 ID，具体值由 [`MetaHeader`] 持久化。
-
-use crate::error::VeilError;
-use crate::file_ops::{self, DATA_KEY_LEN};
-use crate::kdf;
-use crate::locking::{self, LockOptions};
-use crate::metadata::{AlgorithmId, FileEntry, MetaData, MetaHeader, VEIL_INFO_FILE};
+//! SQLCipher 容器操作：文件内容留在磁盘，数据库是唯一权威清单。
+use crate::error::{Result, VeilError};
+use crate::file_ops;
+use crate::metadata::{FileEntry, MetaData};
+use crate::storage::{
+    container::{self, ContainerDb, DataKey, Node},
+    id, invalid, json,
+    locks::{self, LeaseGuard, LockManager, LockMode, LockOptions},
+    now,
+};
 use crate::version::{VersionRelation, VersionSnapshot, compare_version_history};
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-use veil_core::crypto::{decrypt_chacha20poly1305, encrypt_chacha20poly1305};
+use rusqlite::{TransactionBehavior, params};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 use zeroize::Zeroizing;
 
 /// 一次批量添加中的单个源文件和 Veil 内目标路径。
@@ -74,15 +73,6 @@ pub enum MovedPathKind {
     Directory,
 }
 
-/// 对单个 Veil 执行初始化和文件操作。
-pub struct VeilManager {
-    /// 包含 `.veil-info` 和 `.enc` 文件的实际 Veil 目录。
-    pub veil_dir: PathBuf,
-    /// 调用方解析出的预期容器 ID；设置后所有元数据访问都会校验该身份。
-    expected_veil_id: Option<String>,
-    lock_options: LockOptions,
-}
-
 /// 容器内路径的类型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContainerPathKind {
@@ -91,1393 +81,972 @@ pub enum ContainerPathKind {
     Missing(String),
 }
 
+#[derive(Clone)]
+pub struct VeilManager {
+    pub veil_dir: PathBuf,
+    expected_veil_id: Option<String>,
+    lock_options: LockOptions,
+}
+struct Pending {
+    spec: AddFileSpec,
+    parent: String,
+    name: String,
+    base: Option<Node>,
+    identity: String,
+    key: DataKey,
+    nonce: [u8; 12],
+    cipher: String,
+    size: u64,
+    base_key: Option<DataKey>,
+    unchanged: bool,
+}
 impl VeilManager {
-    /// 为指定 `veil_dir` 创建 Veil 管理器。
-    ///
-    /// 构造过程只保存路径，不访问文件系统。
     pub fn new(veil_dir: PathBuf) -> Self {
         Self {
             veil_dir,
             expected_veil_id: None,
-            lock_options: LockOptions::default(),
+            lock_options: locks::default_options(),
         }
     }
-
-    /// 创建绑定到指定稳定 ID 的 Veil 管理器。
-    ///
-    /// 后续每次读取或写入元数据都会确认实际 `veil_id` 与预期值一致，避免链接或
-    /// 目录位置变化后误操作其他 Veil。
     pub fn for_veil(veil_dir: PathBuf, veil_id: impl Into<String>) -> Self {
         Self {
             veil_dir,
             expected_veil_id: Some(veil_id.into()),
-            lock_options: LockOptions::default(),
+            lock_options: locks::default_options(),
         }
     }
-
-    /// 设置后续操作的锁等待超时和取消标志。
     pub fn with_lock_options(mut self, options: LockOptions) -> Self {
         self.lock_options = options;
         self
     }
-
-    /// 校验元数据身份是否与解析阶段得到的稳定 ID 一致。
-    fn verify_veil_id(&self, actual: &str) -> Result<(), VeilError> {
-        let Some(expected) = self.expected_veil_id.as_deref() else {
+    pub(crate) fn open_db(&self, password: &str) -> Result<ContainerDb> {
+        let db = ContainerDb::open(&self.veil_dir, password, self.expected_veil_id.as_deref())?;
+        // 展示缓存更新失败不影响独立容器解锁，也不能替代容器业务状态。
+        let _ = self.refresh_local_cache(&db);
+        Ok(db)
+    }
+    fn refresh_local_cache(&self, db: &ContainerDb) -> Result<()> {
+        use crate::storage::app::{AppStore, RecentContainer, app_data_dir};
+        let directory = app_data_dir()?;
+        if !directory.join(veil_core::database::APP_DB).try_exists()? {
+            return Ok(());
+        }
+        let mut store = AppStore::open(&directory)?;
+        let (identity, name, created, _) = db.info()?;
+        let Some(registration) = store
+            .registrations()?
+            .into_iter()
+            .find(|r| r.div_id == identity)
+        else {
             return Ok(());
         };
-
-        if expected != actual {
-            return Err(VeilError::VeilIdConflict(format!(
-                "预期容器 ID '{}'，实际读取到 '{}'",
-                expected, actual
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// 为新 Veil 生成稳定 ID 并初始化目录。
-    ///
-    /// # 错误
-    /// 目录创建、密钥派生或元数据写入失败时返回错误。
-    pub fn init_veil(&self, veil_name: &str, password: &str) -> Result<MetaData, VeilError> {
-        self.init_veil_with_id(&crate::metadata::generate_veil_id(), veil_name, password)
-    }
-
-    /// 使用调用方指定的稳定 ID 初始化新 Veil。
-    ///
-    /// 方法创建目录和随机盐/nonce，生成初始元数据，并写入加密的 `.veil-info`。
-    ///
-    /// # 错误
-    /// 目录创建、随机数生成、密钥派生或元数据写入失败时返回错误。
-    pub fn init_veil_with_id(
-        &self,
-        veil_id: &str,
-        veil_name: &str,
-        password: &str,
-    ) -> Result<MetaData, VeilError> {
-        self.verify_veil_id(veil_id)?;
-
-        crate::fsutil::create_dir_all_durable(&self.veil_dir)
-            .map_err(|e| VeilError::WorkError(format!("创建 Veil 目录失败: {}", e)))?;
-        let _maintenance = locking::maintenance(&self.veil_dir, false, &self.lock_options)?;
-        let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-
-        // salt 决定密码保护密钥；每次提交的 nonce 都写入当次明文头部。
-        let salt = generate_random_bytes::<32>();
-        let nonce = generate_random_bytes::<12>();
-
-        let meta_data = MetaData::with_veil_id(veil_id.to_string(), veil_name.to_string());
-
-        let header = MetaHeader::new(
-            salt,
-            nonce,
-            AlgorithmId::ChaCha20Poly1305,
-            meta_data.veil_id.clone(),
-            meta_data.veil_name.clone(),
-            meta_data.created_at.clone(),
-        );
-
-        let master_key = derive_master_key(password, &salt)?;
-
-        self.write_meta(&header, &meta_data, &master_key)?;
-        // 初始化没有可回退的旧快照，目录同步失败时由调用方整体回滚。
-        crate::fsutil::sync_directory(&self.veil_dir)?;
-
-        Ok(meta_data)
-    }
-
-    /// 查询容器内文件或目录，读取前会验证密码。
-    pub fn path_kind(&self, path: &str, password: &str) -> Result<ContainerPathKind, VeilError> {
-        let metadata = self.read_meta(password)?;
-        if path == "." || path == "/" {
-            return Ok(ContainerPathKind::Directory(path.to_string()));
-        }
-        let normalized = normalize_veil_dir(path)?;
-        if metadata.find_file(&normalized).is_some() {
-            return Ok(ContainerPathKind::File(normalized));
-        }
-        let prefix = format!("{normalized}/");
-        if metadata
-            .files
-            .iter()
-            .any(|entry| entry.original_name.starts_with(&prefix))
-        {
-            return Ok(ContainerPathKind::Directory(normalized));
-        }
-        Ok(ContainerPathKind::Missing(normalized))
-    }
-
-    /// 使用密码读取并解密 Veil 元数据。
-    ///
-    /// `.veil-info` 不存在、头部无效、密钥派生失败、密码错误或密文损坏时返回错误。
-    pub fn read_meta(&self, password: &str) -> Result<MetaData, VeilError> {
-        let maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let metadata = self.read_meta_context(password)?.0;
-        drop(config);
-        drop(maintenance);
-        self.try_cleanup(password);
-        Ok(metadata)
-    }
-
-    /// 在同一个配置锁内取得已解密元数据及其对应的密文快照。
-    pub fn read_meta_snapshot(&self, password: &str) -> Result<(MetaData, Vec<u8>), VeilError> {
-        let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let _config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let metadata = self.read_meta_context(password)?.0;
-        let bytes = fs::read(self.veil_dir.join(VEIL_INFO_FILE))?;
-        Ok((metadata, bytes))
-    }
-
-    /// 读取密码上下文，同时返回解密后的元数据、明文头部和零化密码保护密钥。
-    fn read_meta_context(
-        &self,
-        password: &str,
-    ) -> Result<(MetaData, MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
-        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
-        if !meta_path.exists() {
-            return Err(VeilError::InvalidFormat("元数据文件不存在".to_string()));
-        }
-
-        let bytes = fs::read(&meta_path)?;
-        let header = MetaHeader::from_bytes(&bytes)?;
-        self.verify_veil_id(&header.veil_id)?;
-        let master_key = derive_master_key(password, &header.salt)?;
-        let header_len = MetaHeader::header_len(&bytes)?;
-        let encrypted_data = &bytes[header_len..];
-        let decrypted = Zeroizing::new(decrypt_chacha20poly1305(
-            &master_key,
-            encrypted_data,
-            &header.nonce,
-        )?);
-        let meta_data = MetaData::from_jsonc(decrypted.as_slice())?;
-        if meta_data.veil_id != header.veil_id {
+        let registered = store
+            .spaces()?
+            .into_iter()
+            .find(|s| s.id == registration.space_id)
+            .and_then(|s| s.local_path)
+            .ok_or_else(|| invalid("空间未绑定本机目录"))?
+            .join(&identity);
+        let actual = fs::canonicalize(&self.veil_dir)?;
+        if fs::canonicalize(registered)? != actual {
             return Err(VeilError::VeilIdConflict(
-                "元数据明文头与加密正文中的容器 ID 不一致".into(),
+                "本机登记位置与解锁位置不一致".into(),
             ));
         }
-
-        Ok((meta_data, header, master_key))
-    }
-
-    /// 不输入密码，只读取恢复所需的明文身份信息。
-    ///
-    /// # 错误
-    /// `.veil-info` 无法读取或头部格式无效时返回错误。
-    pub fn read_meta_header(&self) -> Result<MetaHeader, VeilError> {
-        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
-        let bytes = fs::read(&meta_path).map_err(VeilError::Io)?;
-        let header = MetaHeader::from_bytes(&bytes)?;
-        self.verify_veil_id(&header.veil_id)?;
-        Ok(header)
-    }
-
-    /// 编码、加密并原子替换 `.veil-info`。
-    ///
-    /// # 错误
-    /// 头部或 JSONC 序列化、内容加密、临时文件写入或重命名失败时返回错误。
-    fn write_meta(
-        &self,
-        header: &MetaHeader,
-        meta_data: &MetaData,
-        master_key: &[u8; 32],
-    ) -> Result<(), VeilError> {
-        self.verify_veil_id(&header.veil_id)?;
-        meta_data.primary_data_key()?;
-        let meta_path = self.veil_dir.join(VEIL_INFO_FILE);
-
-        // 每次元数据提交都使用新的 nonce；同一密码保护密钥下不能重复使用
-        // ChaCha20-Poly1305
-        // nonce，否则会破坏元数据的机密性保证。
-        let mut commit_header = header.clone();
-        commit_header.nonce = generate_random_bytes::<12>();
-        // 名称查找和无密码重建链接读取明文头，名称、创建时间与正文同步。
-        commit_header.veil_name = meta_data.veil_name.clone();
-        commit_header.created_at = meta_data.created_at.clone();
-        let header_bytes = commit_header.to_bytes()?;
-
-        let jsonc_bytes = Zeroizing::new(meta_data.to_jsonc()?);
-        let encrypted =
-            encrypt_chacha20poly1305(master_key, jsonc_bytes.as_slice(), &commit_header.nonce)?;
-
-        // .veil-info 使用“明文 TLV 头部 + 密文 JSONC”的连续布局。
-        let mut file_data = header_bytes;
-        file_data.extend_from_slice(&encrypted);
-
-        crate::fsutil::atomic_write_metadata(&meta_path, &file_data).map_err(|error| {
-            if error.published {
-                VeilError::CommitUncertain(error.error)
-            } else {
-                VeilError::Io(error.error)
-            }
-        })?;
-
-        Ok(())
-    }
-
-    /// 读取元数据、应用调用方修改，再使用原头部参数写回。
-    ///
-    /// 更新闭包仅在内存中的 [`MetaData`] 上执行，持久化由本方法统一完成。
-    ///
-    /// # 错误
-    /// 读取、密钥派生、序列化或写回失败时返回错误。
-    pub fn update_meta(
-        &self,
-        password: &str,
-        update_fn: impl FnOnce(&mut MetaData),
-    ) -> Result<(), VeilError> {
-        let _maintenance = locking::maintenance(&self.veil_dir, false, &self.lock_options)?;
-        let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-        // 先在内存中完成调用方修改；读取上下文时只执行一次密钥派生。
-        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
-
-        update_fn(&mut meta_data);
-
-        self.write_meta(&header, &meta_data, &master_key)?;
-
-        Ok(())
-    }
-
-    /// 加密并添加一个本地文件，目标名称使用源文件名。
-    pub fn add_file(&self, file_path: &Path, password: &str) -> Result<String, VeilError> {
-        let file_name = file_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| VeilError::WorkError("无效的文件名".to_string()))?;
-
-        let mut encrypted_names =
-            self.add_files(&[AddFileSpec::new(file_path, file_name)], password)?;
-
-        Ok(encrypted_names.remove(0))
-    }
-
-    /// 批量加密并添加本地文件。
-    ///
-    /// 方法先验证密码，再把所有新密文写入工作区，最后只提交一次元数据。同一批次
-    /// 或已有元数据中的同名目标会被替换。提交失败时删除本次新增密文；提交成功后
-    /// 删除被替换的旧密文。
-    /// 指定基础版本的条目会在持有文件独占锁期间校验版本链；未指定基础版本的条目
-    /// 直接采用覆盖语义。
-    ///
-    /// # 返回
-    /// 成功时按去重后的输入顺序返回新密文文件名。
-    ///
-    /// # 错误
-    /// 密码错误、目标路径无效、源文件读取、加密、密文写入或元数据提交失败时返回错误。
-    pub fn add_files(
-        &self,
-        files: &[AddFileSpec],
-        password: &str,
-    ) -> Result<Vec<String>, VeilError> {
-        if files.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let namespace = locking::namespace(&self.veil_dir, true, &self.lock_options)?;
-
-        // 同一批次内相同目标路径采用“后者覆盖前者”，避免重复元数据条目。
-        let mut deduplicated = Vec::with_capacity(files.len());
-        let mut positions = HashMap::new();
-        for file in files {
-            let normalized_target = normalize_veil_dir(&file.target)?;
-            let mut spec = AddFileSpec::new(&file.source, normalized_target.clone());
-            spec.base_version = file.base_version.clone();
-            spec.reject_existing = file.reject_existing;
-            if let Some(index) = positions.get(&normalized_target).copied() {
-                deduplicated[index] = spec;
-            } else {
-                positions.insert(normalized_target, deduplicated.len());
-                deduplicated.push(spec);
-            }
-        }
-
-        // 同名创建需要路径锁；使用容器数据密钥保护锁文件名中的路径信息。
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (snapshot, _, _) = self.read_meta_context(password)?;
-        let path_key = Zeroizing::new(blake3::derive_key(
-            "Veil path lock key v1",
-            snapshot.primary_data_key()?,
-        ));
-        drop(snapshot);
-        drop(config);
-        // 文件锁基于稳定 ID，多个路径和文件锁均按稳定顺序获取。
-        let mut targets: Vec<_> = deduplicated
-            .iter()
-            .map(|file| file.target.as_str())
-            .collect();
-        targets.sort_unstable();
-        let mut path_guards = Vec::new();
-        for target in targets {
-            path_guards.push(locking::path(
-                &self.veil_dir,
-                target,
-                &path_key,
-                &self.lock_options,
-            )?);
-        }
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (meta_data, _, _) = self.read_meta_context(password)?;
-        let target_ids: HashMap<_, _> = deduplicated
-            .iter()
-            .map(|file| {
-                let id = meta_data
-                    .find_file(&file.target)
-                    .map(|entry| entry.file_id.clone())
-                    .unwrap_or_else(crate::metadata::generate_file_id);
-                (file.target.clone(), id)
-            })
-            .collect();
-        let mut ids: Vec<_> = target_ids.values().cloned().collect();
-        drop(config);
-        ids.sort_unstable();
-        ids.dedup();
-        let mut file_guards = Vec::new();
-        for id in &ids {
-            file_guards.push(locking::file(
-                &self.veil_dir,
-                id,
-                false,
-                &self.lock_options,
-            )?);
-        }
-        #[cfg(test)]
-        crate::fsutil::fault_point("file_locked");
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (meta_data, _, _) = self.read_meta_context(password)?;
-        drop(config);
-        for file in &deduplicated {
-            validate_base_version(&meta_data, file)?;
-        }
-
-        let mut written = Vec::new();
-        let mut new_entries = Vec::new();
-        let data_key = *meta_data.primary_data_key()?;
-        let transaction = (|| -> Result<(), VeilError> {
-            for file in &deduplicated {
-                let existing = meta_data.find_file(&file.target);
-                let file_id = target_ids[&file.target].clone();
-                let encrypted_name = format!("{}.enc", generate_random_id());
-                let file_nonce = file_ops::generate_base_nonce();
-                let encrypted_path = self.veil_dir.join(&encrypted_name);
-                let file_size = file_ops::encrypt_file_streaming(
-                    &file.source,
-                    &encrypted_path,
-                    &data_key,
-                    &file_nonce,
-                )?;
-                written.push(encrypted_name.clone());
-                let mut entry = FileEntry::with_file_id(
-                    file_id,
-                    encrypted_name,
-                    file.target.clone(),
-                    file_size,
-                    file_nonce,
-                );
-                if let Some(existing) = existing {
-                    entry.version_history = existing.version_history.clone();
-                    entry.advance_version();
-                }
-                new_entries.push(entry);
-            }
-
-            // 新密文的目录项必须先持久化，之后写出的 .veil-info 才能安全引用它们。
-            crate::fsutil::sync_directory(&self.veil_dir)?;
-            #[cfg(test)]
-            crate::fsutil::fault_point("cipher_written");
-
-            let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-            let (mut latest, header, master_key) = self.read_meta_context(password)?;
-            for file in &deduplicated {
-                validate_base_version(&latest, file)?;
-            }
-            for entry in &new_entries {
-                latest
-                    .files
-                    .retain(|existing| existing.original_name != entry.original_name);
-                latest.add_file(entry.clone());
-            }
-
-            self.write_meta(&header, &latest, &master_key)?;
-
-            Ok(())
-        })();
-
-        if let Err(error) = transaction {
-            if !matches!(error, VeilError::CommitUncertain(_)) {
-                for encrypted_name in written {
-                    let _ = fs::remove_file(self.veil_dir.join(encrypted_name));
-                }
-            }
-            return Err(error);
-        }
-
-        // 只有当前元数据目录项再次同步成功后，才删除失去引用的旧密文。
-        drop(file_guards);
-        drop(path_guards);
-        drop(namespace);
-        drop(maintenance);
-        self.try_cleanup(password);
-
-        Ok(new_entries
-            .into_iter()
-            .map(|entry| entry.encrypted_name)
-            .collect())
-    }
-
-    /// 解密指定原始路径的文件并写入输出位置。
-    ///
-    /// # 错误
-    /// 元数据读取、文件查找、密文读取、密钥派生、解密或输出写入失败时返回错误。
-    pub fn extract_file(
-        &self,
-        original_name: &str,
-        output_path: &Path,
-        password: &str,
-    ) -> Result<(), VeilError> {
-        self.extract_file_with_version(original_name, output_path, password)
-            .map(|_| ())
-    }
-
-    /// 导出文件，并返回与导出内容一致的基础版本信息。
-    pub fn extract_file_with_version(
-        &self,
-        original_name: &str,
-        output_path: &Path,
-        password: &str,
-    ) -> Result<VersionSnapshot, VeilError> {
-        self.extract_file_inner(original_name, output_path, password, true)
-    }
-
-    /// 导出文件并拒绝覆盖已存在的目标。
-    pub fn extract_file_without_overwrite(
-        &self,
-        original_name: &str,
-        output_path: &Path,
-        password: &str,
-    ) -> Result<VersionSnapshot, VeilError> {
-        self.extract_file_inner(original_name, output_path, password, false)
-    }
-
-    fn extract_file_inner(
-        &self,
-        original_name: &str,
-        output_path: &Path,
-        password: &str,
-        overwrite: bool,
-    ) -> Result<VersionSnapshot, VeilError> {
-        let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (snapshot, _, _) = self.read_meta_context(password)?;
-        let file_id = snapshot
-            .find_file(original_name)
-            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?
-            .file_id
-            .clone();
-        drop(config);
-        let _file = locking::file(&self.veil_dir, &file_id, true, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (meta_data, _header, _master_key) = self.read_meta_context(password)?;
-        drop(config);
-
-        let entry = meta_data
-            .find_file(original_name)
-            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?;
-        if entry.file_id != file_id {
-            return Err(VeilError::WorkError("文件在读取期间被替换，请重试".into()));
-        }
-
-        // 元数据只暴露原始名称，实际读取必须通过条目保存的加密文件名。
-        let encrypted_path = self.veil_dir.join(&entry.encrypted_name);
-        let key_index = file_ops::detect_key_index(
-            &encrypted_path,
-            &meta_data.data_keys,
-            &entry.nonce,
-            entry.size,
+        store.register(&registration.space_id, &identity, &name)?;
+        store.cache_container_identity(&identity, &container::timestamp(created)?)?;
+        store.set_record(
+            "recent_div",
+            &identity,
+            &RecentContainer {
+                id: identity.clone(),
+                name,
+                path: actual.to_string_lossy().into_owned(),
+            },
         )?;
-        if overwrite {
-            file_ops::decrypt_file_streaming(
-                &encrypted_path,
-                output_path,
-                &meta_data.data_keys[key_index],
-                &entry.nonce,
-                entry.size,
-            )?;
-        } else {
-            file_ops::decrypt_file_streaming_without_overwrite(
-                &encrypted_path,
-                output_path,
-                &meta_data.data_keys[key_index],
-                &entry.nonce,
-                entry.size,
-            )?;
+        Ok(())
+    }
+    fn lock_manager(&self, password: &str) -> LockManager {
+        LockManager::new(&self.veil_dir, password).with_options(self.lock_options.clone())
+    }
+    pub fn init_veil(&self, name: &str, password: &str) -> Result<MetaData> {
+        self.init_veil_with_id(&crate::metadata::generate_veil_id(), name, password)
+    }
+    pub fn init_veil_with_id(
+        &self,
+        identity: &str,
+        name: &str,
+        password: &str,
+    ) -> Result<MetaData> {
+        if self
+            .expected_veil_id
+            .as_deref()
+            .is_some_and(|e| e != identity)
+        {
+            return Err(VeilError::VeilIdConflict("初始化身份不一致".into()));
         }
-
-        Ok(VersionSnapshot {
-            veil_id: meta_data.veil_id.clone(),
-            file_id: entry.file_id.clone(),
-            version_history: entry.version_history.clone(),
+        ContainerDb::create(&self.veil_dir, identity, name, password)?.metadata()
+    }
+    pub fn read_meta(&self, password: &str) -> Result<MetaData> {
+        let db = self.open_db(password)?;
+        // 单个读事务保证目录树、文件引用、密钥集合属于同一个快照。
+        db.conn.execute_batch("BEGIN DEFERRED")?;
+        let result = db.metadata();
+        db.conn.execute_batch("ROLLBACK")?;
+        result
+    }
+    pub fn read_meta_snapshot(&self, password: &str) -> Result<(MetaData, Vec<u8>)> {
+        let temporary = tempfile::TempDir::new()?;
+        let count = self.snapshot_to(temporary.path(), password)?;
+        let metadata =
+            ContainerDb::open(temporary.path(), password, self.expected_veil_id.as_deref())?
+                .metadata()?;
+        if count != metadata.files.len() {
+            return Err(invalid("快照文件数量不一致"));
+        }
+        Ok((
+            metadata,
+            fs::read(temporary.path().join(veil_core::database::CONTAINER_DB))?,
+        ))
+    }
+    pub fn update_meta<F: FnOnce(&mut MetaData)>(&self, password: &str, update: F) -> Result<()> {
+        let mut metadata = self.read_meta(password)?;
+        let old = metadata.clone();
+        update(&mut metadata);
+        if metadata.veil_id != old.veil_id
+            || metadata.created_at != old.created_at
+            || metadata.files.len() != old.files.len()
+            || metadata.data_keys != old.data_keys
+            || metadata
+                .files
+                .iter()
+                .zip(&old.files)
+                .any(|(a, b)| serde_json::to_string(a).ok() != serde_json::to_string(b).ok())
+        {
+            return Err(invalid("仅允许通过此入口修改容器名称"));
+        }
+        self.rename_container(&metadata.veil_name, password)
+    }
+    pub fn rename_container(&self, name: &str, password: &str) -> Result<()> {
+        if name.trim().is_empty() {
+            return Err(invalid("名称不能为空"));
+        }
+        let db = self.open_db(password)?;
+        db.conn
+            .execute("UPDATE div_info SET name=?1 WHERE id=1", [name])?;
+        let _ = self.refresh_local_cache(&db);
+        Ok(())
+    }
+    pub fn list_files(&self, password: &str) -> Result<Vec<FileEntry>> {
+        Ok(self.read_meta(password)?.files.clone())
+    }
+    pub fn list_children(
+        &self,
+        parent: &str,
+        offset: u32,
+        limit: u32,
+        password: &str,
+    ) -> Result<Vec<Node>> {
+        self.open_db(password)?.children(parent, offset, limit)
+    }
+    pub fn create_directory(&self, path: &str, password: &str) -> Result<String> {
+        let path = normalize_veil_dir(path)?;
+        let mut db = self.open_db(password)?;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let node = container::ensure_directory(&tx, &path)?;
+        tx.commit()?;
+        Ok(node.id)
+    }
+    pub fn path_kind(&self, path: &str, password: &str) -> Result<ContainerPathKind> {
+        let db = self.open_db(password)?;
+        let normalized = if path == "." || path == "/" || path.is_empty() {
+            String::new()
+        } else {
+            normalize_veil_dir(path)?
+        };
+        Ok(match db.resolve(&normalized)? {
+            Some(n) if n.kind == "file" => ContainerPathKind::File(normalized),
+            Some(_) => ContainerPathKind::Directory(normalized),
+            None => ContainerPathKind::Missing(normalized),
         })
     }
-
-    /// 持共享锁读取指定文件的明文到内存，并限制最大大小。
-    pub fn read_file_bytes(
-        &self,
-        original_name: &str,
-        password: &str,
-        max_size: u64,
-    ) -> Result<Vec<u8>, VeilError> {
-        let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (snapshot, _, _) = self.read_meta_context(password)?;
-        let file_id = snapshot
-            .find_file(original_name)
-            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?
-            .file_id
-            .clone();
-        drop(config);
-        let _file = locking::file(&self.veil_dir, &file_id, true, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (metadata, _, _) = self.read_meta_context(password)?;
-        drop(config);
-        let entry = metadata
-            .find_file(original_name)
-            .ok_or_else(|| VeilError::FileNotFound(format!("文件 '{}' 不存在", original_name)))?;
-        if entry.file_id != file_id {
-            return Err(VeilError::WorkError("文件在读取期间被替换，请重试".into()));
-        }
-        if entry.size > max_size {
-            return Err(VeilError::WorkError("文件过大，暂不支持预览".into()));
-        }
-        let encrypted_path = self.veil_dir.join(&entry.encrypted_name);
-        let key_index = file_ops::detect_key_index(
-            &encrypted_path,
-            &metadata.data_keys,
-            &entry.nonce,
-            entry.size,
-        )?;
-        let mut bytes = Zeroizing::new(Vec::new());
-        file_ops::decrypt_file_to_writer(
-            &encrypted_path,
-            &mut *bytes,
-            &metadata.data_keys[key_index],
-            &entry.nonce,
-            entry.size,
-        )?;
-        Ok(std::mem::take(&mut *bytes))
+    pub fn add_file(&self, path: &Path, password: &str) -> Result<String> {
+        let target = path
+            .file_name()
+            .and_then(|p| p.to_str())
+            .ok_or_else(|| invalid("源文件名无效"))?;
+        Ok(self
+            .add_files(&[AddFileSpec::new(path, target)], password)?
+            .remove(0))
     }
-
-    /// 删除指定文件。
-    ///
-    /// 这是 [`VeilManager::remove_path`] 的兼容入口，调用方可通过额外参数
-    /// 获得文件或目录类型。
-    pub fn remove_file(
-        &self,
-        original_name: &str,
-        password: &str,
-    ) -> Result<RemovedPathKind, VeilError> {
-        self.remove_path(original_name, password)
-    }
-
-    /// 删除文件，或递归删除目录及其全部文件。
-    ///
-    /// 方法先验证密码并提交更新后的元数据，再删除已失去引用的密文。这样提交失败
-    /// 不会破坏原容器；密文清理失败只会留下不可达的孤立文件。
-    ///
-    /// # 错误
-    /// 密码错误、路径无效、目标不存在或元数据提交失败时返回错误。
-    pub fn remove_path(
-        &self,
-        original_name: &str,
-        password: &str,
-    ) -> Result<RemovedPathKind, VeilError> {
-        if matches!(original_name, "." | "/") {
-            return Err(VeilError::WorkError("不能删除容器根目录".to_string()));
-        }
-
-        let normalized = normalize_veil_dir(original_name)?;
-        let maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let namespace = locking::namespace(&self.veil_dir, false, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (snapshot, _, _) = self.read_meta_context(password)?;
-        let prefix = format!("{normalized}/");
-        let mut ids: Vec<_> = snapshot
-            .files
-            .iter()
-            .filter(|entry| {
-                entry.original_name == normalized || entry.original_name.starts_with(&prefix)
-            })
-            .map(|entry| entry.file_id.as_str())
-            .collect();
-        ids.sort_unstable();
-        drop(config);
-        let mut file_guards = Vec::new();
-        for id in ids {
-            file_guards.push(locking::file(
-                &self.veil_dir,
-                id,
-                false,
-                &self.lock_options,
-            )?);
-        }
-        let config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
-        let exact_file = meta_data.find_file(&normalized).cloned();
-        let directory_prefix = format!("{normalized}/");
-        let has_children = meta_data
-            .files
-            .iter()
-            .any(|entry| entry.original_name.starts_with(&directory_prefix));
-
-        if exact_file.is_none() && !has_children {
-            return Err(VeilError::FileNotFound(format!(
-                "文件或目录 '{}' 不存在",
-                normalized
-            )));
-        }
-
-        let kind = if has_children {
-            RemovedPathKind::Directory
-        } else {
-            RemovedPathKind::File
-        };
-
-        meta_data.files.retain(|entry| {
-            entry.original_name != normalized && !entry.original_name.starts_with(&directory_prefix)
-        });
-        self.write_meta(&header, &meta_data, &master_key)?;
-        drop(config);
-        drop(file_guards);
-        drop(namespace);
-        drop(maintenance);
-        self.try_cleanup(password);
-
-        Ok(kind)
-    }
-
-    /// 使用密码读取并返回元数据中的所有文件条目。
-    ///
-    /// # 错误
-    /// 元数据无法读取或密码错误时返回错误。
-    pub fn list_files(&self, password: &str) -> Result<Vec<FileEntry>, VeilError> {
-        let meta_data = self.read_meta(password)?;
-        Ok(meta_data.files.clone())
-    }
-
-    /// 只修改密码保护层，不重新加密文件内容。
-    ///
-    /// 数据主密钥保持不变，因此所有 `.enc` 文件无需改动；本方法只生成新的 salt、
-    /// 新密码派生密钥和新的元数据 nonce，并原子替换 `.veil-info`。
-    pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<(), VeilError> {
-        if new_password.is_empty() {
-            return Err(VeilError::WorkError("新密码不能为空".to_string()));
-        }
-
-        let _maintenance = locking::maintenance(&self.veil_dir, false, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (meta_data, old_header, _) = self.read_meta_context(old_password)?;
-        drop(config);
-        let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
-        let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-        self.write_meta(&new_header, &meta_data, &new_master_key)?;
-        Ok(())
-    }
-
-    /// 修改密码并轮换数据主密钥，逐个重新加密文件。
-    ///
-    /// 操作开始前先把“新数据密钥、旧数据密钥”同时写入元数据。每个文件完成迁移后
-    /// 各自提交一次元数据，因此进程被终止时只会出现明确的旧文件或新文件，而不会
-    /// 存在无法判断使用哪把数据密钥的文件。全部文件迁移完成后丢弃旧数据密钥。
-    pub fn change_password_full(
-        &self,
-        old_password: &str,
-        new_password: &str,
-    ) -> Result<(), VeilError> {
-        if new_password.is_empty() {
-            return Err(VeilError::WorkError("新密码不能为空".to_string()));
-        }
-
-        let _maintenance = locking::maintenance(&self.veil_dir, false, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (mut meta_data, old_header, old_master_key) = self.read_meta_context(old_password)?;
-        drop(config);
-
-        // 已经处于双密钥状态时视为继续未完成的迁移，不生成第三把密钥。
-        if meta_data.data_keys.len() == 1 {
-            let old_data_key = meta_data.data_keys[0];
-            let new_data_key = generate_random_bytes::<DATA_KEY_LEN>();
-            meta_data.data_keys = vec![new_data_key, old_data_key];
-        } else if meta_data.data_keys.len() != 2 {
-            return Err(VeilError::InvalidFormat("数据主密钥槽位无效".to_string()));
-        }
-
-        // 先让双密钥状态成为可恢复的提交点。文件内容读写统一交给 file_ops，
-        // veil_ops 只负责元数据事务和迁移顺序。
-        {
-            let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-            self.write_meta(&old_header, &meta_data, &old_master_key)?;
-        }
-
-        let active_data_key = meta_data.data_keys[0];
-        let file_count = meta_data.files.len();
-
-        for index in 0..file_count {
-            let file_entry = meta_data.files[index].clone();
-            let _file = locking::file(
-                &self.veil_dir,
-                &file_entry.file_id,
-                false,
-                &self.lock_options,
-            )?;
-            let encrypted_path = self.veil_dir.join(&file_entry.encrypted_name);
-            let key_index = file_ops::detect_key_index(
-                &encrypted_path,
-                &meta_data.data_keys,
-                &file_entry.nonce,
-                file_entry.size,
-            )?;
-
-            // 已经使用当前数据密钥的文件无需再次迁移。
-            if key_index == 0 {
-                continue;
+    pub fn add_files(&self, files: &[AddFileSpec], password: &str) -> Result<Vec<String>> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("写入文件");
+        let mut db = self.open_db(password)?;
+        let veil_id = db.info()?.0;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key_ring = container::keys(&tx)?;
+        let key = key_ring
+            .clone()
+            .into_iter()
+            .find(|k| k.status == "active")
+            .unwrap();
+        let mut targets = HashSet::new();
+        let mut pending = Vec::new();
+        for spec in files {
+            let target = normalize_veil_dir(&spec.target)?;
+            if !targets.insert(target.clone()) {
+                return Err(invalid("批量目标重复"));
             }
-
-            let new_nonce = file_ops::generate_base_nonce();
-            let new_encrypted_name = format!("{}.enc", generate_random_id());
-            let new_encrypted_path = self.veil_dir.join(&new_encrypted_name);
-            file_ops::rewrite_file_streaming(
-                &meta_data.data_keys[1],
-                &active_data_key,
-                &encrypted_path,
-                &new_encrypted_path,
-                &file_entry.nonce,
-                &new_nonce,
-                file_entry.size,
-            )?;
-            crate::fsutil::sync_directory(&self.veil_dir)?;
-
-            let mut rewritten_entry = file_entry;
-            rewritten_entry.encrypted_name = new_encrypted_name;
-            rewritten_entry.nonce = new_nonce;
-            rewritten_entry.encrypted_at = chrono::Utc::now().to_rfc3339();
-            meta_data.files[index] = rewritten_entry;
-
-            let config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-            let result = self.write_meta(&old_header, &meta_data, &old_master_key);
-            drop(config);
-            if let Err(error) = result {
-                if !matches!(error, VeilError::CommitUncertain(_)) {
-                    let _ = fs::remove_file(&new_encrypted_path);
+            if !spec.source.is_file() {
+                return Err(invalid("源路径必须是文件"));
+            }
+            let (parent_path, name) = split_parent(&target);
+            let parent = container::ensure_directory(&tx, parent_path)?;
+            let base = container::resolve(&tx, &target)?;
+            if base.as_ref().is_some_and(|n| n.kind != "file") {
+                return Err(VeilError::FileAlreadyExists(target));
+            }
+            if spec.reject_existing && base.is_some() {
+                return Err(VeilError::FileAlreadyExists(target));
+            }
+            if let Some(version) = &spec.base_version {
+                verify_base(&veil_id, base.as_ref(), version)?;
+            }
+            let identity = base
+                .as_ref()
+                .map(|n| n.id.clone())
+                .unwrap_or_else(crate::metadata::generate_file_id);
+            pending.push(Pending {
+                spec: spec.clone(),
+                parent: parent.id,
+                name: name.into(),
+                base_key: base
+                    .as_ref()
+                    .map(|n| {
+                        key_ring
+                            .iter()
+                            .find(|k| Some(&k.key_id) == n.key_id.as_ref())
+                            .cloned()
+                            .ok_or_else(|| invalid("文件引用未知密钥"))
+                    })
+                    .transpose()?,
+                base,
+                identity,
+                key: key.clone(),
+                nonce: file_ops::generate_base_nonce(),
+                cipher: String::new(),
+                size: 0,
+                unchanged: false,
+            });
+        }
+        tx.commit()?;
+        drop(db);
+        let guard = self.lock_manager(password).acquire(
+            &pending
+                .iter()
+                .map(|p| p.identity.clone())
+                .collect::<Vec<_>>(),
+            LockMode::Write,
+        )?;
+        let credentials = guard.credentials()?;
+        // 申请锁可能等待其他写入完成；先复核快照，避免访问已经失去引用的旧密文。
+        let current = self.open_db(password)?;
+        for p in &pending {
+            if let Some(base) = &p.base {
+                if current.node(&p.identity)?.as_ref() != Some(base) {
+                    return Err(VeilError::VersionConflict("文件在申请锁期间已变化".into()));
                 }
-                return Err(error);
             }
-
-            self.cleanup_work_state(&meta_data);
         }
-
-        // 所有文件都已使用 active_data_key，可以丢弃旧密钥并把密码切换到新值。
-        meta_data.data_keys.truncate(1);
-        let (new_header, new_master_key) = self.build_password_header(&old_header, new_password)?;
-        {
-            let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-            self.write_meta(&new_header, &meta_data, &new_master_key)?;
+        drop(current);
+        for p in &mut pending {
+            let credential = credentials
+                .iter()
+                .find(|c| c.resource_id == p.identity)
+                .unwrap();
+            let staging = self.veil_dir.join(".staging").join(&credential.lock_id);
+            crate::fsutil::create_dir_all_durable(&staging)?;
+            p.cipher = format!("{}_{}.enc", credential.lock_id, id());
+            let staged = staging.join(&p.cipher);
+            fault("before_cipher_write");
+            p.size = file_ops::encrypt_file_streaming(
+                &p.spec.source,
+                &staged,
+                &*p.key.material()?,
+                &p.nonce,
+            )?;
+            fault("after_cipher_write");
+            crate::fsutil::rename_no_replace(&staged, &self.veil_dir.join(&p.cipher))?;
+            crate::fsutil::sync_directory(&self.veil_dir)?;
+            fault("after_cipher_persist");
+            if let Some(base) = &p.base {
+                if base.size == Some(p.size) {
+                    p.unchanged = file_ops::plaintext_digest(
+                        &self.veil_dir.join(base.cipher()?),
+                        &*p.base_key.as_ref().unwrap().material()?,
+                        &base.nonce()?,
+                        p.size,
+                    )? == file_ops::plaintext_digest(
+                        &self.veil_dir.join(&p.cipher),
+                        &*p.key.material()?,
+                        &p.nonce,
+                        p.size,
+                    )?;
+                }
+            }
         }
-        self.cleanup_work_state(&meta_data);
-
-        Ok(())
+        // 重新打开可识别其他进程改密；旧密码连接不能提交较早启动的写入。
+        let mut db = self.open_db(password)?;
+        if db.info()?.0 != veil_id {
+            return Err(VeilError::VeilIdConflict("写入期间容器身份已变化".into()));
+        }
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = container::keys(&tx)?
+            .into_iter()
+            .find(|k| k.status == "active")
+            .unwrap();
+        let credentials = guard.credentials()?;
+        let mut obsolete = Vec::new();
+        for p in &pending {
+            let c = credentials
+                .iter()
+                .find(|c| c.resource_id == p.identity)
+                .unwrap();
+            locks::validate(&tx, c, Some(LockMode::Write))?;
+            if p.key.key_id != active.key_id {
+                return Err(invalid("活动文件密钥已变化，请重试"));
+            }
+            let parent = container::node(&tx, &p.parent)?.ok_or_else(|| invalid("父目录已删除"))?;
+            if parent.kind != "directory" {
+                return Err(invalid("父节点不是目录"));
+            }
+            let current = container::node(&tx, &p.identity)?;
+            let mut versions = if let Some(base) = &p.base {
+                let current = current
+                    .as_ref()
+                    .ok_or_else(|| VeilError::VersionConflict("文件已删除".into()))?;
+                if current.parent_id != base.parent_id || current.name != base.name {
+                    return Err(VeilError::VersionConflict("文件位置已变化".into()));
+                }
+                verify_base(
+                    &veil_id,
+                    Some(current),
+                    &VersionSnapshot {
+                        veil_id: veil_id.clone(),
+                        file_id: base.id.clone(),
+                        version_history: base.versions()?.to_vec(),
+                    },
+                )?;
+                obsolete.push(current.cipher()?.to_owned());
+                current.versions()?.to_vec()
+            } else {
+                if current.is_some() {
+                    return Err(VeilError::VersionConflict("文件身份已被占用".into()));
+                }
+                Vec::new()
+            };
+            if !p.unchanged {
+                versions.push(crate::metadata::generate_version_id());
+            }
+            let size = i64::try_from(p.size).map_err(|_| invalid("文件过大"))?;
+            if let Some(base) = &p.base {
+                let updated = if p.unchanged { base.updated_at } else { now() };
+                tx.execute("UPDATE file_info SET cipher_name=?1,size=?2,key_id=?3,nonce=?4,encrypted_at=?5,updated_at=?8,version_history=?6 WHERE id=?7",params![p.cipher,size,active.key_id,p.nonce.as_slice(),now(),json(&versions)?,p.identity,updated])?;
+            } else {
+                tx.execute(
+                    "INSERT INTO file_info VALUES(?1,?2,?3,'file',?4,?4,?5,?6,?7,?8,?4,?9)",
+                    params![
+                        p.identity,
+                        p.parent,
+                        p.name,
+                        now(),
+                        p.cipher,
+                        size,
+                        active.key_id,
+                        p.nonce.as_slice(),
+                        json(&versions)?
+                    ],
+                )
+                .map_err(|error| match error.sqlite_error() {
+                    Some(code) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => {
+                        VeilError::FileAlreadyExists(p.spec.target.clone())
+                    }
+                    _ => error.into(),
+                })?;
+            }
+            locks::release_in(&tx, c)?;
+        }
+        fault("before_metadata_commit");
+        let commit = tx.commit();
+        drop(db);
+        #[cfg(feature = "fault-injection")]
+        let injected_uncertainty = std::env::var_os("VEIL_TEST_COMMIT_UNCERTAIN").is_some();
+        #[cfg(not(feature = "fault-injection"))]
+        let injected_uncertainty = false;
+        if commit.is_err() || injected_uncertainty {
+            // 提交错误不能等同于回滚；只在重新确认全部引用后返回成功。
+            let confirmed = self.open_db(password).and_then(|db| {
+                for file in &pending {
+                    if db
+                        .node(&file.identity)?
+                        .and_then(|node| node.cipher_name)
+                        .as_deref()
+                        != Some(file.cipher.as_str())
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            });
+            if !matches!(confirmed, Ok(true)) {
+                return Err(VeilError::CommitUncertain(std::io::Error::other(
+                    "无法确认文件写入事务结果，请重新读取容器状态",
+                )));
+            }
+        }
+        fault("after_metadata_commit");
+        drop(guard);
+        let _ = self.cleanup(password);
+        Ok(pending.into_iter().map(|p| p.cipher).collect())
     }
-
-    /// 为改密生成新的 salt、元数据 nonce 和密码派生密钥。
-    fn build_password_header(
+    fn read_locked(
         &self,
-        old_header: &MetaHeader,
-        new_password: &str,
-    ) -> Result<(MetaHeader, Zeroizing<[u8; 32]>), VeilError> {
-        let new_salt = generate_random_bytes::<32>();
-        let new_master_key = derive_master_key(new_password, &new_salt)?;
-        let new_header = MetaHeader::new(
-            new_salt,
-            generate_random_bytes::<12>(),
-            AlgorithmId::ChaCha20Poly1305,
-            old_header.veil_id.clone(),
-            old_header.veil_name.clone(),
-            old_header.created_at.clone(),
-        );
-        Ok((new_header, new_master_key))
+        name: &str,
+        password: &str,
+    ) -> Result<(ContainerDb, Node, LeaseGuard, Zeroizing<[u8; 32]>)> {
+        let db = self.open_db(password)?;
+        let identity = db.info()?.0;
+        let node = db
+            .resolve(name)?
+            .filter(|n| n.kind == "file")
+            .ok_or_else(|| VeilError::FileNotFound(name.into()))?;
+        let guard = self
+            .lock_manager(password)
+            .acquire(std::slice::from_ref(&node.id), LockMode::Read)?;
+        drop(db);
+        let db = self.open_db(password)?;
+        if db.info()?.0 != identity {
+            return Err(VeilError::VeilIdConflict("读取期间容器身份已变化".into()));
+        }
+        for credential in guard.credentials()? {
+            locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
+        }
+        let node = db
+            .node(&node.id)?
+            .ok_or_else(|| VeilError::FileNotFound(name.into()))?;
+        let key = db
+            .keys()?
+            .into_iter()
+            .find(|k| Some(&k.key_id) == node.key_id.as_ref())
+            .ok_or_else(|| invalid("文件引用未知密钥"))?
+            .material()?;
+        Ok((db, node, guard, key))
     }
-
-    /// 修改文件路径的兼容入口。
-    pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<(), VeilError> {
+    pub fn extract_file(&self, name: &str, output: &Path, password: &str) -> Result<()> {
+        self.extract_file_with_version(name, output, password)
+            .map(|_| ())
+    }
+    pub fn extract_file_with_version(
+        &self,
+        name: &str,
+        output: &Path,
+        password: &str,
+    ) -> Result<VersionSnapshot> {
+        self.extract_file_inner(name, output, password, true)
+    }
+    fn extract_file_inner(
+        &self,
+        name: &str,
+        output: &Path,
+        password: &str,
+        overwrite: bool,
+    ) -> Result<VersionSnapshot> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("读取文件");
+        let (db, node, guard, key) = self.read_locked(name, password)?;
+        let version = VersionSnapshot {
+            veil_id: db.info()?.0,
+            file_id: node.id.clone(),
+            version_history: node.versions()?.to_vec(),
+        };
+        drop(db);
+        let parent = output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        crate::fsutil::create_dir_all_durable(parent)?;
+        let temporary = tempfile::NamedTempFile::new_in(parent)?.into_temp_path();
+        file_ops::decrypt_file_streaming(
+            &self.veil_dir.join(node.cipher()?),
+            &temporary,
+            &key,
+            &node.nonce()?,
+            node.size.unwrap(),
+        )?;
+        fault("before_plaintext_publish");
+        let mut fresh = self.open_db(password)?;
+        let tx = fresh.conn.transaction()?;
+        for credential in guard.credentials()? {
+            locks::validate(&tx, &credential, Some(LockMode::Read))?;
+        }
+        if overwrite {
+            temporary
+                .persist(output)
+                .map_err(|e| VeilError::Io(e.error))?;
+        } else {
+            temporary
+                .persist_noclobber(output)
+                .map_err(|e| VeilError::Io(e.error))?;
+        }
+        crate::fsutil::sync_directory(parent)?;
+        tx.commit()?;
+        Ok(version)
+    }
+    pub fn extract_file_without_overwrite(
+        &self,
+        name: &str,
+        output: &Path,
+        password: &str,
+    ) -> Result<()> {
+        self.extract_file_inner(name, output, password, false)
+            .map(|_| ())
+    }
+    pub fn read_file_bytes(&self, name: &str, password: &str, limit: u64) -> Result<Vec<u8>> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("预览文件");
+        let (db, node, guard, key) = self.read_locked(name, password)?;
+        if node.size.unwrap() > limit {
+            return Err(invalid("文件超过预览大小限制"));
+        }
+        let mut bytes = Vec::with_capacity(node.size.unwrap() as usize);
+        file_ops::decrypt_file_to_writer(
+            &self.veil_dir.join(node.cipher()?),
+            &mut bytes,
+            &key,
+            &node.nonce()?,
+            node.size.unwrap(),
+        )?;
+        for c in guard.credentials()? {
+            locks::validate(&db.conn, &c, Some(LockMode::Read))?;
+        }
+        Ok(bytes)
+    }
+    pub fn remove_file(&self, name: &str, password: &str) -> Result<()> {
+        self.remove_path(name, password).map(|_| ())
+    }
+    pub fn remove_path(&self, path: &str, password: &str) -> Result<RemovedPathKind> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("删除路径");
+        let path = normalize_veil_dir(path)?;
+        let db = self.open_db(password)?;
+        let node = db
+            .resolve(&path)?
+            .ok_or_else(|| VeilError::FileNotFound(path.clone()))?;
+        let before = db.subtree(&node.id)?;
+        let files = before
+            .iter()
+            .filter(|n| n.kind == "file")
+            .map(|n| n.id.clone())
+            .collect::<Vec<_>>();
+        drop(db);
+        let guard = self
+            .lock_manager(password)
+            .acquire(&files, LockMode::Write)?;
+        let mut db = self.open_db(password)?;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if container::subtree(&tx, &node.id)? != before {
+            return Err(VeilError::VersionConflict(
+                "删除前子树已变化，请重试".into(),
+            ));
+        }
+        for c in guard.credentials()? {
+            locks::release_in(&tx, &c)?;
+        }
+        tx.execute("WITH RECURSIVE tree(id) AS (SELECT id FROM file_info WHERE id=?1 UNION ALL SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.id) DELETE FROM file_info WHERE id IN (SELECT id FROM tree)",[&node.id])?;
+        tx.commit()?;
+        drop(db);
+        drop(guard);
+        let _ = self.cleanup(password);
+        Ok(if node.kind == "file" {
+            RemovedPathKind::File
+        } else {
+            RemovedPathKind::Directory
+        })
+    }
+    pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<()> {
         self.move_path(from, to, password).map(|_| ())
     }
-
-    /// 移动或重命名文件与目录，并返回最终目标路径。
-    ///
-    /// 如果目标已经表示一个目录，源会被移动到目标目录下并保留最后一级名称。
-    /// 目录移动会同步更新全部子文件路径，但不会移动或重新加密任何密文。
-    ///
-    /// # 错误
-    /// 源不存在、目标冲突、目标位于源目录内部、路径无效、密码错误或元数据写回失败时返回错误。
     pub fn move_path(
         &self,
         from: &str,
         to: &str,
         password: &str,
-    ) -> Result<(MovedPathKind, String), VeilError> {
-        if matches!(from, "." | "/") || matches!(to, "." | "/") {
-            return Err(VeilError::WorkError(
-                "源路径和目标路径都不能是容器根目录".to_string(),
-            ));
+    ) -> Result<(MovedPathKind, String)> {
+        let from = normalize_veil_dir(from)?;
+        let mut to = normalize_veil_dir(to)?;
+        let mut db = self.open_db(password)?;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let n =
+            container::resolve(&tx, &from)?.ok_or_else(|| VeilError::FileNotFound(from.clone()))?;
+        if let Some(destination) = container::resolve(&tx, &to)? {
+            if destination.id == n.id {
+                tx.commit()?;
+                return Ok((
+                    if n.kind == "file" {
+                        MovedPathKind::File
+                    } else {
+                        MovedPathKind::Directory
+                    },
+                    from,
+                ));
+            }
+            if destination.kind != "directory" {
+                return Err(VeilError::FileAlreadyExists(to));
+            }
+            to = format!("{to}/{}", n.name);
         }
-
-        let source = normalize_veil_dir(from)?;
-        let destination = normalize_veil_dir(to)?;
-        let destination_ends_with_separator = to.ends_with('/') || to.ends_with('\\');
-
-        let _maintenance = locking::maintenance(&self.veil_dir, true, &self.lock_options)?;
-        let _namespace = locking::namespace(&self.veil_dir, false, &self.lock_options)?;
-        let config = locking::config(&self.veil_dir, true, &self.lock_options)?;
-        let (snapshot, _, _) = self.read_meta_context(password)?;
-        let source_prefix = format!("{source}/");
-        let mut ids: Vec<_> = snapshot
-            .files
-            .iter()
-            .filter(|entry| {
-                entry.original_name == source || entry.original_name.starts_with(&source_prefix)
-            })
-            .map(|entry| entry.file_id.as_str())
-            .collect();
-        ids.sort_unstable();
-        drop(config);
-        let mut _files = Vec::new();
-        for id in ids {
-            _files.push(locking::file(
-                &self.veil_dir,
-                id,
-                false,
-                &self.lock_options,
-            )?);
+        let (parent, name) = split_parent(&to);
+        let parent = container::resolve(&tx, parent)?
+            .filter(|n| n.kind == "directory")
+            .ok_or_else(|| invalid("目标父目录不存在"))?;
+        let cycle:bool=tx.query_row("WITH RECURSIVE ancestors(id,parent_id) AS (SELECT id,parent_id FROM file_info WHERE id=?1 UNION ALL SELECT f.id,f.parent_id FROM file_info f JOIN ancestors a ON f.id=a.parent_id) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=?2)",params![parent.id,n.id],|r|r.get(0))?;
+        if cycle {
+            return Err(VeilError::WorkError("不能把目录移动到自身或子目录".into()));
         }
-        let _config = locking::config(&self.veil_dir, false, &self.lock_options)?;
-        let (mut meta_data, header, master_key) = self.read_meta_context(password)?;
-        let source_prefix = format!("{source}/");
-        let source_file = meta_data.find_file(&source).cloned();
-        let source_children: Vec<_> = meta_data
-            .files
-            .iter()
-            .filter(|entry| entry.original_name.starts_with(&source_prefix))
-            .cloned()
-            .collect();
-
-        if source_file.is_some() && !source_children.is_empty() {
-            return Err(VeilError::WorkError(format!(
-                "源路径同时匹配文件和目录: {source}"
-            )));
-        }
-
-        let source_kind = if source_file.is_some() {
-            MovedPathKind::File
-        } else if source_children.is_empty() {
-            return Err(VeilError::FileNotFound(format!(
-                "源路径 '{}' 不存在",
-                source
-            )));
-        } else {
-            MovedPathKind::Directory
-        };
-
-        let destination_prefix = format!("{destination}/");
-        let destination_children_exist = meta_data
-            .files
-            .iter()
-            .any(|entry| entry.original_name.starts_with(&destination_prefix));
-        let destination_is_directory =
-            destination_ends_with_separator || destination_children_exist;
-
-        let final_target = if destination_is_directory {
-            let source_name = source
-                .rsplit('/')
-                .next()
-                .ok_or_else(|| VeilError::WorkError("源路径缺少名称".to_string()))?;
-            if destination.is_empty() {
-                source_name.to_string()
+        tx.execute(
+            "UPDATE file_info SET parent_id=?1,name=?2,updated_at=?3 WHERE id=?4",
+            params![parent.id, name, now(), n.id],
+        )?;
+        tx.commit()?;
+        Ok((
+            if n.kind == "file" {
+                MovedPathKind::File
             } else {
-                format!("{destination}/{source_name}")
+                MovedPathKind::Directory
+            },
+            to,
+        ))
+    }
+    /// 仅清理由本协议命名的无引用对象；删除前持写事务重新核对运行锁及引用。
+    pub fn cleanup(&self, password: &str) -> Result<usize> {
+        let mut db = self.open_db(password)?;
+        let dead = locks::dead_locks(&db.conn)?;
+        let mut removed = 0;
+        for entry in fs::read_dir(&self.veil_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !entry.file_type()?.is_file() || container::validate_cipher(&name).is_err() {
+                continue;
             }
-        } else {
-            destination.clone()
-        };
-
-        if final_target == source {
-            return Err(VeilError::WorkError("源路径和目标路径相同".to_string()));
+            let lock_id = name.split('_').next().unwrap();
+            let tx = db
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            locks::reap(&tx, &dead)?;
+            let referenced:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM file_info WHERE cipher_name=?1) OR EXISTS(SELECT 1 FROM operation_locks WHERE lock_id=?2)",params![name,lock_id],|r|r.get(0))?;
+            if !referenced {
+                fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+            tx.commit()?;
         }
-
-        let final_prefix = format!("{final_target}/");
-        if source_kind == MovedPathKind::Directory
-            && (final_target.starts_with(&source_prefix) || final_target == source)
+        let staging = self.veil_dir.join(".staging");
+        if staging.is_dir() {
+            for entry in fs::read_dir(&staging)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !entry.file_type()?.is_dir() || !crate::metadata::is_uuid_v4(&name) {
+                    continue;
+                }
+                let tx = db
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                locks::reap(&tx, &dead)?;
+                let active: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operation_locks WHERE lock_id=?1)",
+                    [&name],
+                    |r| r.get(0),
+                )?;
+                if !active {
+                    fs::remove_dir_all(entry.path())?;
+                    removed += 1;
+                }
+                tx.commit()?;
+            }
+        }
+        Ok(removed)
+    }
+    pub fn change_password(&self, old: &str, new: &str) -> Result<()> {
+        let db = self.open_db(old)?;
+        let result = veil_core::database::rekey(&db.conn, new);
+        drop(db);
+        if self.open_db(new).is_err() {
+            if self.open_db(old).is_ok() {
+                return Err(result.err().unwrap_or_else(|| {
+                    VeilError::EncryptionError("密码切换未生效，原密码仍有效".into())
+                }));
+            }
+            return Err(VeilError::CommitUncertain(std::io::Error::other(
+                "无法确认数据库改密结果，请重新验证数据库",
+            )));
+        }
+        fault("after_database_rekey");
+        Ok(())
+    }
+    pub fn change_password_full(&self, old: &str, new: &str) -> Result<()> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("完整改密");
+        if new.is_empty() {
+            return Err(invalid("密码不能为空"));
+        }
+        // 密码切换后、旧密钥移除前中断时，也允许以新密码继续。
+        let (password, already_rekeyed) = match self.open_db(old) {
+            Ok(_) => (old, false),
+            Err(VeilError::DecryptionError(_)) => {
+                self.open_db(new)?;
+                (new, true)
+            }
+            Err(e) => return Err(e),
+        };
+        if already_rekeyed && self.open_db(new)?.keys()?.len() == 1 {
+            let _ = self.cleanup(new);
+            return Ok(());
+        }
+        let mut db = self.open_db(password)?;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut keys = container::keys(&tx)?;
+        if keys.len() == 1 {
+            keys[0].status = "retiring".into();
+            keys.push(DataKey::generate());
+            tx.execute(
+                "UPDATE div_info SET data_keys=?1 WHERE id=1",
+                [json(&keys)?],
+            )?;
+        }
+        tx.commit()?;
+        drop(db);
+        fault("after_rotation_keys");
+        loop {
+            let db = self.open_db(password)?;
+            let keys = db.keys()?;
+            let active = keys.iter().find(|k| k.status == "active").unwrap();
+            let candidate: Option<String> = {
+                use rusqlite::OptionalExtension;
+                db.conn
+                    .query_row(
+                        "SELECT id FROM file_info WHERE kind='file' AND key_id<>?1 LIMIT 1",
+                        [&active.key_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+            };
+            let Some(identity) = candidate else {
+                break;
+            };
+            drop(db);
+            let guard = self
+                .lock_manager(password)
+                .acquire(std::slice::from_ref(&identity), LockMode::Write)?;
+            let db = self.open_db(password)?;
+            let n = db
+                .node(&identity)?
+                .ok_or_else(|| VeilError::FileNotFound(identity.clone()))?;
+            let keys = db.keys()?;
+            let active = keys.iter().find(|k| k.status == "active").unwrap();
+            if n.key_id.as_deref() == Some(&active.key_id) {
+                continue;
+            }
+            let previous = keys
+                .iter()
+                .find(|k| Some(&k.key_id) == n.key_id.as_ref())
+                .ok_or_else(|| invalid("文件引用未知密钥"))?;
+            let credential = guard.credentials()?.remove(0);
+            let cipher = format!("{}_{}.enc", credential.lock_id, id());
+            let nonce = file_ops::generate_base_nonce();
+            let staging = self.veil_dir.join(".staging").join(&credential.lock_id);
+            crate::fsutil::create_dir_all_durable(&staging)?;
+            file_ops::rewrite_file_streaming(
+                &*previous.material()?,
+                &*active.material()?,
+                &self.veil_dir.join(n.cipher()?),
+                &staging.join(&cipher),
+                &n.nonce()?,
+                &nonce,
+                n.size.unwrap(),
+            )?;
+            crate::fsutil::rename_no_replace(&staging.join(&cipher), &self.veil_dir.join(&cipher))?;
+            crate::fsutil::sync_directory(&self.veil_dir)?;
+            let active_id = active.key_id.clone();
+            drop(db);
+            let mut db = self.open_db(password)?;
+            let tx = db
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let c = guard.credentials()?.remove(0);
+            locks::validate(&tx, &c, Some(LockMode::Write))?;
+            if container::node(&tx, &identity)?.as_ref() != Some(&n)
+                || !container::keys(&tx)?
+                    .iter()
+                    .any(|k| k.status == "active" && k.key_id == active_id)
+            {
+                return Err(VeilError::VersionConflict("轮换提交条件已变化".into()));
+            }
+            tx.execute("UPDATE file_info SET cipher_name=?1,key_id=?2,nonce=?3,encrypted_at=?4 WHERE id=?5",params![cipher,active_id,nonce.as_slice(),now(),identity])?;
+            locks::release_in(&tx, &c)?;
+            tx.commit()?;
+            drop(guard);
+            fault("after_rotation_file");
+        }
+        fault("before_database_rekey");
+        self.change_password(password, new)?;
+        let mut db = self.open_db(new)?;
+        let tx = db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut keys = container::keys(&tx)?;
+        let active = keys
+            .iter()
+            .find(|k| k.status == "active")
+            .unwrap()
+            .key_id
+            .clone();
+        let remaining: i64 = tx.query_row(
+            "SELECT count(*) FROM file_info WHERE kind='file' AND key_id<>?1",
+            [&active],
+            |r| r.get(0),
+        )?;
+        if remaining != 0 {
+            return Err(invalid("旧文件密钥仍被引用"));
+        }
+        keys.retain(|k| k.status == "active");
+        fault("before_retiring_key_removal");
+        tx.execute(
+            "UPDATE div_info SET data_keys=?1 WHERE id=1",
+            [json(&keys)?],
+        )?;
+        tx.commit()?;
+        drop(db);
+        fault("after_retiring_key_removal");
+        let _ = self.cleanup(new);
+        Ok(())
+    }
+    /// 所有文件读锁与数据库快照保持到密文复制结束；源锁记录保持原样。
+    pub fn snapshot_to(&self, destination: &Path, password: &str) -> Result<usize> {
+        let execution = crate::ExecutionService::global()?;
+        let _scope = execution.enter_task("导出一致快照");
+        let db = self.open_db(password)?;
+        let before = db.subtree(&db.root()?.id)?;
+        let files = before
+            .iter()
+            .filter(|n| n.kind == "file")
+            .map(|n| n.id.clone())
+            .collect::<Vec<_>>();
+        drop(db);
+        let guard = self
+            .lock_manager(password)
+            .acquire(&files, LockMode::Read)?;
+        let mut source = self.open_db(password)?;
+        let reader = self.open_db(password)?;
+        let tx = source
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if container::subtree(
+            &tx,
+            &before.iter().find(|n| n.parent_id.is_none()).unwrap().id,
+        )? != before
         {
-            return Err(VeilError::WorkError(
-                "不能把目录移动到自身或子目录".to_string(),
+            return Err(VeilError::VersionConflict(
+                "快照准备期间目录树已变化".into(),
             ));
         }
-
-        if meta_data.find_file(&final_target).is_some()
-            || meta_data
-                .files
-                .iter()
-                .any(|entry| entry.original_name.starts_with(&final_prefix))
-        {
-            return Err(VeilError::FileAlreadyExists(final_target));
+        // backup 从另一连接读取已确认快照；当前短事务仅保护初始化快照与数据库复制。
+        crate::fsutil::create_dir_all_durable(destination)?;
+        if fs::read_dir(destination)?.next().transpose()?.is_some() {
+            return Err(invalid("快照目标必须为空目录"));
         }
-
-        match source_kind {
-            MovedPathKind::File => {
-                let encrypted_name = source_file
-                    .ok_or_else(|| VeilError::FileNotFound(source.clone()))?
-                    .encrypted_name;
-                if let Some(entry) = meta_data
-                    .files
-                    .iter_mut()
-                    .find(|entry| entry.encrypted_name == encrypted_name)
-                {
-                    entry.original_name = final_target.clone();
-                }
-            }
-            MovedPathKind::Directory => {
-                for entry in &mut meta_data.files {
-                    if entry.original_name == source {
-                        entry.original_name = final_target.clone();
-                    } else if let Some(suffix) = entry.original_name.strip_prefix(&source_prefix) {
-                        entry.original_name = format!("{final_target}/{suffix}");
-                    }
-                }
-            }
+        let path = destination.join(veil_core::database::CONTAINER_DB);
+        if path.exists() {
+            return Err(invalid("快照目标已存在"));
         }
-
-        self.write_meta(&header, &meta_data, &master_key)?;
-        Ok((source_kind, final_target))
-    }
-
-    /// 清理崩溃遗留的临时文件，以及不再被当前元数据引用的随机密文文件。
-    ///
-    /// 只有成功解密元数据后才调用，因此清理依据始终是已提交快照。未知文件名不会
-    /// 被删除，避免误伤工作区中的非 Veil 文件。
-    fn cleanup_work_state(&self, meta_data: &MetaData) {
-        let referenced: HashSet<&str> = meta_data
-            .files
-            .iter()
-            .map(|entry| entry.encrypted_name.as_str())
-            .collect();
-
-        let Ok(entries) = fs::read_dir(&self.veil_dir) else {
-            return;
-        };
-
-        let mut candidates = Vec::new();
-        for entry in entries.flatten() {
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            let file_name = entry.file_name();
-            let Some(file_name) = file_name.to_str() else {
-                continue;
-            };
-            let orphaned_ciphertext =
-                is_work_ciphertext_name(file_name) && !referenced.contains(file_name);
-            if !crate::fsutil::is_internal_temp_name(file_name) && !orphaned_ciphertext {
-                continue;
-            }
-
-            candidates.push(entry.path());
+        let mut target = veil_core::database::open(&path, Some(password), true)?;
+        let backup = rusqlite::backup::Backup::new(&reader.conn, &mut target)?;
+        backup.run_to_completion(128, Duration::from_millis(5), None)?;
+        drop(backup);
+        tx.commit()?;
+        target.execute("DELETE FROM operation_locks", [])?;
+        drop(target);
+        // 数据库引用的文件受读租约保护；新增文件属于之后的数据库版本。
+        for n in before.iter().filter(|n| n.kind == "file") {
+            crate::fsutil::copy_file_new(
+                &self.veil_dir.join(n.cipher()?),
+                &destination.join(n.cipher()?),
+            )?;
         }
-
-        if candidates.is_empty() {
-            return;
+        let db = self.open_db(password)?;
+        for c in guard.credentials()? {
+            locks::validate(&db.conn, &c, Some(LockMode::Read))?;
         }
-
-        // 先稳定当前元数据快照，再删除任何旧密文；否则断电后旧元数据可能重新出现，
-        // 而它引用的文件已经被删除。
-        if crate::fsutil::sync_directory(&self.veil_dir).is_err() {
-            return;
-        }
-
-        for path in candidates {
-            #[cfg(test)]
-            crate::fsutil::fault_point("cleanup");
-            let _ = fs::remove_file(path);
-        }
-        let _ = crate::fsutil::sync_directory(&self.veil_dir);
-    }
-
-    /// 只有所有普通操作都已结束时才清理，避免误删尚未提交的密文。
-    fn try_cleanup(&self, password: &str) {
-        let options = LockOptions {
-            timeout: Some(std::time::Duration::ZERO),
-            cancellation: None,
-        };
-        let Ok(_maintenance) = locking::maintenance(&self.veil_dir, false, &options) else {
-            return;
-        };
-        let Ok(_config) = locking::config(&self.veil_dir, true, &options) else {
-            return;
-        };
-        if let Ok((metadata, _, _)) = self.read_meta_context(password) {
-            self.cleanup_work_state(&metadata);
-        }
+        crate::fsutil::sync_directory(destination)?;
+        Ok(files.len())
     }
 }
-
-/// 持有目标文件独占锁时校验调用方的编辑基础版本。
-fn validate_base_version(metadata: &MetaData, file: &AddFileSpec) -> Result<(), VeilError> {
-    if file.reject_existing
-        && metadata.files.iter().any(|entry| {
-            entry.original_name == file.target
-                || entry
-                    .original_name
-                    .starts_with(&format!("{}/", file.target))
-                || file
-                    .target
-                    .starts_with(&format!("{}/", entry.original_name))
-        })
+use std::time::Duration;
+fn verify_base(identity: &str, node: Option<&Node>, base: &VersionSnapshot) -> Result<()> {
+    let Some(node) = node else {
+        return Err(VeilError::VersionConflict("基础文件已删除".into()));
+    };
+    if base.veil_id != identity
+        || base.file_id != node.id
+        || compare_version_history(node.versions()?, &base.version_history)?
+            != VersionRelation::Same
     {
-        return Err(VeilError::FileAlreadyExists(format!(
-            "文件或目录 '{}' 已存在",
-            file.target
-        )));
+        return Err(VeilError::VersionConflict(
+            "文件身份或基础版本不匹配".into(),
+        ));
     }
-    let Some(base) = &file.base_version else {
-        return Ok(());
-    };
-    if base.veil_id != metadata.veil_id {
-        return Err(VeilError::VersionConflict("基础版本属于其他容器".into()));
+    Ok(())
+}
+fn split_parent(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+pub fn normalize_veil_dir(path: &str) -> Result<String> {
+    if path.is_empty() || path.starts_with(['/', '\\']) || path.contains(['\\', '\0']) {
+        return Err(invalid("容器路径无效"));
     }
-    let current = metadata.find_file(&file.target).ok_or_else(|| {
-        VeilError::VersionConflict(format!("文件 '{}' 已删除或移动", file.target))
-    })?;
-    if base.file_id != current.file_id {
-        return Err(VeilError::VersionConflict(format!(
-            "文件 '{}' 的身份已变化",
-            file.target
-        )));
-    }
-    let relation = compare_version_history(&current.version_history, &base.version_history)?;
-    let reason = match relation {
-        VersionRelation::Same => return Ok(()),
-        VersionRelation::IncomingAhead => "基础版本领先当前版本",
-        VersionRelation::LocalAhead => "当前版本已更新",
-        VersionRelation::Diverged => "版本链已分叉",
-        VersionRelation::Unrelated => "版本链没有共同起点",
-    };
-    Err(VeilError::VersionConflict(format!(
-        "文件 '{}'：{reason}",
-        file.target
-    )))
-}
-
-/// 使用 Argon2id 从用户密码和容器盐值派生零化主密钥。
-///
-/// # 错误
-/// Argon2 参数无效或派生失败时返回 [`VeilError::KeyDerivationError`]。
-fn derive_master_key(password: &str, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, VeilError> {
-    let mut key = Zeroizing::new([0u8; 32]);
-    kdf::derive_key(password.as_bytes(), salt, &mut *key)
-        .map_err(|e| VeilError::KeyDerivationError(format!("密钥派生失败: {:?}", e)))?;
-    Ok(key)
-}
-
-/// 使用系统随机源生成指定长度的字节数组。
-///
-/// # Panics
-/// 系统随机源不可用时 panic，以避免使用可预测的密钥材料。
-fn generate_random_bytes<const N: usize>() -> [u8; N] {
-    let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).expect("生成随机数失败");
-    bytes
-}
-
-/// 生成 16 字节随机 ID，并编码为 32 个十六进制字符。
-fn generate_random_id() -> String {
-    let bytes = generate_random_bytes::<16>();
-    hex::encode(bytes)
-}
-
-/// 判断文件名是否是工作区当前格式生成的随机密文名。
-fn is_work_ciphertext_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".enc") else {
-        return false;
-    };
-    stem.len() == 32 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// 校验并规范化容器内相对路径，统一使用 `/` 分隔。
-pub fn normalize_veil_dir(path: &str) -> Result<String, VeilError> {
-    if path.is_empty() {
-        return Err(VeilError::WorkError("容器内目标路径不能为空".to_string()));
-    }
-
+    let path = path.trim_end_matches('/');
     let mut parts = Vec::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part
-                    .to_str()
-                    .ok_or_else(|| VeilError::WorkError("目标路径不是有效 UTF-8".to_string()))?;
-                parts.push(part.to_string());
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(VeilError::WorkError(format!(
-                    "目标路径必须是容器内相对路径: {}",
-                    path
-                )));
-            }
+    for part in path.split('/') {
+        if part == "." {
+            continue;
         }
+        if part.is_empty() || part == ".." {
+            return Err(invalid("容器路径包含无效节点名称"));
+        }
+        parts.push(part);
     }
-
     if parts.is_empty() {
-        return Err(VeilError::WorkError("容器内目标路径不能为空".to_string()));
+        return Err(invalid("路径为空"));
     }
-
     Ok(parts.join("/"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kdf;
-    use tempfile::TempDir;
-
-    #[test]
-    fn fault_writer_worker() {
-        let Some(root) = std::env::var_os("VEIL_FAULT_TEST_ROOT") else {
-            return;
-        };
-        kdf::enable_fast_test_kdf();
-        let root = PathBuf::from(root);
-        let manager = VeilManager::new(root.join("veil"));
-        let result = manager.add_files(
-            &[AddFileSpec::new(root.join("new"), "file.txt")],
-            "password",
-        );
-        if std::env::var_os("VEIL_TEST_PAUSEPOINT").is_some() {
-            assert!(result.is_ok(), "{result:?}");
-            return;
-        }
-        if std::env::var("VEIL_TEST_FAILPOINT").as_deref() == Ok("after_replace_error") {
-            assert!(matches!(result, Err(VeilError::CommitUncertain(_))));
-        } else {
-            panic!("故障注入点未触发: {result:?}");
-        }
+fn fault(stage: &str) {
+    #[cfg(any(test, feature = "fault-injection"))]
+    {
+        veil_core::fsutil::fault_point(stage);
     }
-
-    /// 每个发布阶段由独立进程退出，确认重开后只能看到完整的新版本或旧版本。
-    #[test]
-    fn commit_fault_points_preserve_readable_versions() {
-        use std::process::{Command, Stdio};
-        kdf::enable_fast_test_kdf();
-        for (stage, published) in [
-            ("file_locked", false),
-            ("cipher_written", false),
-            ("config_temp_written", false),
-            ("before_replace", false),
-            ("after_replace", true),
-            ("after_commit", true),
-            ("cleanup", true),
-            ("after_replace_error", true),
-        ] {
-            let root = TempDir::new().unwrap();
-            let manager = VeilManager::new(root.path().join("veil"));
-            manager.init_veil("test", "password").unwrap();
-            let old = root.path().join("old");
-            fs::write(&old, b"old contents").unwrap();
-            fs::write(root.path().join("new"), b"new contents").unwrap();
-            manager
-                .add_files(&[AddFileSpec::new(&old, "file.txt")], "password")
-                .unwrap();
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "veil_ops::tests::fault_writer_worker",
-                    "--nocapture",
-                ])
-                .env("VEIL_FAULT_TEST_ROOT", root.path())
-                .env("VEIL_TEST_FAILPOINT", stage)
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .status()
-                .unwrap();
-            if stage == "after_replace_error" {
-                assert!(status.success(), "{stage}");
-            } else {
-                assert_eq!(status.code(), Some(86), "{stage}");
-            }
-            let output = root.path().join("output");
-            manager
-                .extract_file("file.txt", &output, "password")
-                .unwrap();
-            assert_eq!(
-                fs::read(&output).unwrap(),
-                if published {
-                    &b"new contents"[..]
-                } else {
-                    &b"old contents"[..]
-                },
-                "{stage}"
-            );
-            let entries = manager.list_files("password").unwrap();
-            assert_eq!(
-                entries[0].version_history.len(),
-                if published { 2 } else { 1 },
-                "{stage}"
-            );
-            manager
-                .add_files(&[AddFileSpec::new(&old, "file.txt")], "password")
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn active_writer_excludes_same_file_but_allows_other_file() {
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
-        kdf::enable_fast_test_kdf();
-        let root = TempDir::new().unwrap();
-        let veil_dir = root.path().join("veil");
-        let manager = VeilManager::new(veil_dir.clone());
-        manager.init_veil("test", "password").unwrap();
-        let old = root.path().join("old");
-        fs::write(&old, b"old").unwrap();
-        fs::write(root.path().join("new"), b"new").unwrap();
-        manager
-            .add_files(
-                &[
-                    AddFileSpec::new(&old, "file.txt"),
-                    AddFileSpec::new(&old, "other.txt"),
-                ],
-                "password",
-            )
-            .unwrap();
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "veil_ops::tests::fault_writer_worker",
-                "--nocapture",
-            ])
-            .env("VEIL_FAULT_TEST_ROOT", root.path())
-            .env("VEIL_TEST_PAUSEPOINT", "cipher_written")
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let start = Instant::now();
-        while !root.path().join("paused").exists() {
-            assert!(child.try_wait().unwrap().is_none(), "写入进程提前退出");
-            assert!(start.elapsed() < Duration::from_secs(20), "写入进程未暂停");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let limited = VeilManager::new(veil_dir).with_lock_options(LockOptions {
-            timeout: Some(Duration::from_millis(100)),
-            cancellation: None,
-        });
-        assert!(
-            limited
-                .extract_file("file.txt", &root.path().join("blocked"), "password")
-                .is_err()
-        );
-        assert!(
-            limited
-                .add_files(&[AddFileSpec::new(&old, "file.txt")], "password")
-                .is_err()
-        );
-        manager
-            .add_files(&[AddFileSpec::new(&old, "other.txt")], "password")
-            .unwrap();
-        fs::write(root.path().join("resume"), b"resume").unwrap();
-        assert!(child.wait().unwrap().success());
-        let files = manager.list_files("password").unwrap();
-        assert!(files.iter().all(|file| file.version_history.len() == 2));
-        manager
-            .extract_file("file.txt", &root.path().join("result"), "password")
-            .unwrap();
-        assert_eq!(fs::read(root.path().join("result")).unwrap(), b"new");
-    }
-
-    /// 验证双数据密钥状态可以同时读取迁移前和迁移后的文件。
-    #[test]
-    fn mixed_data_keys_fall_back_to_old_key() {
-        kdf::enable_fast_test_kdf();
-        let temp_dir = TempDir::new().unwrap();
-        let veil_dir = temp_dir.path().join("mixed-data-keys");
-        let manager = VeilManager::new(veil_dir.clone());
-        let password = "test-password";
-
-        manager.init_veil("mixed-data-keys", password).unwrap();
-        let first = temp_dir.path().join("first.txt");
-        let second = temp_dir.path().join("second.txt");
-        fs::write(&first, b"first").unwrap();
-        fs::write(&second, b"second").unwrap();
-        manager
-            .add_files(
-                &[
-                    AddFileSpec::new(&first, "first.txt"),
-                    AddFileSpec::new(&second, "second.txt"),
-                ],
-                password,
-            )
-            .unwrap();
-
-        let (mut meta_data, header, master_key) = manager.read_meta_context(password).unwrap();
-        let old_key = meta_data.data_keys[0];
-        let new_key = generate_random_bytes::<DATA_KEY_LEN>();
-        meta_data.data_keys = vec![new_key, old_key];
-
-        let first_index = meta_data
-            .files
-            .iter()
-            .position(|entry| entry.original_name == "first.txt")
-            .unwrap();
-        let first_entry = meta_data.files[first_index].clone();
-        let old_encrypted_path = veil_dir.join(&first_entry.encrypted_name);
-        let new_nonce = file_ops::generate_base_nonce();
-        let new_encrypted_name = format!("{}.enc", generate_random_id());
-        file_ops::rewrite_file_streaming(
-            &old_key,
-            &new_key,
-            &old_encrypted_path,
-            &veil_dir.join(&new_encrypted_name),
-            &first_entry.nonce,
-            &new_nonce,
-            first_entry.size,
-        )
-        .unwrap();
-        meta_data.files[first_index] = FileEntry::new(
-            new_encrypted_name,
-            first_entry.original_name,
-            first_entry.size,
-            new_nonce,
-        );
-        manager
-            .write_meta(&header, &meta_data, &master_key)
-            .unwrap();
-        manager.cleanup_work_state(&meta_data);
-
-        let first_output = temp_dir.path().join("first-out.txt");
-        let second_output = temp_dir.path().join("second-out.txt");
-        manager
-            .extract_file("first.txt", &first_output, password)
-            .unwrap();
-        manager
-            .extract_file("second.txt", &second_output, password)
-            .unwrap();
-
-        assert_eq!(fs::read(first_output).unwrap(), b"first");
-        assert_eq!(fs::read(second_output).unwrap(), b"second");
-    }
+    #[cfg(not(any(test, feature = "fault-injection")))]
+    let _ = stage;
 }

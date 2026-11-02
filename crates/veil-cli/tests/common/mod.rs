@@ -37,6 +37,7 @@ impl TestEnv {
         let mut command = Command::cargo_bin("veil").unwrap();
         command
             .env("HOME", self.home.path())
+            .env("VEIL_APP_DATA_DIR", self.home.path().join("app"))
             .env("VEIL_PASSWORD", password)
             .env("VEIL_HINTS", "off")
             .env("VEIL_TEST_KDF", "fast")
@@ -71,12 +72,11 @@ impl TestEnv {
     /// 用隔离配置和统一工作区扫描解析链接。
     #[allow(dead_code)]
     pub fn veil_dir(&self, link_path: &Path) -> PathBuf {
-        let config = veil_service::config::GlobalConfig::load_from(
-            &self.home.path().join(".veil/config.jsonc"),
-        )
-        .unwrap();
+        let mut config =
+            veil_service::config::AppConfig::load_from(&self.home.path().join("app/app.db"))
+                .unwrap();
         let link = veil_service::link::VeilLink::load(link_path).unwrap();
-        config.resolve_link_veil_dir(&link, link_path).unwrap()
+        config.resolve_veil(&link.veil.veil_id).unwrap().veil_dir
     }
 
     /// 将路径转换为适合传给命令行参数的字符串。

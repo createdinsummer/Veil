@@ -3,8 +3,8 @@
 use crate::error::Result;
 use crate::i18n;
 use colored::Colorize;
-use veil_service::config::{GlobalConfig, HintLevel};
-use veil_service::work::WorkConfig;
+use veil_service::config::HintLevel;
+
 use veil_service::{ServiceRequest, ServiceResponse};
 
 /// 根据参数设置提示级别，或展示当前有效配置。
@@ -30,7 +30,10 @@ pub fn run(hint_level: Option<String>, _show: bool) -> Result<()> {
 /// 全局配置加载失败时返回错误。
 fn show_config() -> Result<()> {
     // effective_level 同时考虑配置文件与 VEIL_HINTS，展示用户真正会看到的级别。
-    let config = crate::hints::load_config()?;
+    let config = match super::request(ServiceRequest::ReadConfigSummary)? {
+        ServiceResponse::ConfigSummary(summary) => summary,
+        _ => return Err(veil_core::error::VeilError::WorkError("服务响应类型不符".into()).into()),
+    };
     let effective_level = crate::hints::current_level();
 
     crate::outln!("\n{}", i18n::t("config.title").cyan().bold());
@@ -65,69 +68,53 @@ fn show_config() -> Result<()> {
         );
     }
 
-    if let Some(ref default_ws) = config.work.default {
-        crate::outln!(
-            "  {}",
-            i18n::t1(
-                "config.default_work",
-                "path",
-                &display_work_path(&config, default_ws)
-            )
-            .bright_black()
-        );
+    if let Some(space) = config
+        .spaces
+        .iter()
+        .find(|s| s.id == config.default_space_id)
+    {
+        crate::outln!("  {}", i18n::t1("config.default_work", "path", &space.path));
     }
-
+    let custom = config
+        .spaces
+        .iter()
+        .filter(|s| s.id != config.default_space_id)
+        .collect::<Vec<_>>();
     crate::outln!(
         "  {}",
         i18n::t1(
             "config.custom_work_count",
             "count",
-            &config.work.custom.len().to_string()
+            &custom.len().to_string()
         )
     );
-    let mut custom_works: Vec<_> = config.work.custom.iter().collect();
-    custom_works.sort_by(|left, right| left.0.cmp(right.0));
-    for (name, work) in custom_works {
+    for space in custom {
         crate::outln!(
             "{}",
             i18n::t2(
                 "config.custom_work",
                 "name",
-                name,
+                &space.name,
                 "path",
-                &display_work_path(&config, work)
+                &space.path
             )
-            .bright_black()
         );
     }
-
     crate::outln!(
         "  {}",
         i18n::t1(
             "config.veil_count",
             "count",
-            &config.veils.len().to_string()
+            &config.container_count.to_string()
         )
     );
     crate::outln!(
         "  {}",
-        i18n::t1(
-            "config.link_count",
-            "count",
-            &config.links.len().to_string()
-        )
+        i18n::t1("config.link_count", "count", &config.link_count.to_string())
     );
     crate::outln!();
 
     Ok(())
-}
-
-/// 工作区路径始终相对于所属配置目录展示。
-fn display_work_path(config: &GlobalConfig, work: &WorkConfig) -> String {
-    match super::request(ServiceRequest::ResolveWorkPath { config, work }) {
-        Ok(ServiceResponse::WorkPath(path)) => path.display().to_string(),
-        _ => work.path.display().to_string(),
-    }
 }
 
 /// 校验并持久化提示级别，同时报告环境变量是否仍会覆盖该值。

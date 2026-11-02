@@ -20,22 +20,16 @@ type ContainerView = {
   path: string;
   createdAt: string;
   files: FileView[];
+  directories: {id:string;path:string}[];
 };
 type FileCategory = "photo" | "video" | "document" | "archive" | "other";
 type ContainerSummary = { id: string; name: string; path: string };
-type Space = { id: string; name: string; path: string; containers: ContainerSummary[] };
+type Space = { id: string; name: string; path: string; isDefault:boolean; containers: ContainerSummary[] };
 type Recent = { name: string; path: string };
 type Screen = "home" | "create" | "open" | "container";
 
 
 
-
-function readRecents(): Recent[] {
-  try {
-    const data: unknown = JSON.parse(localStorage.getItem("veil.recents") ?? "[]");
-    return Array.isArray(data) ? data.filter((item): item is Recent => typeof item?.name === "string" && typeof item?.path === "string").slice(0, 6) : [];
-  } catch { return []; }
-}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -63,7 +57,7 @@ function App() {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceId] = useState("default");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({default:true});
-  const [recents, setRecents] = useState<Recent[]>(readRecents);
+  const [recents, setRecents] = useState<Recent[]>([]);
   const [container, setContainer] = useState<ContainerView | null>(null);
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -93,6 +87,11 @@ function App() {
     return result;
   }
   useEffect(() => { let alive = true; invoke<Space[]>("list_spaces").then((result) => { if (alive) setSpaces(result); }).catch((reason) => { if (alive) setError(String(reason)); }); return () => { alive = false; }; }, []);
+  useEffect(() => { if (spaces.length && !spaces.some((space) => space.id === spaceId)) { const preferred=spaces.find((space) => space.isDefault)||spaces[0]; setSpaceId(preferred.id); setExpanded({[preferred.id]:true}); } }, [spaces, spaceId]);
+  useEffect(() => { invoke<Recent[]>("list_recents").then(setRecents).catch((reason) => setError(String(reason))); }, []);
+  useEffect(() => { void invoke<{layout:"grid"|"list";viewMode:"type"|"path"}>("get_preferences").then((value) => { setLayout(value.layout); setViewMode(value.viewMode); }).catch((reason) => setError(String(reason))); }, []);
+  function changeLayout(value:"grid"|"list") { setLayout(value); void invoke("set_preference",{key:"layout",value}).catch((reason) => setNotice(String(reason))); }
+  function changeViewMode(value:"type"|"path") { setViewMode(value); void invoke("set_preference",{key:"view_mode",value}).catch((reason) => setNotice(String(reason))); }
   useEffect(() => () => { if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); }, []);
 
   function clearPreview() {
@@ -104,10 +103,8 @@ function App() {
   function navigate(next: Screen, selectedPath = "") {
     setScreen(next); setPath(selectedPath); setName(""); setPassword(""); setConfirmation(""); setError(""); setNotice("");
   }
-  function remember(view: ContainerView) {
-    const next = [{name:view.name,path:view.path}, ...recents.filter((item) => item.path !== view.path)].slice(0, 6);
-    setRecents(next);
-    try { localStorage.setItem("veil.recents", JSON.stringify(next)); } catch { /* 最近记录不可用时不影响容器操作 */ }
+  function remember(_view: ContainerView) {
+    void invoke<Recent[]>("list_recents").then(setRecents).catch((reason) => setNotice(`最近记录读取失败：${String(reason)}`));
   }
   async function leaveContainer(): Promise<boolean> {
     if (!container) return true;
@@ -145,7 +142,7 @@ function App() {
       const view = screen === "create"
         ? await invoke<ContainerView>("create_container", {space:spaceId,name:name.trim(),password:secret})
         : await invoke<ContainerView>("open_container", {path,password:secret});
-      setContainer(view); remember(view); setDirectory(""); setSelectedTypes([]); setViewMode("type"); setScreen("container");
+      setContainer(view); remember(view); setDirectory(""); setSelectedTypes([]); setScreen("container");
       try { const next = await loadSpaces(); const matched = next.find((space) => space.containers.some((item) => item.path === view.path)); if (matched) { setSpaceId(matched.id); setExpanded((current) => ({...current,[matched.id]:true})); } }
       catch (reason) { setNotice(`容器已打开，但空间列表刷新失败：${String(reason)}`); }
     } catch (reason) { setError(String(reason)); }
@@ -180,6 +177,11 @@ function App() {
     if (viewMode === "type") return container.files.filter((file) => selectedTypes.length === 0 || selectedTypes.includes(file.category)).map((file) => ({kind:"file",file}));
     const prefix = directory ? `${directory}/` : "";
     const folders = new Map<string, DisplayItem>(); const files: DisplayItem[] = [];
+    for (const folder of container.directories) {
+      if (!folder.path.startsWith(prefix)) continue;
+      const tail=folder.path.slice(prefix.length); if (!tail) continue;
+      const child=tail.split("/")[0]; folders.set(child,{kind:"folder",name:child,path:`${prefix}${child}`});
+    }
     for (const file of container.files) {
       if (!file.name.startsWith(prefix)) continue;
       const tail = file.name.slice(prefix.length); if (!tail) continue;
@@ -281,16 +283,16 @@ function App() {
           {recents.some((recent) => !spaces.some((space) => space.containers.some((item) => item.path === recent.path))) && <section className="recent-section"><div className="section-heading"><div><h3>最近打开</h3><p>包括尚未登记到空间的容器</p></div></div><div className="recent-grid">{recents.filter((recent) => !spaces.some((space) => space.containers.some((item) => item.path === recent.path))).map((item) => <button className="recent-card" key={item.path} onClick={() => navigate("open",item.path)}><span className="recent-icon"><Icon name="shield"/></span><span className="recent-info"><strong>{item.name}</strong><small>{item.path}</small></span><Icon name="arrow" size={16}/></button>)}</div></section>}
         </>}
         {(screen === "create" || screen === "open") && <div className="form-wrap"><button className="back-button" onClick={() => navigate("home")} disabled={busy}><Icon name="left" size={17}/> 返回容器</button><div className="form-heading"><span className="form-icon"><Icon name={screen === "create" ? "plus" : "unlock"} size={23}/></span><div className="eyebrow">{screen === "create" ? "NEW CONTAINER" : "OPEN CONTAINER"}</div><h1>{screen === "create" ? "创建新容器" : "打开容器"}</h1><p>{screen === "create" ? `在${activeSpace?.name || "当前空间"}中创建容器。` : "选择已有容器目录，输入密码解锁。"}</p></div><form className="form-card" onSubmit={(event) => void submit(event)}>
-          {screen === "create" ? <><label>容器名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：个人文件" maxLength={100} autoComplete="off" disabled={busy}/></label><label>保存位置<div className="location-value">{activeSpace?.path || "正在读取空间…"}</div><small>容器保存在当前空间的文件夹中。</small></label></> : <label>容器目录<span className="path-input"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="选择包含 .veil-info 的目录" autoComplete="off" disabled={busy}/><button type="button" onClick={() => void chooseDirectory()} disabled={busy}>选择目录</button></span></label>}
+          {screen === "create" ? <><label>容器名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：个人文件" maxLength={100} autoComplete="off" disabled={busy}/></label><label>保存位置<div className="location-value">{activeSpace?.path || "正在读取空间…"}</div><small>容器保存在当前空间的文件夹中。</small></label></> : <label>容器目录<span className="path-input"><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="选择包含 veil.db 的目录" autoComplete="off" disabled={busy}/><button type="button" onClick={() => void chooseDirectory()} disabled={busy}>选择目录</button></span></label>}
           <label>容器密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder={screen === "create" ? "设置容器密码" : "输入容器密码"} autoComplete={screen === "create" ? "new-password" : "current-password"} disabled={busy}/></label>
           {screen === "create" && <label>确认密码<input type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="再次输入容器密码" autoComplete="new-password" disabled={busy}/></label>}
           <Button variant="primary" className="submit-button" disabled={busy || (screen === "create" && !activeSpace)}>{busy ? "正在处理…" : screen === "create" ? "创建容器" : "解锁容器"}<Icon name="arrow" size={17}/></Button>
         </form><div className="privacy-note"><Icon name="lock" size={15}/> 密码用于本地解锁容器，请妥善保管。</div></div>}
         {screen === "container" && container && <>
-          <div className="browse-tabs" aria-label="浏览方式"><button className={viewMode === "path" ? "active" : ""} aria-pressed={viewMode === "path"} onClick={() => setViewMode("path")}>按路径</button><button className={viewMode === "type" ? "active" : ""} aria-pressed={viewMode === "type"} onClick={() => setViewMode("type")}>按类型</button></div>
+          <div className="browse-tabs" aria-label="浏览方式"><button className={viewMode === "path" ? "active" : ""} aria-pressed={viewMode === "path"} onClick={() => changeViewMode("path")}>按路径</button><button className={viewMode === "type" ? "active" : ""} aria-pressed={viewMode === "type"} onClick={() => changeViewMode("type")}>按类型</button></div>
           {viewMode === "type" && <div className="type-filters" aria-label="文件类型，可多选"><button className={!selectedTypes.length ? "active" : ""} aria-pressed={!selectedTypes.length} onClick={() => setSelectedTypes([])}>全部</button>{categories.map((type) => <button key={type.id} className={selectedTypes.includes(type.id) ? "active" : ""} aria-pressed={selectedTypes.includes(type.id)} onClick={() => toggleType(type.id)}>{type.label}</button>)}</div>}
           <section className="browser-area"><div className="browser-toolbar"><div className="breadcrumbs">{viewMode === "type" ? <>文件分类 <span>/</span> {selectedTypes.length ? categories.filter((type) => selectedTypes.includes(type.id)).map((type) => type.label).join("、") : "全部"}</> : <><button onClick={() => setDirectory("")}>全部文件</button>{directory && directory.split("/").map((part,index,parts) => <React.Fragment key={parts.slice(0,index+1).join("/")}><span>/</span><button onClick={() => setDirectory(parts.slice(0,index+1).join("/"))}>{part}</button></React.Fragment>)}</>}</div>
-            <div className="browser-actions"><div className="layout-switch" aria-label="展示方式"><button className={layout === "list" ? "active" : ""} aria-pressed={layout === "list"} onClick={() => setLayout("list")}><Icon name="list" size={15}/> 列表</button><button className={layout === "grid" ? "active" : ""} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")}><Icon name="grid" size={15}/> 大图标</button></div><button className="toolbar-button" disabled={busy} onClick={() => setImportDialog(true)}>＋ 添加</button></div>
+            <div className="browser-actions"><div className="layout-switch" aria-label="展示方式"><button className={layout === "list" ? "active" : ""} aria-pressed={layout === "list"} onClick={() => changeLayout("list")}><Icon name="list" size={15}/> 列表</button><button className={layout === "grid" ? "active" : ""} aria-pressed={layout === "grid"} onClick={() => changeLayout("grid")}><Icon name="grid" size={15}/> 大图标</button></div><button className="toolbar-button" disabled={busy} onClick={() => setImportDialog(true)}>＋ 添加</button></div>
           </div>
           {visible.length === 0 ? <div className="files-empty"><span className="empty-folder"><Icon name="folder" size={28}/></span><strong>{container.files.length ? "这里没有文件" : "这里还是空的"}</strong><p>{container.files.length ? "试试选择其他分类或目录。" : "添加文件后会显示在这里。"}</p></div> : layout === "grid" ? <div className="file-grid">{visible.map((item) => item.kind === "folder" ? <button key={`d:${item.path}`} className="file-tile" onClick={() => setDirectory(item.path)}><span className="tile-preview folder"><Icon name="folder" size={40}/></span><span className="tile-name">{item.name}</span><small>文件夹</small></button> : <button key={item.file.id} className="file-tile" onClick={() => void previewFile(item.file)}><span className={`tile-preview ${item.file.category}`}>{thumbnails[item.file.id] ? <img src={thumbnails[item.file.id]} alt=""/> : <Icon name={categories.find((type) => type.id === item.file.category)?.icon || "file"} size={36}/>}</span><span className="tile-name" title={item.file.name}>{basename(item.file.name)}</span><small>{viewMode === "type" ? parentName(item.file.name) : formatSize(item.file.size)}</small></button>)}</div> : <div className="browser-list"><div className="browser-list-head"><span>名称</span><span>大小</span><span>版本</span><span>加密时间</span><span>操作</span></div>{visible.map((item) => item.kind === "folder" ? <div className="browser-row" key={`d:${item.path}`}><button className="browser-name" onClick={() => setDirectory(item.path)}><Icon name="folder" size={18}/><span>{item.name}</span></button><span>—</span><span>—</span><span>—</span><div className="row-buttons"><button aria-label={`删除 ${item.name}`} disabled={busy} onClick={() => setDeleteTarget({name:item.name,path:item.path,isFolder:true})}><Icon name="trash" size={16}/></button></div></div> : <div className="browser-row" key={item.file.id}><button className="browser-name" onClick={() => void previewFile(item.file)}><Icon name={categories.find((type) => type.id === item.file.category)?.icon || "file"} size={18}/><span>{basename(item.file.name)}{viewMode === "type" && <small>{parentName(item.file.name)}</small>}</span></button><span>{formatSize(item.file.size)}</span><span>v{item.file.version}</span><span>{formatDate(item.file.encryptedAt)}</span><div className="row-buttons"><button aria-label={`导出 ${item.file.name}`} disabled={busy} onClick={() => void exportFile(item.file)}><Icon name="download" size={16}/></button><button aria-label={`删除 ${item.file.name}`} disabled={busy} onClick={() => setDeleteTarget({name:basename(item.file.name),path:item.file.name,isFolder:false})}><Icon name="trash" size={16}/></button></div></div>)}</div>}
           </section>

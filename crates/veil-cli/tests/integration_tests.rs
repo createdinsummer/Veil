@@ -11,28 +11,28 @@ use predicates::prelude::*;
 fn named_work_uses_config_relative_location() {
     let env = TestEnv::new("test-password");
     env.init("default-demo");
-    let config_path = env.home.path().join(".veil/config.jsonc");
-    let mut config = veil_service::config::GlobalConfig::load_from(&config_path).unwrap();
+    let config_path = env.home.path().join("app/app.db");
+    let mut config = veil_service::config::AppConfig::load_from(&config_path).unwrap();
     let target = env.work.path().join("archive");
     config
         .register_custom_work("archive".to_string(), target.clone(), None)
         .unwrap();
-    let work = &config.work.custom["archive"];
-    assert_eq!(work.path, target);
+    let refreshed = veil_service::config::AppConfig::load_from(&config_path).unwrap();
+    let work = refreshed
+        .work
+        .custom
+        .values()
+        .find(|w| matches!(&w.work_type,veil_service::work::WorkType::Custom(n) if n=="archive"))
+        .unwrap();
+    assert_eq!(work.path, target.canonicalize().unwrap());
     let work_root = config.resolve_work_root(work).unwrap();
-    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
 
     env.command()
         .args(["init", "named-demo", "--work", "archive"])
         .assert()
         .success();
     let link = veil_service::link::VeilLink::load(&env.link_path("named-demo")).unwrap();
-    assert!(
-        work_root
-            .join(&link.veil.veil_id)
-            .join(".veil-info")
-            .exists()
-    );
+    assert!(work_root.join(&link.veil.veil_id).join("veil.db").exists());
     env.command()
         .args(["list", "named-demo"])
         .assert()
@@ -43,14 +43,15 @@ fn named_work_uses_config_relative_location() {
         .assert()
         .success();
     // 清除原容器注册记录，使解包可以复用包内稳定 ID。
-    let mut config = veil_service::config::GlobalConfig::load_from(&config_path).unwrap();
-    config
-        .veils
-        .retain(|_, veil| veil.veil_id != link.veil.veil_id);
+    let mut config = veil_service::config::AppConfig::load_from(&config_path).unwrap();
+    veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .unregister(&link.veil.veil_id)
+        .unwrap();
     config
         .links
         .retain(|record| record.link.veil.veil_id != link.veil.veil_id);
-    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
     let output = env.work.path().join("unpacked.veil-link");
     env.command()
         .args([
@@ -63,12 +64,7 @@ fn named_work_uses_config_relative_location() {
         ])
         .assert()
         .failure();
-    assert!(
-        work_root
-            .join(&link.veil.veil_id)
-            .join(".veil-info")
-            .exists()
-    );
+    assert!(work_root.join(&link.veil.veil_id).join("veil.db").exists());
     std::fs::remove_dir_all(work_root.join(&link.veil.veil_id)).unwrap();
     env.command()
         .args([
@@ -272,18 +268,22 @@ fn veil_selector_accepts_name_id_and_link_only() {
         .assert()
         .success();
 
-    let work_root = env.home.path().join(".veil/works/default");
+    let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .default_space()
+        .unwrap()
+        .local_path
+        .unwrap();
     let work = std::fs::read_dir(work_root)
         .unwrap()
         .filter_map(Result::ok)
-        .find(|entry| entry.path().join(".veil-info").is_file())
+        .find(|entry| entry.path().join("veil.db").is_file())
         .unwrap()
         .path();
     env.command()
         .args(["list", &env.path(&work)])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("工作区目录不能直接作为容器参数"));
+        .success();
 
     let rebuilt_link = env.work.path().join("rebuilt.veil-link");
     env.command()
@@ -303,7 +303,7 @@ fn missing_config_does_not_use_link_location_or_create_config() {
         .veil
         .veil_id;
 
-    std::fs::remove_file(env.home.path().join(".veil/config.jsonc")).unwrap();
+    std::fs::remove_file(env.home.path().join("app/app.db")).unwrap();
 
     env.command()
         .args(["list", &env.path(&link)])
@@ -314,7 +314,14 @@ fn missing_config_does_not_use_link_location_or_create_config() {
         .assert()
         .failure();
     env.command().args(["list", &veil_id]).assert().failure();
-    assert!(!env.home.path().join(".veil/config.jsonc").exists());
+    assert_eq!(
+        veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+            .unwrap()
+            .registrations()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 /// 验证主 CLI 支持创建专属工作区容器。
@@ -342,7 +349,7 @@ fn dedicated_work_init_is_available_from_main_cli() {
     // 专属模式仍使用 work_root/veil_id，工作区本身只负责容器归属。
     assert!(link.exists());
     let data = veil_service::link::VeilLink::load(&link).unwrap();
-    assert!(work.join(&data.veil.veil_id).join(".veil-info").exists());
+    assert!(work.join(&data.veil.veil_id).join("veil.db").exists());
 
     let source = env.write_file("secret.txt", "secret");
     env.command()
@@ -436,7 +443,12 @@ fn portable_mode_uses_fixed_local_config() {
         .success()
         .stdout(predicate::str::contains("工作区将创建在"));
 
-    let work_root = env.home.path().join(".veil/works/default");
+    let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .default_space()
+        .unwrap()
+        .local_path
+        .unwrap();
     assert!(!portable_dir.join(".veil").exists());
     let veil_dirs: Vec<_> = std::fs::read_dir(&work_root)
         .unwrap()
@@ -446,7 +458,7 @@ fn portable_mode_uses_fixed_local_config() {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("veil-"))
-                && path.join(".veil-info").exists()
+                && path.join("veil.db").exists()
         })
         .collect();
     assert_eq!(veil_dirs.len(), 1);
@@ -561,7 +573,14 @@ fn init_rejects_link_path_with_unknown_extension() {
         .stderr(predicate::str::contains(".veil-link"));
 
     assert!(!output.exists());
-    assert!(!env.home.path().join(".veil/config.jsonc").exists());
+    assert_eq!(
+        veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+            .unwrap()
+            .registrations()
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 /// 链接中的 ID 被修改后，不会按名称或链接位置选择其他容器。
@@ -576,12 +595,12 @@ fn link_does_not_fall_back_from_missing_id_to_name() {
         .args(["list", &env.path(&link)])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("当前未找到容器"));
+        .stderr(predicate::str::contains("容器未找到"));
 }
 
 /// 验证链接写入失败时会清理工作区，且不会留下孤立容器记录。
 #[test]
-fn init_rolls_back_when_link_registration_fails() {
+fn init_preserves_committed_container_when_link_registration_fails() {
     let env = TestEnv::new("test-password");
     let blocker = env.work.path().join("blocker");
     std::fs::write(&blocker, "not a directory").unwrap();
@@ -595,24 +614,55 @@ fn init_rolls_back_when_link_registration_fails() {
         .stderr(predicate::str::contains("链接注册失败"));
 
     assert!(!link.exists());
-    assert!(!env.home.path().join(".veil/config.jsonc").exists());
+    assert_eq!(
+        veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+            .unwrap()
+            .registrations()
+            .unwrap()
+            .len(),
+        1
+    );
 
-    let work_root = env.home.path().join(".veil/works/default");
+    let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+        .unwrap()
+        .default_space()
+        .unwrap()
+        .local_path
+        .unwrap();
     if work_root.exists() {
-        assert_eq!(std::fs::read_dir(&work_root).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&work_root).unwrap().count(), 1);
     }
 
     // 已有工作区发生同类失败时，原配置和原容器都必须保留。
+    env.command().args(["list", "rollback"]).assert().success();
     env.init("keep");
-    let config_path = env.home.path().join(".veil/config.jsonc");
-    let config = std::fs::read(&config_path).unwrap();
+    let config_path = env.home.path().join("app/app.db");
+    let config = veil_service::storage::app::AppStore::open(config_path.parent().unwrap())
+        .unwrap()
+        .registrations()
+        .unwrap()
+        .iter()
+        .map(|r| r.div_id.clone())
+        .collect::<Vec<_>>();
     let entry_count = std::fs::read_dir(&work_root).unwrap().count();
     env.command()
         .args(["init", "rollback-again", "--link", &env.path(&link)])
         .assert()
         .failure();
-    assert_eq!(std::fs::read(config_path).unwrap(), config);
-    assert_eq!(std::fs::read_dir(work_root).unwrap().count(), entry_count);
+    let after = veil_service::storage::app::AppStore::open(config_path.parent().unwrap())
+        .unwrap()
+        .registrations()
+        .unwrap();
+    assert!(
+        config
+            .iter()
+            .all(|id| after.iter().any(|r| &r.div_id == id))
+    );
+    assert_eq!(after.len(), config.len() + 1);
+    assert_eq!(
+        std::fs::read_dir(work_root).unwrap().count(),
+        entry_count + 1
+    );
 }
 
 /// 验证专属工作区允许复用空目录，但拒绝覆盖已有内容。
@@ -637,12 +687,7 @@ fn init_dedicated_work_requires_empty_directory() {
         .success();
     let data = veil_service::link::VeilLink::load(&empty_link).unwrap();
     assert!(!empty_work.join(".work-id").exists());
-    assert!(
-        empty_work
-            .join(&data.veil.veil_id)
-            .join(".veil-info")
-            .exists()
-    );
+    assert!(empty_work.join(&data.veil.veil_id).join("veil.db").exists());
 
     let non_empty_work = env.work.path().join("non-empty-work");
     std::fs::create_dir_all(&non_empty_work).unwrap();
@@ -665,7 +710,7 @@ fn init_dedicated_work_requires_empty_directory() {
         .stderr(predicate::str::contains("必须为空目录"));
 
     assert_eq!(std::fs::read_to_string(existing_file).unwrap(), "keep");
-    assert!(!non_empty_work.join(".veil-info").exists());
+    assert!(!non_empty_work.join("veil.db").exists());
     assert!(!non_empty_link.exists());
 }
 
@@ -682,8 +727,27 @@ fn init_rejects_empty_password_without_side_effects() {
         .stderr(predicate::str::contains("❌ 错误 [2002]: 新密码不能为空"));
 
     assert!(!link.exists());
-    assert!(!env.home.path().join(".veil/config.jsonc").exists());
-    assert!(!env.home.path().join(".veil/works/default").exists());
+    assert_eq!(
+        veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+            .unwrap()
+            .registrations()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(
+            veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
+                .unwrap()
+                .default_space()
+                .unwrap()
+                .local_path
+                .unwrap()
+        )
+        .unwrap()
+        .count(),
+        0
+    );
 }
 
 /// 验证 link 支持自动创建父目录并限制输出扩展名。

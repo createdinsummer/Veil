@@ -1,6 +1,5 @@
-//! 提示显示条件与一次性状态。
-use crate::config::{GlobalConfig, HintLevel};
-
+//! 提示偏好及一次性本机状态。
+use crate::{config::HintLevel, storage::app::AppStore};
 #[derive(Clone, Copy)]
 pub enum HintKind {
     FirstInit,
@@ -8,7 +7,6 @@ pub enum HintKind {
     FirstUnpack,
     LinkRecovery,
 }
-
 fn allowed(kind: HintKind, level: HintLevel) -> bool {
     match level {
         HintLevel::Off => false,
@@ -16,40 +14,33 @@ fn allowed(kind: HintKind, level: HintLevel) -> bool {
         HintLevel::Full => true,
     }
 }
-
 pub(crate) fn effective_level(override_value: Option<&str>) -> HintLevel {
     override_value
         .and_then(HintLevel::parse)
-        .unwrap_or_else(|| {
-            GlobalConfig::load()
-                .map(|config| config.user_settings.hint_level)
-                .unwrap_or(HintLevel::Full)
+        .or_else(|| {
+            AppStore::global()
+                .ok()?
+                .user_setting("hint_level")
+                .ok()?
+                .as_str()
+                .and_then(HintLevel::parse)
         })
+        .unwrap_or(HintLevel::Full)
 }
-
 pub(crate) fn should_show(kind: HintKind, override_value: Option<&str>) -> bool {
-    if matches!(kind, HintKind::FirstInit | HintKind::LinkRecovery) {
-        return allowed(kind, effective_level(override_value));
-    }
-    let mut config = match GlobalConfig::load() {
-        Ok(config) => config,
-        Err(_) => return allowed(kind, effective_level(override_value)),
-    };
-    let level = override_value
-        .and_then(HintLevel::parse)
-        .unwrap_or(config.user_settings.hint_level);
-    if !allowed(kind, level) {
+    if !allowed(kind, effective_level(override_value)) {
         return false;
     }
-    let shown = match kind {
-        HintKind::FirstPack => &mut config.system.pack_hint_shown,
-        HintKind::FirstUnpack => &mut config.system.unpack_hint_shown,
-        _ => unreachable!(),
-    };
-    if *shown {
-        return false;
+    if matches!(kind, HintKind::LinkRecovery) {
+        return true;
     }
-    *shown = true;
-    let _ = config.save();
-    true
+    let key = match kind {
+        HintKind::FirstInit => "first_init",
+        HintKind::FirstPack => "first_pack",
+        HintKind::FirstUnpack => "first_unpack",
+        HintKind::LinkRecovery => unreachable!(),
+    };
+    AppStore::global()
+        .and_then(|mut s| s.mark_hint(key))
+        .unwrap_or(false)
 }

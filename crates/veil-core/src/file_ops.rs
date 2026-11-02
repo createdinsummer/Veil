@@ -303,6 +303,8 @@ fn encrypt_reader(
         let aad = chunk_aad(chunk_index);
         let ciphertext = encrypt_chunk(data_key, &nonce, plaintext, &aad)?;
         writer.write_all(&ciphertext)?;
+        #[cfg(any(test, feature = "fault-injection"))]
+        crate::fsutil::fault_point("during_cipher_write");
     }
 
     ensure_reader_eof(reader)
@@ -403,6 +405,28 @@ fn parent_or_current(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+/// 认证并流式计算明文摘要，用于判断覆盖操作是否真的改变内容。
+pub fn plaintext_digest(
+    path: &Path,
+    key: &[u8; DATA_KEY_LEN],
+    nonce: &[u8; NONCE_LEN],
+    size: u64,
+) -> Result<blake3::Hash> {
+    struct Digest(blake3::Hasher);
+    impl Write for Digest {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut digest = Digest(blake3::Hasher::new());
+    decrypt_file_to_writer(path, &mut digest, key, nonce, size)?;
+    Ok(digest.0.finalize())
 }
 
 #[cfg(test)]

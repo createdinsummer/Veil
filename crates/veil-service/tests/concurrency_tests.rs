@@ -33,15 +33,19 @@ fn process_worker() {
     } else {
         format!("other-{index}.txt")
     };
-    manager
-        .add_files(
+    loop {
+        match manager.add_files(
             &[AddFileSpec::new(
                 root.join(format!("source-{index}")),
-                target,
+                target.clone(),
             )],
             "password",
-        )
-        .unwrap();
+        ) {
+            Ok(_) => break,
+            Err(veil_core::error::VeilError::VersionConflict(_)) => continue,
+            Err(e) => panic!("并发写入异常: {e}"),
+        }
+    }
 }
 
 #[test]
@@ -228,15 +232,12 @@ fn killing_writer_keeps_last_committed_file_and_releases_lock() {
         .unwrap();
     let start = Instant::now();
     let temporary = loop {
-        let found = fs::read_dir(root.path().join("veil"))
-            .unwrap()
+        let staging = root.path().join("veil/.staging");
+        let found = fs::read_dir(&staging)
+            .into_iter()
             .flatten()
-            .find(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".veil-file-")
-            });
+            .flatten()
+            .find(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false));
         if let Some(entry) = found {
             break entry.path();
         }
@@ -262,6 +263,7 @@ fn killing_writer_keeps_last_committed_file_and_releases_lock() {
             .len(),
         1
     );
+    manager.cleanup("password").unwrap();
     assert!(!temporary.exists());
     manager
         .add_files(&[AddFileSpec::new(&original, "same.txt")], "password")
@@ -270,6 +272,6 @@ fn killing_writer_keeps_last_committed_file_and_releases_lock() {
         manager.list_files("password").unwrap()[0]
             .version_history
             .len(),
-        2
+        1
     );
 }

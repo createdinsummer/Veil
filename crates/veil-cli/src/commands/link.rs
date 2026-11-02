@@ -8,6 +8,17 @@ use veil_service::{ServiceRequest, ServiceResponse};
 
 /// 为容器生成链接并展示结果。
 pub fn run(target: &str, output: Option<&str>) -> Result<()> {
+    if Path::new(target).is_dir() {
+        let cached = super::request(ServiceRequest::ResolveContainer { selector: target });
+        if cached.is_err() {
+            use secrecy::ExposeSecret;
+            let password = super::prompt_password(i18n::t("password.prompt"), None)?;
+            super::request(ServiceRequest::RegisterContainer {
+                directory: Path::new(target),
+                password: password.expose_secret(),
+            })?;
+        }
+    }
     let plan = match super::request(ServiceRequest::PrepareLink {
         target,
         output: output.map(Path::new),

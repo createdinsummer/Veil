@@ -61,6 +61,31 @@ async fn list_spaces(state: State<'_, VeilService>) -> Result<Vec<SpaceView>, St
 }
 
 #[tauri::command]
+async fn list_recents(state: State<'_, VeilService>) -> Result<Vec<veil_service::storage::app::RecentContainer>, String> {
+    let state=state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match state.execute(ServiceRequest::ListRecents).map_err(|e|e.to_string())? {
+        ServiceResponse::Recents(recents)=>Ok(recents), _=>Err(ServiceError::UnexpectedResponse.to_string())
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all="camelCase")]
+struct Preferences { layout:String,view_mode:String }
+#[tauri::command]
+async fn get_preferences(state:State<'_,VeilService>)->Result<Preferences,String>{
+    let state=state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let get=|key| match state.execute(ServiceRequest::GetUserSetting{key}).map_err(|e|e.to_string())? {ServiceResponse::Setting(value)=>value.as_str().map(str::to_owned).ok_or_else(||"偏好类型无效".into()),_=>Err(ServiceError::UnexpectedResponse.to_string())};
+        Ok(Preferences{layout:get("layout")?,view_mode:get("view_mode")?})
+    }).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
+async fn set_preference(key:String,value:String,state:State<'_,VeilService>)->Result<(),String>{
+    let state=state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.execute(ServiceRequest::SetUserSetting{key:&key,value:&serde_json::Value::String(value)}).map(|_|()).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
 async fn create_space(
     name: String,
     state: State<'_, VeilService>,
@@ -166,6 +191,14 @@ fn lock_container(state: State<'_, VeilService>) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(any(target_os="android",target_os="ios"))] {
+                use tauri::Manager;
+                veil_service::storage::app::configure_app_data_dir(app.path().app_data_dir()?)?;
+            }
+            let _=app;
+            Ok(())
+        })
         .manage(VeilService::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -174,6 +207,9 @@ pub fn run() {
             refresh_container,
             lock_container,
             list_spaces,
+            list_recents,
+            get_preferences,
+            set_preference,
             create_space,
             import_files,
             preview_file,

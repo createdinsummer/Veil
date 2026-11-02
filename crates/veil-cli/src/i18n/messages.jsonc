@@ -197,34 +197,6 @@
     "zh": "⚠️  开发版本 - 仅供测试使用",
     "en": "⚠️  Development build - for testing only"
   },
-  "version.debug_warning": {
-    "zh": "⚠️  警告: Debug 构建模式",
-    "en": "⚠️  Warning: Debug build"
-  },
-  "version.debug_key_strength": {
-    "zh": "   密钥强度: Argon2id (开发测试参数)",
-    "en": "   Key strength: Argon2id (development parameters)"
-  },
-  "version.debug_crack_speed": {
-    "zh": "   破解速度: 较快",
-    "en": "   Crack resistance: reduced"
-  },
-  "version.debug_recommend": {
-    "zh": "💡 强烈建议使用 Release 模式:",
-    "en": "💡 Release mode is strongly recommended:"
-  },
-  "version.debug_command": {
-    "zh": "   cargo build --release --package veil-cli",
-    "en": "   cargo build --release --package veil-cli"
-  },
-  "version.debug_release_strength": {
-    "zh": "   密钥强度: Argon2id 标准安全级别",
-    "en": "   Key strength: standard Argon2id security"
-  },
-  "version.release_status": {
-    "zh": "✅ Release 模式 - 高安全强度 (Argon2id)",
-    "en": "✅ Release build - strong security (Argon2id)"
-  },
   "help.flag": {
     "zh": "显示帮助",
     "en": "Print help"

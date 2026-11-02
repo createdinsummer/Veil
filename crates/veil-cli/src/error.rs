@@ -424,10 +424,11 @@ impl From<veil_core::error::VeilError> for CommandError {
         use veil_core::error::VeilError;
 
         let (code, detail) = match error {
+            VeilError::Database(error) => (ErrorCode::Config, error.to_string()),
             VeilError::Io(error) => (ErrorCode::Io, error.to_string()),
             VeilError::CommitUncertain(error) => (
                 ErrorCode::Io,
-                format!("元数据已发布，但持久化状态不确定: {error}"),
+                format!("提交结果或持久化状态不确定: {error}"),
             ),
             VeilError::Format(error) => (ErrorCode::Format, error),
             VeilError::WorkError(error) => (ErrorCode::Work, error),

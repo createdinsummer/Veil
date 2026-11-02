@@ -1,6 +1,6 @@
 //! 为各调用方组合容器定位与文件操作。
 
-use crate::config::{GlobalConfig, ResolvedVeil};
+use crate::config::{AppConfig, ResolvedVeil};
 use crate::import::collect_add_specs;
 use crate::operations::{ContainerOperation, ContainerOperationResult};
 use crate::veil_ops::{AddFileSpec, VeilManager};
@@ -33,7 +33,7 @@ impl ContainerHandle {
 }
 
 pub(crate) fn prepare_container(selector: &str) -> Result<ContainerHandle, VeilError> {
-    let mut config = GlobalConfig::load()?;
+    let mut config = AppConfig::load()?;
     Ok(ContainerHandle {
         resolved: config.resolve_veil(selector)?,
     })
@@ -123,16 +123,15 @@ pub(crate) fn commit_pack(
         return Err(WorkflowError::PackOutputExists(plan.output).into());
     }
     let manager = plan.container.manager();
-    let (metadata, bytes) = manager.read_meta_snapshot(password)?;
     let pack = crate::package::VeilPacker::new(&plan.output)
         .without_overwrite()
-        .pack(&manager.veil_dir, &metadata, &bytes);
+        .pack_container(&manager, password);
     if let Err(VeilError::Io(ref error)) = pack
         && error.kind() == std::io::ErrorKind::AlreadyExists
     {
         return Err(WorkflowError::PackOutputExists(plan.output).into());
     }
-    pack?;
+    let count = pack?;
     let size = std::fs::metadata(&plan.output)
         .map_err(VeilError::Io)?
         .len();
@@ -140,7 +139,7 @@ pub(crate) fn commit_pack(
         name: plan.container.resolved.veil_name,
         link_path: plan.container.resolved.link_path,
         output: plan.output,
-        file_count: metadata.files.len(),
+        file_count: count,
         size,
     })
 }
