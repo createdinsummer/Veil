@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 540">
+  <title>示例图片：山间清晨</title>
+  <defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#dce7e1"/><stop offset="1" stop-color="#f5f1df"/></linearGradient><linearGradient id="mountain" x2="0" y2="1"><stop stop-color="#799589"/><stop offset="1" stop-color="#3f6257"/></linearGradient></defs>
+  <path fill="url(#sky)" d="M0 0h800v540H0z"/><circle cx="580" cy="130" r="50" fill="#faf7e8"/>
+  <path fill="#b5c5ba" d="m0 340 140-152 125 129L440 95l190 225 170-122v342H0z"/>
+  <path fill="#94ac9e" d="m0 410 184-186 168 204L568 210l232 195v135H0z"/>
+  <path fill="url(#mountain)" d="M0 450q170-130 370-23t430-66v179H0z"/>
+  <path d="M0 465q220-35 390 20t410-20" stroke="#d0d8c3" stroke-width="4" fill="none" opacity=".5"/>
+</svg>

@@ -1,0 +1,5 @@
+module CVeilBridge {
+    header "veil_bridge.h"
+    link "veil_macos_bridge"
+    export *
+}

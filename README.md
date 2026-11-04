@@ -24,7 +24,9 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 | `veil-service` | 容器操作、工作区、链接及锁和版本控制的业务编排 |
 | `veil-cli` | 用户命令、密码输入、链接恢复、Veil 打包和解包 |
 | `veil-brute-force` | 对自行创建并通过 `veil pack` 生成的 `.veil` 文件进行密码强度测试 |
-| `veil-app` | Tauri 桌面原型，提供容器创建、打开、锁定和文件列表 |
+| `veil-macos` | 独立的 SwiftUI macOS 客户端，通过原生调用接口复用 `veil-service` |
+
+界面设计稿入口为 [`ui/index.html`](ui/index.html)，可直接用浏览器打开。包含首页、文件浏览、创建与解锁流程、视觉规范，以及明暗外观、窗口尺寸和页面状态切换；交互只使用临时示例数据。设计参数集中在 `ui/tokens.json`，修改参数或 SVG 图标后运行 `node ui/tools/build.mjs`，使用 `--check` 检查生成文件是否同步。
 
 ## 工作模型
 
@@ -69,9 +71,23 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 
 开发环境需要 Rust 工具链和 Cargo。构建 CLI 使用 `cargo build --package veil-cli`，发布构建使用 `cargo build --release --package veil-cli`。
 
+命令行打包与安装脚本统一位于 `scripts/cli/`：macOS、Linux 使用 `bash scripts/cli/build-unix.sh`，Windows 使用 `scripts/cli/build-windows.ps1` 或 `scripts/cli/build-windows.bat`；打包产物为 `release/cli/bin/veil`（Windows 为 `veil.exe`）。
+
 运行完整测试使用 `cargo test --workspace --all-targets`；故障恢复测试使用 `cargo test -p veil-service --features fault-injection --test storage_fault_tests`。生成库文档使用 `cargo doc --workspace --no-deps`。
 
-桌面端使用 React、TypeScript 和 Tauri。在 `apps/veil-app` 执行 `npm ci`、`npm run build` 或 `npm run tauri dev`。打开容器时选择包含 `veil.db` 的目录；空间、最近记录和偏好均通过 service 使用本机数据库。支持添加、预览、导出和删除文件。
+macOS 客户端使用 SwiftUI，位于 `apps/veil-macos`，要求 macOS 14+、Xcode 和 Rust，不依赖 Node.js。在项目根目录运行：
+
+```bash
+bash scripts/desktop/build-mac-app.sh
+```
+
+默认构建发布版，添加 `--debug` 构建调试版。产物统一放在 `release/desktop/`，仅保留带版本号和架构的 `.dmg` 安装包及 `.dmg.sha256` 校验文件；临时 `Veil.app` 自动清理，调试版安装包带 `_debug` 后缀。打开 DMG，将 Veil 拖入 Applications 即可安装。支持设置 `CARGO_TARGET_DIR` 指定 Rust 编译缓存目录。macOS 统一使用这一个构建脚本。
+
+DMG 使用固定的左右拖动布局，窗口为 640×360，图标为 88 点；首次构建会将固定版本的布局工具安装到客户端的 `.build/dmg-tools`，后续复用，不修改系统 Python。
+
+客户端支持空间管理、容器创建与解锁、文件与文件夹导入、分类与目录浏览、搜索、内置预览、导出、删除及 `.veil` 加密备份导入和导出，使用原生窗口、菜单、文件对话框及文件拖入。
+
+SwiftUI 客户端直接通过应用内的 C ABI 调用 `veil-service`，展示逻辑保留在 Swift，不新增公共展示层。它与 CLI 使用相同的本机数据目录和容器格式；休眠、屏幕休眠、系统用户会话失活及应用退出时锁定。内置预览沿用服务层的 16 MiB 读取限制，视频预览所需的临时文件在关闭预览或锁定时清理。原生接口测试使用 `cargo test -p veil-macos-bridge`。
 
 ## 关键边界
 
@@ -91,7 +107,8 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 | `crates/veil-cli` | `veil` 命令行程序和集成测试 |
 | `crates/veil-brute-force` | 密码强度测试工具 |
 | `crates/veil-scrollshot` | 独立的录屏转长截图模块与命令行程序 |
-| `apps/veil-app` | Tauri 和 React 桌面原型，独立于根 Cargo 工作空间 |
+| `apps/veil-macos` | SwiftUI macOS 客户端；`bridge` 是该客户端专用的 Rust 原生调用接口 |
+| `ui` | 可交互 HTML/CSS 设计稿、JSON 设计参数、SVG 素材及页面截图 |
 
 ## 许可证
 

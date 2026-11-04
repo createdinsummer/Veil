@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Veil 跨平台界面设计稿。所有交互仅操作临时示例数据。">
+  <title>Veil · 界面设计</title>
+  <link rel="icon" href="assets/brand.png">
+  <link rel="stylesheet" href="foundations/tokens.css">
+  <link rel="stylesheet" href="prototype.css">
+  <script defer src="foundations/icons.js"></script>
+  <script defer src="foundations/tokens.js"></script>
+  <script defer src="prototype.js"></script>
+</head>
+<body>
+  <header class="review-header">
+    <a class="review-brand" href="#home"><img src="assets/brand.png" alt=""><span>veil <small>DESIGN</small></span></a>
+    <nav class="review-nav" aria-label="设计页面">
+      <a href="#home" data-page="home">首页</a>
+      <a href="#files" data-page="files">文件浏览</a>
+      <a href="#create" data-page="create">创建容器</a>
+      <a href="#unlock" data-page="unlock">解锁容器</a>
+      <a href="#foundations" data-page="foundations">视觉规范</a>
+    </nav>
+    <button class="review-icon" data-action="theme" aria-label="切换深色外观" title="切换明暗外观"></button>
+  </header>
+  <div class="review-controls">
+    <p><span class="review-dot"></span>交互设计稿 <span class="review-divider">/</span> 仅使用示例数据</p>
+    <div class="review-settings">
+      <label>画布<select id="viewport" aria-label="画布尺寸"><option value="1160">桌面 · 1160</option><option value="820">紧凑 · 820</option><option value="390">手机 · 390</option></select></label>
+      <label>状态<select id="page-state" aria-label="示例页面状态"><option value="normal">正常</option><option value="empty">空内容</option><option value="loading">加载中</option><option value="error">错误</option></select></label>
+      <button class="review-reset" data-action="reset">重置示例</button>
+    </div>
+  </div>
+  <main class="stage-scroll" aria-label="设计预览">
+    <div class="design-frame" id="design-frame">
+      <div class="app-shell" id="app"></div>
+    </div>
+  </main>
+  <footer class="review-footer"><span>统一视觉，遵循平台交互习惯。</span><a href="tokens.json" target="_blank" rel="noopener">查看设计参数 JSON <span aria-hidden="true">↗</span></a></footer>
+  <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="no-script">此设计稿需要 JavaScript 才能切换页面与展示交互。</p></noscript>
+</body>
+</html>

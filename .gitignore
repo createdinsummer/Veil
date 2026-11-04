@@ -1,8 +1,7 @@
 /target
 **/node_modules
-/apps/veil-app/dist
-/apps/veil-app/src-tauri/target
-/apps/veil-app/src-tauri/gen
+/apps/veil-macos/.build
+/apps/veil-macos/.swiftpm
 
 .idea
 

@@ -1,0 +1,26 @@
+/* 自动生成自 ui/assets/icons.svg，支持直接以本地文件打开原型。 */
+window.VeilIcons = {
+  "shield": "<path d=\"M12 2.8 19 5.5v5.7c0 4.4-2.8 7.7-7 9.8-4.2-2.1-7-5.4-7-9.8V5.5z\"/><path d=\"m9.2 11.8 1.9 1.9 3.8-4\"/>",
+  "folder": "<path d=\"M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z\"/>",
+  "plus": "<path d=\"M12 5v14M5 12h14\"/>",
+  "arrow": "<path d=\"M5 12h14m-6-6 6 6-6 6\"/>",
+  "left": "<path d=\"M19 12H5m6-6-6 6 6 6\"/>",
+  "chevron": "<path d=\"m9 6 6 6-6 6\"/>",
+  "lock": "<rect x=\"5.5\" y=\"10\" width=\"13\" height=\"10.5\" rx=\"2\"/><path d=\"M8.5 10V7a3.5 3.5 0 0 1 7 0v3M12 14v3\"/>",
+  "unlock": "<rect x=\"5.5\" y=\"10\" width=\"13\" height=\"10.5\" rx=\"2\"/><path d=\"M8.5 10V7a3.5 3.5 0 0 1 6.8-1.1M12 14v3\"/>",
+  "file": "<path d=\"M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6\"/>",
+  "image": "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"3\"/><circle cx=\"8.5\" cy=\"8.5\" r=\"1.5\"/><path d=\"m4 18 5-5 3 3 3-4 5 6\"/>",
+  "video": "<rect x=\"3\" y=\"5\" width=\"14\" height=\"14\" rx=\"2\"/><path d=\"m17 10 4-2v8l-4-2z\"/>",
+  "archive": "<rect x=\"4\" y=\"5\" width=\"16\" height=\"15\" rx=\"2\"/><path d=\"M3 5h18M10 10h4\"/>",
+  "grid": "<rect x=\"3\" y=\"3\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"14\" y=\"3\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"3\" y=\"14\" width=\"7\" height=\"7\" rx=\"1.5\"/><rect x=\"14\" y=\"14\" width=\"7\" height=\"7\" rx=\"1.5\"/>",
+  "list": "<path d=\"M9 6h11M9 12h11M9 18h11M4 6h.1M4 12h.1M4 18h.1\"/>",
+  "refresh": "<path d=\"M20 11A8 8 0 0 0 6 6L4 8M4 4v4h4M4 13a8 8 0 0 0 14 5l2-2M20 20v-4h-4\"/>",
+  "download": "<path d=\"M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4\"/>",
+  "trash": "<path d=\"M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5m4-5v5\"/>",
+  "close": "<path d=\"m5 5 14 14M19 5 5 19\"/>",
+  "search": "<circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"m16 16 5 5\"/>",
+  "sun": "<circle cx=\"12\" cy=\"12\" r=\"4\"/><path d=\"M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5\"/>",
+  "moon": "<path d=\"M20 14A8.5 8.5 0 0 1 10 4a8.5 8.5 0 1 0 10 10Z\"/>",
+  "check": "<path d=\"m5 12 4 4L19 6\"/>",
+  "alert": "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v6m0 4h.01\"/>"
+};

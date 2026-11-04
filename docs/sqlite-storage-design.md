@@ -451,11 +451,11 @@ SQLCipher 的数据库密码保护与文件内容加密是两层能力。数据�
 
 ```bash
 cargo test --workspace --features veil-service/fault-injection
-npm run build --prefix apps/veil-app
-cargo check --manifest-path apps/veil-app/src-tauri/Cargo.toml
+# macOS 原生客户端
+bash scripts/desktop/build-mac-app.sh
 ```
 
-环境记录：macOS / aarch64 已运行完整回归和桌面端构建；`x86_64-pc-windows-gnu`、`x86_64-unknown-linux-gnu` 已进行交叉编译检查，Linux 原生 C 依赖通过临时 Zig 工具链构建。新增 `.github/workflows/storage.yml` 覆盖三个桌面系统的原生回归，目前尚无该 CI 的运行结果。Android、iOS 已接入私有目录提供入口，尚未编译或进行设备验证。
+环境记录：macOS / aarch64 已运行完整回归和桌面端构建；`x86_64-pc-windows-gnu`、`x86_64-unknown-linux-gnu` 已进行交叉编译检查，Linux 原生 C 依赖通过临时 Zig 工具链构建。新增 `.github/workflows/storage.yml` 覆盖三个桌面系统的原生回归，目前尚无该 CI 的运行结果。当前源码保留移动端服务层测试，Android、iOS 平台客户端尚待实现。
 
 规模验证包含宽目录 2000 个节点、深度 256、总计 2257 个节点的子树及目录分页；实际查询计划使用 `file_siblings` 和 `local_record_recent`。同机一次测量约 0.55 秒，仅记录该规模和环境，不据此承诺更大规模性能。
 

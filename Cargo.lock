@@ -1308,6 +1308,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "veil-macos-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "veil-core",
+ "veil-service",
+ "zeroize",
+]
+
+[[package]]
 name = "veil-scrollshot"
 version = "2.0.0"
 dependencies = [

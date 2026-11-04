@@ -72,6 +72,14 @@ pub enum ServiceRequest<'a> {
         name: String,
         destination: String,
     },
+    ExportSessionPackage {
+        destination: String,
+    },
+    ImportPackageInSpace {
+        path: String,
+        space: String,
+        password: String,
+    },
     RemoveSessionPath {
         name: String,
     },
@@ -383,6 +391,29 @@ impl VeilService {
             ServiceRequest::ExportSessionFile { name, destination } => {
                 self.export_file(&name, &destination)?;
                 Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::ExportSessionPackage { destination } => {
+                let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+                let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+                let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+                crate::package::VeilPacker::new(destination).without_overwrite()
+                    .pack_container(&manager, session.password.as_str())?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::ImportPackageInSpace { path, space, password } => {
+                let password = Zeroizing::new(password);
+                let link = crate::config::AppConfig::config_path()?.parent()
+                    .ok_or(ServiceError::InvalidInput("应用目录无效"))?
+                    .join("links").join(format!("{}.veil-link", crate::storage::id()));
+                let plan = crate::workflow::prepare_unpack(crate::workflow::UnpackOptions {
+                    package_path: &path,
+                    name: None,
+                    work_name: Some(&space),
+                    link_output: link.to_str(),
+                })?;
+                let unpacked = crate::workflow::commit_unpack(plan, password.as_str())?;
+                self.open(unpacked.directory.to_string_lossy().into_owned(), password.to_string())
+                    .map(ServiceResponse::Container)
             }
             ServiceRequest::RemoveSessionPath { name } => {
                 self.remove_path(&name).map(ServiceResponse::Container)

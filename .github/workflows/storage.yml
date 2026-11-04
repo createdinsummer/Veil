@@ -16,16 +16,3 @@ jobs:
           components: rustfmt
       - run: cargo test -p veil-core -p veil-service -p veil-cli -p veil-brute-force --features veil-service/fault-injection
       - run: cargo fmt --all -- --check
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: apps/veil-app/package-lock.json
-      - run: npm ci
-        working-directory: apps/veil-app
-      - run: npm run build
-        working-directory: apps/veil-app
