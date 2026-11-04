@@ -8,6 +8,11 @@ use std::{
     sync::OnceLock,
 };
 
+pub const UNLOCK_CACHE_SETTING: &str = "unlock_cache_seconds";
+/// 解锁成功后密码在本机内存中的保留时长；新库与缺少该配置的旧库都使用 1 小时。
+pub const DEFAULT_UNLOCK_CACHE_SECONDS: u64 = 3600;
+pub const MAX_UNLOCK_CACHE_SECONDS: u64 = 86_400;
+
 static PLATFORM_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 /// 移动端在初始化服务前传入应用私有目录；桌面端与 CLI 使用相同默认策略。
 pub fn configure_app_data_dir(path: PathBuf) -> Result<()> {
@@ -127,6 +132,28 @@ impl AppStore {
             tx.execute(
                 "INSERT INTO system_setting VALUES ('device_id',?1,?2)",
                 params![json(&id())?, now()],
+            )?;
+        }
+        // 旧库可能没有免密时长配置；缺失或损坏时补齐为 1 小时，已有合法值保持不动。
+        let unlock_cache: Option<String> = tx
+            .query_row(
+                "SELECT value_json FROM user_setting WHERE key=?1",
+                [UNLOCK_CACHE_SETTING],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let valid = unlock_cache
+            .as_deref()
+            .and_then(|text| parse::<serde_json::Value>(text).ok())
+            .is_some_and(|value| validate_setting(UNLOCK_CACHE_SETTING, &value).is_ok());
+        if !valid {
+            tx.execute(
+                "INSERT INTO user_setting VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+                params![
+                    UNLOCK_CACHE_SETTING,
+                    json(&DEFAULT_UNLOCK_CACHE_SECONDS)?,
+                    now()
+                ],
             )?;
         }
         tx.commit()?;
@@ -334,10 +361,11 @@ impl AppStore {
         Ok(())
     }
     pub fn user_setting(&self, key: &str) -> Result<serde_json::Value> {
-        let default = match key {
-            "hint_level" => "full",
-            "layout" => "grid",
-            "view_mode" => "type",
+        let default: serde_json::Value = match key {
+            "hint_level" => "full".into(),
+            "layout" => "grid".into(),
+            "view_mode" => "type".into(),
+            UNLOCK_CACHE_SETTING => serde_json::json!(DEFAULT_UNLOCK_CACHE_SECONDS),
             _ => return Err(invalid("未知用户设置")),
         };
         let value: Option<String> = self
@@ -348,12 +376,13 @@ impl AppStore {
                 |r| r.get(0),
             )
             .optional()?;
-        let value = value
-            .map(|s| parse(&s))
-            .transpose()?
-            .unwrap_or(serde_json::Value::String(default.into()));
+        let value = value.map(|s| parse(&s)).transpose()?.unwrap_or(default);
         validate_setting(key, &value)?;
         Ok(value)
+    }
+    pub fn unlock_cache_seconds(&self) -> Result<u64> {
+        let value = self.user_setting(UNLOCK_CACHE_SETTING)?;
+        value.as_u64().ok_or_else(|| invalid("免密时长无效"))
     }
     pub fn set_user_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         validate_setting(key, value)?;
@@ -418,6 +447,15 @@ impl AppStore {
     }
 }
 fn validate_setting(key: &str, value: &serde_json::Value) -> Result<()> {
+    if key == UNLOCK_CACHE_SETTING {
+        if !value
+            .as_u64()
+            .is_some_and(|seconds| seconds <= MAX_UNLOCK_CACHE_SECONDS)
+        {
+            return Err(invalid("免密时长必须是 0 至 24 小时的整数秒"));
+        }
+        return Ok(());
+    }
     let allowed: &[&str] = match key {
         "hint_level" => &["full", "brief", "off"],
         "layout" => &["grid", "list"],
@@ -492,4 +530,66 @@ fn validate_record<T: Serialize>(kind: &str, key: &str, value: &T) -> Result<()>
         _ => return Err(invalid("未知本机记录类型")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unlock_cache_setting_defaults_backfills_and_validates() {
+        let root = tempfile::TempDir::new().unwrap();
+        let store = AppStore::open(root.path()).unwrap();
+        assert_eq!(
+            store.unlock_cache_seconds().unwrap(),
+            DEFAULT_UNLOCK_CACHE_SECONDS
+        );
+
+        // 模拟旧库：没有免密时长配置，重新打开时应补齐为 1 小时。
+        store
+            .conn
+            .execute(
+                "DELETE FROM user_setting WHERE key=?1",
+                [UNLOCK_CACHE_SETTING],
+            )
+            .unwrap();
+        drop(store);
+        let store = AppStore::open(root.path()).unwrap();
+        assert_eq!(store.unlock_cache_seconds().unwrap(), 3600);
+        let stored: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT value_json FROM user_setting WHERE key=?1",
+                [UNLOCK_CACHE_SETTING],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("3600"));
+
+        assert!(
+            store
+                .set_user_setting(UNLOCK_CACHE_SETTING, &serde_json::json!(0))
+                .is_ok()
+        );
+        assert_eq!(store.unlock_cache_seconds().unwrap(), 0);
+        assert!(
+            store
+                .set_user_setting(UNLOCK_CACHE_SETTING, &serde_json::json!(900))
+                .is_ok()
+        );
+        assert_eq!(store.unlock_cache_seconds().unwrap(), 900);
+        for invalid_value in [
+            serde_json::json!(-1),
+            serde_json::json!(MAX_UNLOCK_CACHE_SECONDS + 1),
+            serde_json::json!(1.5),
+            serde_json::json!("3600"),
+        ] {
+            assert!(
+                store
+                    .set_user_setting(UNLOCK_CACHE_SETTING, &invalid_value)
+                    .is_err()
+            );
+        }
+    }
 }

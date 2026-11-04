@@ -183,6 +183,16 @@ h1 { color: var(--color-heading); font-size: var(--font-size-title); line-height
 .modal::backdrop { background: #18201b78; backdrop-filter: blur(3px); }
 .modal h2 { font-size: 18px; font-weight: 600; }
 .modal>p { color: var(--color-secondary); margin: 9px 0 20px; line-height: 1.8; }
+.space-location { margin-bottom: 19px; }
+.location-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; font-weight: 600; }
+.location-heading [hidden], .directory-examples[hidden] { display: none; }
+.location-card { display: flex; align-items: center; gap: 10px; padding: 12px; background: var(--color-canvas); border: 1px solid var(--color-border); border-radius: 9px; }
+.location-card>.icon { color: var(--color-secondary); }
+.location-copy { flex: 1; min-width: 0; }
+.location-copy strong { display: block; font-size: 12px; font-weight: 500; }
+.location-copy small { display: block; font-size: 10px; font-weight: 400; color: var(--color-muted); margin-top: 5px; overflow-wrap: anywhere; }
+.directory-examples { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid var(--color-border); border-radius: 9px; }
+.directory-examples p { color: var(--color-secondary); font-size: 11px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; margin-top: 20px; }
 .modal-actions .button { min-height: 38px; }
 .preview-modal { width: min(760px, calc(100vw - 32px)); }

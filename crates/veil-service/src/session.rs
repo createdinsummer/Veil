@@ -55,6 +55,7 @@ pub enum ServiceRequest<'a> {
     },
     CreateSpace {
         name: String,
+        path: Option<PathBuf>,
     },
     CreateInSpace {
         space: String,
@@ -365,8 +366,8 @@ impl VeilService {
             ServiceRequest::ListSpaces => {
                 Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
             }
-            ServiceRequest::CreateSpace { name } => {
-                crate::spaces::create_space(&name)?;
+            ServiceRequest::CreateSpace { name, path } => {
+                crate::spaces::create_space(&name, path.as_deref())?;
                 Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
             }
             ServiceRequest::CreateInSpace {
@@ -396,15 +397,22 @@ impl VeilService {
                 let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
                 let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
                 let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-                crate::package::VeilPacker::new(destination).without_overwrite()
+                crate::package::VeilPacker::new(destination)
+                    .without_overwrite()
                     .pack_container(&manager, session.password.as_str())?;
                 Ok(ServiceResponse::Done)
             }
-            ServiceRequest::ImportPackageInSpace { path, space, password } => {
+            ServiceRequest::ImportPackageInSpace {
+                path,
+                space,
+                password,
+            } => {
                 let password = Zeroizing::new(password);
-                let link = crate::config::AppConfig::config_path()?.parent()
+                let link = crate::config::AppConfig::config_path()?
+                    .parent()
                     .ok_or(ServiceError::InvalidInput("应用目录无效"))?
-                    .join("links").join(format!("{}.veil-link", crate::storage::id()));
+                    .join("links")
+                    .join(format!("{}.veil-link", crate::storage::id()));
                 let plan = crate::workflow::prepare_unpack(crate::workflow::UnpackOptions {
                     package_path: &path,
                     name: None,
@@ -412,8 +420,11 @@ impl VeilService {
                     link_output: link.to_str(),
                 })?;
                 let unpacked = crate::workflow::commit_unpack(plan, password.as_str())?;
-                self.open(unpacked.directory.to_string_lossy().into_owned(), password.to_string())
-                    .map(ServiceResponse::Container)
+                self.open(
+                    unpacked.directory.to_string_lossy().into_owned(),
+                    password.to_string(),
+                )
+                .map(ServiceResponse::Container)
             }
             ServiceRequest::RemoveSessionPath { name } => {
                 self.remove_path(&name).map(ServiceResponse::Container)

@@ -32,6 +32,85 @@ final class ModelsTests: XCTestCase {
 
 @MainActor
 final class NativeClientTests: XCTestCase {
+    func testCustomSpaceDirectoryIsPersistedAndUsedForNewContainers() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("目录集成测试需要独立的测试目录")
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let existingFile = root.appendingPathComponent("保留.txt")
+        try Data("已有文件".utf8).write(to: existingFile)
+        let name = "自选目录 " + UUID().uuidString
+        let store = AppStore()
+        await store.load()
+        await store.createSpace(name: name, directory: root)
+        XCTAssertNil(store.error)
+        let space = try XCTUnwrap(store.activeSpace)
+        XCTAssertEqual(space.name, name)
+        let actualDirectory = try FileManager.default.attributesOfItem(atPath: space.path)
+        let selectedDirectory = try FileManager.default.attributesOfItem(atPath: root.path)
+        XCTAssertEqual(try XCTUnwrap(actualDirectory[.systemFileNumber] as? NSNumber),
+                       try XCTUnwrap(selectedDirectory[.systemFileNumber] as? NSNumber))
+        XCTAssertEqual(try XCTUnwrap(actualDirectory[.systemNumber] as? NSNumber),
+                       try XCTUnwrap(selectedDirectory[.systemNumber] as? NSNumber))
+        await store.submit(.create(space: space.id), name: "新容器", password: "directory-test-password", confirmation: "directory-test-password")
+        XCTAssertNil(store.error)
+        let container = try XCTUnwrap(store.container)
+        XCTAssertEqual(URL(fileURLWithPath: container.path).deletingLastPathComponent().path, space.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: container.path + "/veil.db"))
+        await store.lock()
+        let reopened = AppStore()
+        await reopened.load()
+        XCTAssertEqual(reopened.spaces.first { $0.id == space.id }?.path, space.path)
+        await reopened.createSpace(name: "重复目录 " + UUID().uuidString, directory: root)
+        XCTAssertTrue(reopened.error?.contains("此目录已用于其他空间") == true)
+        XCTAssertEqual(try Data(contentsOf: existingFile), Data("已有文件".utf8))
+    }
+
+    func testUnlockCacheSkipsPasswordWithinWindowAndExpires() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("免密集成测试需要独立的测试目录")
+        }
+        let store = AppStore()
+        await store.load()
+        await store.setUnlockCache(seconds: 3600)
+        let space = try XCTUnwrap(store.activeSpace)
+        let password = "unlock-cache-password"
+        await store.submit(.create(space: space.id), name: "免密测试 " + UUID().uuidString,
+                           password: password, confirmation: password)
+        let created = try XCTUnwrap(store.container)
+        await store.lock()
+        XCTAssertNil(store.container)
+        XCTAssertNil(store.form)
+        // 自动锁定后，同一容器在 1 小时内直接用内存密码重开，不出现密码表单。
+        await store.chooseContainer(ContainerSummary(id: created.id, name: created.name, path: created.path))
+        XCTAssertNil(store.error)
+        XCTAssertNil(store.form)
+        XCTAssertEqual(store.container?.id, created.id)
+
+        // 主动锁定会清除内存密码，必须重新输入。
+        await store.lock(forgetPassword: true)
+        await store.chooseContainer(ContainerSummary(id: created.id, name: created.name, path: created.path))
+        XCTAssertEqual(store.form?.id, ContainerForm.open(path: created.path, name: created.name).id)
+        store.cancelForm()
+
+        // 超过配置时长后不再免密。
+        await store.setUnlockCache(seconds: 1)
+        await store.submit(.open(path: created.path, name: created.name), name: "",
+                           password: password, confirmation: "")
+        XCTAssertNotNil(store.container)
+        await store.lock()
+        try await Task.sleep(for: .milliseconds(1200))
+        await store.chooseContainer(ContainerSummary(id: created.id, name: created.name, path: created.path))
+        XCTAssertEqual(store.form?.id, ContainerForm.open(path: created.path, name: created.name).id)
+        store.cancelForm()
+        await store.setUnlockCache(seconds: 3600)
+        await store.lock(forgetPassword: true)
+    }
+
     func testFormNavigationLocksThePreviousContainerAndClearsCancelledInputState() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -53,8 +132,10 @@ final class NativeClientTests: XCTestCase {
         store.cancelForm()
         XCTAssertNil(store.form)
         XCTAssertNil(store.error)
+        // 刚创建的容器仍在免密时长内，重开时直接解锁而不显示密码表单。
         await store.chooseContainer(ContainerSummary(id: previous.id, name: previous.name, path: previous.path))
-        XCTAssertEqual(store.form?.id, ContainerForm.open(path: previous.path, name: previous.name).id)
+        XCTAssertNil(store.form)
+        XCTAssertEqual(store.container?.id, previous.id)
         await store.selectSpace(target)
         XCTAssertNil(store.form)
         XCTAssertNil(store.container)

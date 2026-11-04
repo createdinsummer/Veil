@@ -40,6 +40,7 @@ enum Request {
     ListRecents,
     CreateSpace {
         name: String,
+        path: Option<std::path::PathBuf>,
     },
     CreateContainer {
         space: String,
@@ -81,13 +82,17 @@ enum Request {
         key: String,
         value: serde_json::Value,
     },
+    /// 免密时长；只保存秒数到 app.db，密码仍由应用层保存在内存中。
+    SetUnlockCache {
+        seconds: u64,
+    },
 }
 
 fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String> {
     let request = match request {
         Request::ListSpaces => ServiceRequest::ListSpaces,
         Request::ListRecents => ServiceRequest::ListRecents,
-        Request::CreateSpace { name } => ServiceRequest::CreateSpace { name },
+        Request::CreateSpace { name, path } => ServiceRequest::CreateSpace { name, path },
         Request::CreateContainer {
             space,
             name,
@@ -128,6 +133,13 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::SetPreference { key, value } => {
             return serialize(service.execute(ServiceRequest::SetUserSetting {
                 key: &key,
+                value: &value,
+            }));
+        }
+        Request::SetUnlockCache { seconds } => {
+            let value = serde_json::json!(seconds);
+            return serialize(service.execute(ServiceRequest::SetUserSetting {
+                key: "unlock_cache_seconds",
                 value: &value,
             }));
         }

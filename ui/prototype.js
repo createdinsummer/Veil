@@ -220,7 +220,23 @@
       case 'retry': state.status = 'normal'; render(); break;
       case 'export': case 'backup': toast(action === 'backup' ? '加密备份导出流程示意，不生成真实文件。' : '文件导出流程示意，不生成真实文件。'); break;
       case 'component': toast('按钮交互示例'); break;
-      case 'new-space': showDialog(`<h2 id="modal-title">新建空间</h2><p>用不同空间整理你的加密容器。</p><form id="space-form"><label class="field">空间名称<input name="name" placeholder="例如：工作文件" maxlength="80" autocomplete="off" required></label><div id="space-error" class="error-box" role="alert" hidden></div><p class="demo-caption">仅在当前设计稿中添加示例空间。</p><div class="modal-actions">${button('取消', 'close-dialog')}<button type="submit" class="button primary">创建空间</button></div></form>`); break;
+      case 'new-space': showDialog(`<h2 id="modal-title">新建空间</h2><p>用不同空间整理你的加密容器。</p><form id="space-form"><label class="field">空间名称<input name="name" placeholder="例如：工作文件" maxlength="80" autocomplete="off" required></label><section class="space-location" aria-label="空间存储位置"><div class="location-heading"><span>存储位置</span><button type="button" class="text-button" data-action="reset-space-directory" hidden>恢复默认位置</button></div><div class="location-card">${icon('folder')}<span class="location-copy"><strong id="space-directory-name">默认位置</strong><small id="space-directory-path">由 Veil 自动管理</small></span>${button('选择目录…', 'select-space-directory')}</div><input type="hidden" name="path" value=""><p class="field-hint">此目录用于存放该空间内新建的容器。</p><div class="directory-examples" id="space-directory-options" aria-label="示例目录" hidden><p>选择示例目录</p>${button('文稿 / Veil', 'use-space-directory', 'folder', 'secondary', 'data-path="/Users/you/Documents/Veil"')}${button('外置磁盘 / Veil', 'use-space-directory', 'folder', 'secondary', 'data-path="/Volumes/Personal/Veil"')}</div></section><div id="space-error" class="error-box" role="alert" hidden></div><p class="demo-caption">设计稿使用示例目录，不访问本机文件。</p><div class="modal-actions">${button('取消', 'close-dialog')}<button type="submit" class="button primary">创建空间</button></div></form>`); break;
+      case 'select-space-directory': $('#space-directory-options').hidden = !$('#space-directory-options').hidden; break;
+      case 'use-space-directory': {
+        const path = target.dataset.path;
+        $('#space-form input[name="path"]').value = path;
+        $('#space-directory-name').textContent = basename(path);
+        $('#space-directory-path').textContent = path;
+        $('[data-action="reset-space-directory"]').hidden = false;
+        $('#space-directory-options').hidden = true;
+        $('#space-error').hidden = true;
+        break;
+      }
+      case 'reset-space-directory':
+        $('#space-form input[name="path"]').value = '';
+        $('#space-directory-name').textContent = '默认位置';
+        $('#space-directory-path').textContent = '由 Veil 自动管理';
+        target.hidden = true; $('#space-directory-options').hidden = true; $('#space-error').hidden = true; break;
       case 'add': showDialog(`<h2 id="modal-title">添加到容器</h2><p>添加到${state.mode === 'path' && state.directory ? `「${escape(state.directory)}」` : '根目录'}。同名文件不会被覆盖。</p><div class="recent-empty">${icon('file')}<span>示例文件.txt <small>· 2.4 KB</small></span></div><p class="demo-caption">设计稿仅添加示例条目，不读取本机文件。</p><div class="modal-actions">${button('取消', 'close-dialog')}${button('添加示例文件', 'confirm-add', 'plus', 'primary')}</div>`); break;
       case 'confirm-add': {
         const name = `示例文件${nextID++}.txt`;
@@ -244,8 +260,12 @@
       if (!name || data.spaces.some((space) => space.name === name)) {
         $('#space-error').hidden = false; $('#space-error').textContent = name ? '空间名称已存在' : '请输入空间名称'; return;
       }
+      const path = String(values.get('path') || '');
+      if (path && data.spaces.some((space) => space.path === path)) {
+        $('#space-error').hidden = false; $('#space-error').textContent = '此目录已用于其他空间，请选择其他目录'; return;
+      }
       const id = `space-${nextID++}`;
-      data.spaces.push({ id, name }); state.space = id; form.reset(); $('#modal').close(); navigate('home'); return;
+      data.spaces.push({ id, name, path }); state.space = id; form.reset(); $('#modal').close(); navigate('home'); return;
     }
     if (form.id !== 'container-form') return;
     const create = form.dataset.kind === 'create';

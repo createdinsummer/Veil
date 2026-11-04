@@ -53,8 +53,18 @@ struct VeilMacApp: App {
                     .keyboardShortcut("e", modifiers: [.command, .shift]).disabled(store.isBusy || store.container == nil)
                 Button("刷新") { Task { await store.refresh() } }
                     .keyboardShortcut("r").disabled(store.isBusy)
-                Button("锁定容器") { Task { await store.lock() } }
+                Button("锁定容器") { Task { await store.lock(forgetPassword: true) } }
                     .keyboardShortcut("l", modifiers: [.command, .shift]).disabled(store.container == nil && !store.isBusy)
+                Divider()
+                Menu("免密时长") {
+                    ForEach([0, 900, 1800, 3600, 7200, 14400], id: \.self) { seconds in
+                        Button(store.unlockCacheSeconds == seconds
+                               ? "\(AppStore.durationLabel(seconds))（当前）"
+                               : AppStore.durationLabel(seconds)) {
+                            Task { await store.setUnlockCache(seconds: seconds) }
+                        }
+                    }
+                }.disabled(store.isBusy)
             }
         }
     }

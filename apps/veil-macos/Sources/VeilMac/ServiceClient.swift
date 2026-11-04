@@ -15,6 +15,7 @@ struct NativeRequest: Encodable, Sendable {
     var destination: String? = nil
     var key: String? = nil
     var value: String? = nil
+    var seconds: Int? = nil
 }
 
 enum ClientError: LocalizedError {

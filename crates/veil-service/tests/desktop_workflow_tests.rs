@@ -28,23 +28,49 @@ fn desktop_flow_worker() {
     veil_core::kdf::enable_fast_test_kdf();
     let root = Path::new(&root);
     let service = VeilService::default();
+    let selected_directory = root.join("自选空间目录");
+    std::fs::create_dir(&selected_directory).unwrap();
+    std::fs::write(selected_directory.join("已有文件.txt"), b"keep").unwrap();
     let spaces = match service
         .execute(ServiceRequest::CreateSpace {
             name: "工作文件".into(),
+            path: Some(selected_directory.clone()),
         })
         .unwrap()
     {
         ServiceResponse::Spaces(spaces) => spaces,
         _ => panic!("预期返回空间列表"),
     };
-    assert!(Path::new(&spaces.iter().find(|s| s.name == "工作文件").unwrap().path).is_dir());
+    assert_eq!(
+        Path::new(&spaces.iter().find(|s| s.name == "工作文件").unwrap().path),
+        selected_directory.canonicalize().unwrap()
+    );
+    assert_eq!(
+        std::fs::read(selected_directory.join("已有文件.txt")).unwrap(),
+        b"keep"
+    );
     assert!(
         service
             .execute(ServiceRequest::CreateSpace {
-                name: "工作文件".into()
+                name: "工作文件".into(),
+                path: None,
             })
             .is_err()
     );
+    for path in [
+        selected_directory.clone(),
+        root.join("自选空间目录/已有文件.txt"),
+        "relative".into(),
+    ] {
+        assert!(
+            service
+                .execute(ServiceRequest::CreateSpace {
+                    name: "无效目录".into(),
+                    path: Some(path),
+                })
+                .is_err()
+        );
+    }
     let created = match service
         .execute(ServiceRequest::CreateInSpace {
             space: "工作文件".into(),
@@ -57,6 +83,10 @@ fn desktop_flow_worker() {
         _ => panic!("预期返回容器"),
     };
     let container_path = created.path.clone();
+    assert_eq!(
+        Path::new(&container_path).parent().unwrap(),
+        selected_directory.canonicalize().unwrap()
+    );
     let source = root.join("note.txt");
     std::fs::write(&source, b"hello").unwrap();
     let request = || ServiceRequest::ImportSessionFiles {

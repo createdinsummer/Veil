@@ -50,15 +50,35 @@ pub(crate) fn list_spaces() -> Result<Vec<SpaceView>, VeilError> {
         })
         .collect())
 }
-pub(crate) fn create_space(name: &str) -> Result<(), VeilError> {
+pub(crate) fn create_space(name: &str, path: Option<&std::path::Path>) -> Result<(), VeilError> {
     if name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err(VeilError::WorkError("空间名称无效".into()));
     }
     let mut store = AppStore::global()?;
-    if store.spaces()?.iter().any(|s| s.name == name) {
+    let spaces = store.spaces()?;
+    if spaces.iter().any(|s| s.name == name) {
         return Err(VeilError::WorkError("空间名称已存在".into()));
     }
-    store.create_space(name, None, false)?;
+    if let Some(path) = path {
+        if !path.is_absolute() {
+            return Err(VeilError::WorkError("空间目录必须是绝对路径".into()));
+        }
+        if path.try_exists()? {
+            if !path.is_dir() {
+                return Err(VeilError::WorkError("请选择文件夹作为空间目录".into()));
+            }
+            let canonical = std::fs::canonicalize(path)?;
+            if spaces
+                .iter()
+                .any(|s| s.local_path.as_ref() == Some(&canonical))
+            {
+                return Err(VeilError::WorkError(
+                    "此目录已用于其他空间，请选择其他目录".into(),
+                ));
+            }
+        }
+    }
+    store.create_space(name, path, false)?;
     Ok(())
 }
 pub(crate) fn create_container(

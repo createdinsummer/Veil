@@ -22,12 +22,45 @@ final class AppStore: ObservableObject {
     @Published var error: String?
     @Published var notice: String?
     @Published private(set) var thumbnails: [String: Data] = [:]
+    /// 解锁成功后密码在本机内存中的保留时长，来自 app.db。
+    @Published private(set) var unlockCacheSeconds = 3600
 
     private let client = ServiceClient()
     private var generation: UInt64 = 0
     private var loaded = false
     private var thumbnailBatch = UUID()
     private var thumbnailVersions: [String: Int] = [:]
+    /// 只存在进程内存中，随退出消失；不写入 app.db 或磁盘。
+    private var unlockedPasswords: [String: UnlockedPassword] = [:]
+
+    private struct UnlockedPassword {
+        let secret: String
+        let expiresAt: Date
+    }
+
+    var unlockCacheDescription: String { Self.durationLabel(unlockCacheSeconds) }
+
+    static func durationLabel(_ seconds: Int) -> String {
+        switch seconds {
+        case ...0: "关闭"
+        case ..<3600: "\(max(1, seconds / 60)) 分钟"
+        default: "\(seconds / 3600) 小时"
+        }
+    }
+
+    private func rememberUnlock(_ password: String, id: String) {
+        guard unlockCacheSeconds > 0 else { unlockedPasswords.removeValue(forKey: id); return }
+        unlockedPasswords[id] = UnlockedPassword(
+            secret: password,
+            expiresAt: Date().addingTimeInterval(TimeInterval(unlockCacheSeconds))
+        )
+    }
+
+    private func cachedUnlock(for id: String) -> String? {
+        guard let entry = unlockedPasswords[id] else { return nil }
+        guard entry.expiresAt > Date() else { unlockedPasswords.removeValue(forKey: id); return nil }
+        return entry.secret
+    }
 
     var isBusy: Bool { pendingOperations > 0 }
     var activeSpace: Space? { spaces.first { $0.id == selectedSpaceID } ?? spaces.first { $0.isDefault } ?? spaces.first }
@@ -76,8 +109,10 @@ final class AppStore: ObservableObject {
             try await self.reloadCatalog()
             let layout: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "layout"))
             let mode: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "view_mode"))
+            let cache: Double = try await self.client.json(NativeRequest(operation: "get_preference", key: "unlock_cache_seconds"))
             self.layout = FileLayout(rawValue: layout) ?? .grid
             self.browseMode = BrowseMode(rawValue: mode) ?? .type
+            self.unlockCacheSeconds = Int(cache.rounded())
             self.loaded = true
         }
     }
@@ -110,13 +145,15 @@ final class AppStore: ObservableObject {
     }
 
     /// 先隐藏敏感内容；迟到的解锁和预览响应不能恢复界面。
+    /// 自动锁定（休眠、锁屏、退出）保留内存中的免密密码，主动锁定则清除。
     @discardableResult
-    func lock() async -> Bool {
+    func lock(forgetPassword: Bool = false) async -> Bool {
         generation &+= 1
         container = nil
         form = nil
         resetBrowser()
         notice = nil
+        if forgetPassword { unlockedPasswords.removeAll() }
         pendingOperations += 1
         defer { pendingOperations -= 1 }
         do {
@@ -143,6 +180,32 @@ final class AppStore: ObservableObject {
         if container != nil { guard await lock() else { return } }
         if let space = spaces.first(where: { $0.containers.contains(where: { $0.id == item.id }) }) { selectedSpaceID = space.id }
         error = nil
+        // 同一容器在免密时长内直接用内存中的密码重新打开，不再弹密码框。
+        if let password = cachedUnlock(for: item.id) {
+            pendingOperations += 1
+            defer { pendingOperations -= 1 }
+            do {
+                try await client.execute(NativeRequest(operation: "lock"))
+                resetBrowser()
+                let view: ContainerSnapshot = try await client.json(
+                    NativeRequest(operation: "open_container", password: password, path: item.path)
+                )
+                container = view
+                form = nil
+                do {
+                    try await reloadCatalog()
+                    if let space = spaces.first(where: { $0.containers.contains(where: { $0.id == view.id }) }) {
+                        selectedSpaceID = space.id
+                    }
+                } catch {
+                    notice = "容器已打开，空间列表刷新失败：\(error.localizedDescription)"
+                }
+                return
+            } catch {
+                // 密码已失效（例如容器被重建），清除缓存后回到输入密码流程。
+                unlockedPasswords.removeValue(forKey: item.id)
+            }
+        }
         form = .open(path: item.path, name: item.name)
     }
 
@@ -210,6 +273,7 @@ final class AppStore: ObservableObject {
             }
             self.container = view
             self.form = nil
+            self.rememberUnlock(password, id: view.id)
             do {
                 try await self.reloadCatalog()
                 if let space = self.spaces.first(where: { $0.containers.contains(where: { $0.id == view.id }) }) { self.selectedSpaceID = space.id }
@@ -217,10 +281,12 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func createSpace(name: String) async {
+    func createSpace(name: String, directory: URL? = nil) async {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scoped = directory?.startAccessingSecurityScopedResource() ?? false
+        defer { if scoped { directory?.stopAccessingSecurityScopedResource() } }
         await perform { ticket in
-            let spaces: [Space] = try await self.client.json(NativeRequest(operation: "create_space", name: name))
+            let spaces: [Space] = try await self.client.json(NativeRequest(operation: "create_space", name: name, path: directory?.path))
             guard ticket == self.generation else { return }
             self.spaces = spaces
             self.showNewSpace = false
@@ -250,6 +316,16 @@ final class AppStore: ObservableObject {
             try await client.execute(NativeRequest(operation: "set_preference", key: "layout", value: layout))
             try await client.execute(NativeRequest(operation: "set_preference", key: "view_mode", value: mode))
         } catch { self.error = error.localizedDescription }
+    }
+
+    /// 免密时长只写入 app.db 的设置项；密码本身仍只在内存中。
+    func setUnlockCache(seconds: Int) async {
+        await perform { _ in
+            try await self.client.execute(NativeRequest(operation: "set_unlock_cache", seconds: seconds))
+            self.unlockCacheSeconds = seconds
+            if seconds == 0 { self.unlockedPasswords.removeAll() }
+            self.notice = seconds == 0 ? "已关闭免密重开" : "免密时长已设为 \(self.unlockCacheDescription)"
+        }
     }
 
     func chooseImport(directory: Bool) async {

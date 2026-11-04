@@ -57,8 +57,8 @@ struct ContentView: View {
                     .buttonStyle(.plain).disabled(store.isBusy)
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(VeilIconButtonStyle()).help("刷新").disabled(store.isBusy)
-                Button { Task { await store.lock() } } label: { Label("锁定", systemImage: "lock") }
-                    .buttonStyle(.plain).help("锁定容器")
+                Button { Task { await store.lock(forgetPassword: true) } } label: { Label("锁定", systemImage: "lock") }
+                    .buttonStyle(.plain).help("锁定容器并清除免密密码")
             } else {
                 Label("本地模式", systemImage: "lock").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                 Menu {
@@ -174,7 +174,9 @@ private struct HomeView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("\(store.activeSpace?.name ?? "本机")的容器").font(.system(size: 15, weight: .semibold))
-                            Text("选择容器并输入密码打开").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
+                            Text(store.unlockCacheSeconds > 0
+                                 ? "选择容器打开，\(store.unlockCacheDescription)内重开无需密码"
+                                 : "选择容器并输入密码打开").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                         }
                         Spacer()
                         Button { Task { await store.chooseContainerDirectory() } } label: {

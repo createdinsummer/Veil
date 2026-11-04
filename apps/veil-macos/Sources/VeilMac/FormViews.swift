@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContainerFormView: View {
@@ -69,6 +70,14 @@ struct ContainerFormView: View {
                         .disabled(store.isBusy).padding(.top, 3)
                     Label("密码仅用于本地加密。忘记密码后无法恢复。", systemImage: "lock")
                         .font(.system(size: 10)).foregroundStyle(VeilTheme.muted).frame(maxWidth: .infinity)
+                    if !form.isCreate {
+                        Label(store.unlockCacheSeconds > 0
+                              ? "解锁成功后，密码只在本机内存中保留 \(store.unlockCacheDescription)，期间重新打开此容器无需再次输入。"
+                              : "免密重开已关闭，每次打开都需要输入密码。",
+                              systemImage: "clock")
+                            .font(.system(size: 10)).foregroundStyle(VeilTheme.muted)
+                            .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+                    }
                 }.padding(27).background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 16))
                     .overlay(RoundedRectangle(cornerRadius: 16).stroke(VeilTheme.border))
                     .shadow(color: .black.opacity(0.02), radius: 15, y: 10).padding(.top, 29)
@@ -111,6 +120,7 @@ struct ContainerFormView: View {
 struct NewSpaceView: View {
     @EnvironmentObject private var store: AppStore
     @State private var name = ""
+    @State private var directory: URL?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -118,16 +128,58 @@ struct NewSpaceView: View {
             Label("新建空间", systemImage: "folder.badge.plus").font(.title2.weight(.semibold))
             Text("用不同空间整理工作与生活中的加密容器。").font(.callout).foregroundStyle(.secondary)
             if let error = store.error { FeedbackBanner(message: error, isError: true) { store.error = nil } }
-            TextField("例如：工作文件", text: $name).textFieldStyle(.roundedBorder).controlSize(.large).focused($focused)
-                .disabled(store.isBusy)
+            VStack(alignment: .leading, spacing: 9) {
+                Text("空间名称").font(.system(size: 12, weight: .medium))
+                TextField("例如：工作文件", text: $name).textFieldStyle(.plain).focused($focused)
+                    .accessibilityLabel("空间名称").font(.system(size: 12)).padding(.horizontal, 13)
+                    .frame(height: VeilDesign.layout("field-height"))
+                    .background(VeilTheme.canvas, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(VeilTheme.border))
+            }.disabled(store.isBusy)
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("存储位置").font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    if directory != nil {
+                        Button("恢复默认位置") { directory = nil }.buttonStyle(.plain)
+                            .font(.system(size: 11)).foregroundStyle(VeilTheme.secondary)
+                    }
+                }
+                HStack(spacing: 10) {
+                    Image(systemName: "folder").foregroundStyle(VeilTheme.secondary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(directory?.lastPathComponent ?? "默认位置")
+                            .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(directory?.path ?? "由 Veil 自动管理")
+                            .font(.system(size: 10)).foregroundStyle(VeilTheme.muted)
+                            .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Button("选择目录…", action: chooseDirectory).buttonStyle(VeilButtonStyle())
+                }.padding(12).background(VeilTheme.canvas, in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(VeilTheme.border))
+                Text("此目录用于存放该空间内新建的容器。")
+                    .font(.system(size: 10)).foregroundStyle(VeilTheme.muted)
+            }.disabled(store.isBusy)
             HStack {
                 if store.isBusy { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("取消") { store.error = nil; store.showNewSpace = false }.keyboardShortcut(.cancelAction).buttonStyle(VeilButtonStyle()).disabled(store.isBusy)
-                Button("创建") { Task { await store.createSpace(name: name) } }
+                Button("创建空间") { Task { await store.createSpace(name: name, directory: directory) } }
                     .buttonStyle(VeilButtonStyle(variant: .primary)).keyboardShortcut(.defaultAction).disabled(store.isBusy)
             }
         }.padding(30).frame(width: 400).foregroundStyle(VeilTheme.text).background(VeilTheme.card).tint(VeilTheme.accent)
             .interactiveDismissDisabled(store.isBusy).onAppear { focused = true }
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.title = "选择空间存储目录"
+        panel.prompt = "选择目录"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = directory
+        if panel.runModal() == .OK { directory = panel.url }
     }
 }
