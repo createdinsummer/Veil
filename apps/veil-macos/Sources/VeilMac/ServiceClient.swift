@@ -30,6 +30,26 @@ enum ClientError: LocalizedError {
     }
 }
 
+struct TransferProgress: Decodable, Sendable {
+    let operation: String
+    let phase: String
+    let processedBytes: UInt64
+    let totalBytes: UInt64?
+    let completedFiles: UInt64
+    let skippedFiles: UInt64
+    let totalFiles: UInt64
+    let currentFile: String?
+    let cancelRequested: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case operation, phase
+        case processedBytes = "processed_bytes", totalBytes = "total_bytes"
+        case completedFiles = "completed_files", skippedFiles = "skipped_files"
+        case totalFiles = "total_files", currentFile = "current_file"
+        case cancelRequested = "cancel_requested"
+    }
+}
+
 /// 句柄由 actor 独占使用；最后一个引用释放时销毁 Rust 会话。
 private final class RustHandle: @unchecked Sendable {
     let pointer: OpaquePointer
@@ -39,7 +59,17 @@ private final class RustHandle: @unchecked Sendable {
 
 /// 文件与加密调用在 actor 上串行执行，不阻塞界面主线程。
 actor ServiceClient {
-    private let handle = RustHandle()
+    nonisolated private let handle = RustHandle()
+
+    /// 不经过 actor 队列，允许操作执行期间并发读取进度。
+    nonisolated func transferProgress() -> TransferProgress? {
+        let response = veil_client_progress(handle.pointer)
+        defer { veil_buffer_free(response) }
+        guard response.kind == 0, let pointer = response.data else { return nil }
+        return try? JSONDecoder().decode(TransferProgress.self, from: Data(bytes: pointer, count: response.length))
+    }
+
+    nonisolated func cancelTransfer() -> Bool { veil_client_cancel_transfer(handle.pointer) }
 
     private func perform(_ request: NativeRequest) throws -> (UInt32, Data) {
         var input = try JSONEncoder().encode(request)

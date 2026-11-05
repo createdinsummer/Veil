@@ -360,6 +360,7 @@ fn encrypt_reader(
     let mut buffer = vec![0u8; CHUNK_SIZE];
 
     for chunk_index in 0..count {
+        crate::progress::check_cancelled()?;
         let plaintext_len = chunk_plaintext_len(plaintext_size, chunk_index)?;
         let plaintext = &mut buffer[..plaintext_len];
         reader.read_exact(plaintext)?;
@@ -368,10 +369,12 @@ fn encrypt_reader(
         let aad = chunk_aad(chunk_index);
         let ciphertext = encrypt_chunk(data_key, &nonce, plaintext, &aad)?;
         writer.write_all(&ciphertext)?;
+        crate::progress::advance(plaintext_len as u64);
         #[cfg(any(test, feature = "fault-injection"))]
         crate::fsutil::fault_point("during_cipher_write");
     }
 
+    crate::progress::check_cancelled()?;
     ensure_reader_eof(reader)
 }
 
@@ -386,13 +389,16 @@ fn decrypt_reader(
     let count = chunk_count(plaintext_size)?;
 
     for chunk_index in 0..count {
+        crate::progress::check_cancelled()?;
         let ciphertext = read_chunk_ciphertext(reader, plaintext_size, chunk_index)?;
         let nonce = chunk_nonce(base_nonce, chunk_index);
         let aad = chunk_aad(chunk_index);
         let plaintext = decrypt_chunk(data_key, &nonce, &ciphertext, &aad)?;
         writer.write_all(&plaintext)?;
+        crate::progress::advance(plaintext.len() as u64);
     }
 
+    crate::progress::check_cancelled()?;
     ensure_reader_eof(reader)
 }
 
@@ -459,7 +465,15 @@ fn publish_atomic_output(
             .map_err(|error| VeilError::Io(error.error))?;
     } else {
         if staged {
-            crate::fsutil::publish_staged_file(output.path(), destination_path)?;
+            crate::fsutil::publish_staged_file(output.path(), destination_path).map_err(
+                |error| {
+                    if crate::progress::is_cancelled_io(&error) {
+                        VeilError::Cancelled
+                    } else {
+                        VeilError::Io(error)
+                    }
+                },
+            )?;
         } else {
             output
                 .persist_noclobber(destination_path)
@@ -504,6 +518,67 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn cancellation_stops_encryption_at_a_chunk_boundary() {
+        struct CancelAfterWrite {
+            progress: crate::progress::Progress,
+            written: usize,
+        }
+        impl Write for CancelAfterWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.written += bytes.len();
+                assert!(self.progress.request_cancel());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let progress = crate::progress::Progress::default();
+        let _scope = progress.begin("import");
+        crate::progress::start(Some((CHUNK_SIZE * 2) as u64));
+        let mut input = std::io::Cursor::new(vec![7; CHUNK_SIZE * 2]);
+        let mut output = CancelAfterWrite {
+            progress: progress.clone(),
+            written: 0,
+        };
+        assert!(matches!(
+            encrypt_reader(
+                &mut input,
+                &mut output,
+                &[1; 32],
+                &[2; 12],
+                (CHUNK_SIZE * 2) as u64
+            ),
+            Err(VeilError::Cancelled)
+        ));
+        assert_eq!(output.written, CHUNK_SIZE + TAG_LEN);
+    }
+
+    #[test]
+    fn transfer_progress_counts_plaintext_for_encryption_and_decryption() {
+        let root = TempDir::new().unwrap();
+        let input = root.path().join("input");
+        let encrypted = root.path().join("encrypted");
+        let output = root.path().join("output");
+        let size = CHUNK_SIZE + 37;
+        fs::write(&input, vec![42; size]).unwrap();
+        let progress = crate::progress::Progress::default();
+        {
+            let _scope = progress.begin("import");
+            crate::progress::start(Some(size as u64));
+            encrypt_file_streaming(&input, &encrypted, &[1; 32], &[2; 12]).unwrap();
+            assert_eq!(progress.snapshot().processed_bytes, size as u64);
+        }
+        {
+            let _scope = progress.begin("export");
+            crate::progress::start(Some(size as u64));
+            decrypt_file_streaming(&encrypted, &output, &[1; 32], &[2; 12], size as u64).unwrap();
+            assert_eq!(progress.snapshot().processed_bytes, size as u64);
+        }
+        assert_eq!(fs::read(input).unwrap(), fs::read(output).unwrap());
+    }
 
     /// 构造跨多个分块的确定性测试数据。
     fn multi_chunk_plaintext() -> Vec<u8> {

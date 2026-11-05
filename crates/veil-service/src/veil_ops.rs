@@ -100,6 +100,26 @@ struct Pending {
     base_key: Option<DataKey>,
     unchanged: bool,
 }
+
+/// 仅在提交前中止时清除本次操作创建的密文；提交结果不确定时交给常规恢复流程。
+struct CancelledFiles {
+    files: Vec<PathBuf>,
+    staging: Vec<PathBuf>,
+    committed: bool,
+}
+impl Drop for CancelledFiles {
+    fn drop(&mut self) {
+        if self.committed || veil_core::progress::check_cancelled().is_ok() {
+            return;
+        }
+        for path in &self.files {
+            let _ = fs::remove_file(path);
+        }
+        for path in &self.staging {
+            let _ = fs::remove_dir(path);
+        }
+    }
+}
 impl VeilManager {
     pub fn new(veil_dir: PathBuf) -> Self {
         Self {
@@ -282,6 +302,21 @@ impl VeilManager {
             .remove(0))
     }
     pub fn add_files(&self, files: &[AddFileSpec], password: &str) -> Result<Vec<String>> {
+        self.add_files_inner(files, password, true)
+    }
+    pub(crate) fn add_files_without_cleanup(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+    ) -> Result<Vec<String>> {
+        self.add_files_inner(files, password, false)
+    }
+    fn add_files_inner(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+        cleanup: bool,
+    ) -> Result<Vec<String>> {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("写入文件");
         let mut db = self.open_db(password)?;
@@ -354,6 +389,11 @@ impl VeilManager {
             LockMode::Write,
         )?;
         let credentials = guard.credentials()?;
+        let mut cancelled_files = CancelledFiles {
+            files: Vec::new(),
+            staging: Vec::new(),
+            committed: false,
+        };
         // 申请锁可能等待其他写入完成；先复核快照，避免访问已经失去引用的旧密文。
         let current = self.open_db(password)?;
         for p in &pending {
@@ -371,8 +411,10 @@ impl VeilManager {
                 .unwrap();
             let staging = self.veil_dir.join(".staging").join(&credential.lock_id);
             crate::fsutil::create_dir_all_durable(&staging)?;
+            cancelled_files.staging.push(staging.clone());
             p.cipher = format!("{}_{}.enc", credential.lock_id, id());
             let staged = staging.join(&p.cipher);
+            cancelled_files.files.push(staged.clone());
             fault("before_cipher_write");
             p.size = file_ops::encrypt_staged_file(
                 &p.spec.source,
@@ -381,7 +423,15 @@ impl VeilManager {
                 &p.nonce,
             )?;
             fault("after_cipher_write");
-            crate::fsutil::publish_staged_file(&staged, &self.veil_dir.join(&p.cipher))?;
+            let published = self.veil_dir.join(&p.cipher);
+            crate::fsutil::publish_staged_file(&staged, &published).map_err(|error| {
+                if veil_core::progress::is_cancelled_io(&error) {
+                    VeilError::Cancelled
+                } else {
+                    VeilError::Io(error)
+                }
+            })?;
+            cancelled_files.files.push(published);
             crate::fsutil::sync_directory(&self.veil_dir)?;
             fault("after_cipher_persist");
             if let Some(base) = &p.base {
@@ -400,6 +450,7 @@ impl VeilManager {
                 }
             }
         }
+        veil_core::progress::check_cancelled()?;
         // 重新打开可识别其他进程改密；旧密码连接不能提交较早启动的写入。
         let mut db = self.open_db(password)?;
         if db.info()?.0 != veil_id {
@@ -483,7 +534,10 @@ impl VeilManager {
             }
             locks::release_in(&tx, c)?;
         }
+        veil_core::progress::check_cancelled()?;
         fault("before_metadata_commit");
+        // 提交一旦开始，不能依据中止请求推断数据库是否已引用密文。
+        cancelled_files.committed = true;
         let commit = tx.commit();
         drop(db);
         #[cfg(feature = "fault-injection")]
@@ -513,7 +567,9 @@ impl VeilManager {
         }
         fault("after_metadata_commit");
         drop(guard);
-        let _ = self.cleanup(password);
+        if cleanup {
+            let _ = self.cleanup(password);
+        }
         Ok(pending.into_iter().map(|p| p.cipher).collect())
     }
     fn read_locked(
@@ -549,6 +605,51 @@ impl VeilManager {
             .material()?;
         Ok((db, node, guard, key))
     }
+
+    /// 对已存在的目标逐块核对明文；只有内容相同时才能作为已完成文件跳过。
+    pub fn matches_existing_file(&self, name: &str, source: &Path, password: &str) -> Result<bool> {
+        use std::io::{Read, Write};
+        struct Compare<R> {
+            source: R,
+            matches: bool,
+        }
+        impl<R: Read> Write for Compare<R> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let mut input = vec![0; bytes.len()];
+                self.source.read_exact(&mut input)?;
+                self.matches &= input == bytes;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let input = fs::File::open(source)?;
+        let before = input.metadata()?;
+        let (db, node, guard, key) = self.read_locked(name, password)?;
+        if Some(before.len()) != node.size {
+            return Ok(false);
+        }
+        let mut comparison = Compare {
+            source: input,
+            matches: true,
+        };
+        file_ops::decrypt_file_to_writer(
+            &self.veil_dir.join(node.cipher()?),
+            &mut comparison,
+            &key,
+            &node.nonce()?,
+            before.len(),
+        )?;
+        let after = comparison.source.metadata()?;
+        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err(invalid("核对期间源文件发生变化"));
+        }
+        for credential in guard.credentials()? {
+            locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
+        }
+        Ok(comparison.matches)
+    }
     pub fn extract_file(&self, name: &str, output: &Path, password: &str) -> Result<()> {
         self.extract_file_with_version(name, output, password)
             .map(|_| ())
@@ -571,6 +672,7 @@ impl VeilManager {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("读取文件");
         let (db, node, guard, key) = self.read_locked(name, password)?;
+        veil_core::progress::start(node.size);
         let version = VersionSnapshot {
             veil_id: db.info()?.0,
             file_id: node.id.clone(),
@@ -590,6 +692,7 @@ impl VeilManager {
             &node.nonce()?,
             node.size.unwrap(),
         )?;
+        veil_core::progress::finalizing();
         fault("before_plaintext_publish");
         let mut fresh = self.open_db(password)?;
         let tx = fresh.conn.transaction()?;
@@ -992,8 +1095,19 @@ impl VeilManager {
         target.execute("DELETE FROM operation_locks", [])?;
         drop(target);
         // 数据库引用的文件受读租约保护；新增文件属于之后的数据库版本。
+        let total = before
+            .iter()
+            .filter(|n| n.kind == "file")
+            .try_fold(0u64, |total, node| {
+                total.checked_add(
+                    fs::metadata(self.veil_dir.join(node.cipher().ok()?))
+                        .ok()?
+                        .len(),
+                )
+            });
+        veil_core::progress::stage("snapshot", total);
         for n in before.iter().filter(|n| n.kind == "file") {
-            crate::fsutil::copy_file_new(
+            crate::fsutil::copy_file_new_with_progress(
                 &self.veil_dir.join(n.cipher()?),
                 &destination.join(n.cipher()?),
             )?;
@@ -1052,4 +1166,36 @@ fn fault(stage: &str) {
     }
     #[cfg(not(any(test, feature = "fault-injection")))]
     let _ = stage;
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn cancellation_cleans_only_uncommitted_files() {
+        let root = tempfile::TempDir::new().unwrap();
+        let staged_dir = root.path().join("staging");
+        fs::create_dir(&staged_dir).unwrap();
+        let uncommitted = root.path().join("uncommitted.enc");
+        let committed = root.path().join("committed.enc");
+        fs::write(&uncommitted, b"unfinished").unwrap();
+        fs::write(&committed, b"finished").unwrap();
+        let progress = veil_core::progress::Progress::default();
+        let _scope = progress.begin("import");
+        veil_core::progress::start(Some(1));
+        assert!(progress.request_cancel());
+        drop(CancelledFiles {
+            files: vec![uncommitted.clone()],
+            staging: vec![staged_dir.clone()],
+            committed: false,
+        });
+        drop(CancelledFiles {
+            files: vec![committed.clone()],
+            staging: vec![],
+            committed: true,
+        });
+        assert!(!uncommitted.exists());
+        assert!(!staged_dir.exists());
+        assert_eq!(fs::read(committed).unwrap(), b"finished");
+    }
 }

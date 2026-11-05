@@ -14,6 +14,7 @@ pub mod kdf;
 pub mod locking;
 pub mod metadata;
 pub mod mime;
+pub mod progress;
 pub mod temp;
 pub mod veil_package;
 pub mod version;

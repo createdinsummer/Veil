@@ -24,6 +24,12 @@ struct ContentView: View {
         }
         .foregroundStyle(VeilTheme.text)
         .ignoresSafeArea(.container, edges: .top)
+        .overlay(alignment: .bottom) {
+            if let title = store.transferTitle {
+                TransferProgressView(title: title, progress: store.transferProgress)
+                    .padding(.bottom, 20)
+            }
+        }
         .overlay(alignment: .bottomTrailing) {
             if let notice = store.notice {
                 FeedbackBanner(message: notice, isError: false) { store.notice = nil }
@@ -91,6 +97,61 @@ struct ContentView: View {
             .padding(.horizontal, store.container == nil ? 32 : 24)
             .padding(.leading, sidebarVisible ? 0 : 76)
             .frame(height: store.container == nil ? VeilDesign.layout("header") : 52)
+    }
+}
+
+struct TransferProgressView: View {
+    @EnvironmentObject private var store: AppStore
+    let title: String
+    let progress: TransferProgress?
+
+    private var stage: String {
+        if progress?.cancelRequested == true { return "正在中止" }
+        return switch progress?.phase {
+        case "snapshot": "正在创建快照"
+        case "packing": "正在打包"
+        case "unpacking": "正在解包"
+        case "verifying": "正在核对"
+        case "processing": "正在处理"
+        case "finalizing": "正在完成"
+        default: "正在准备"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).fontWeight(.semibold)
+                Spacer()
+                if let progress, ["processing", "verifying", "snapshot", "packing", "unpacking"].contains(progress.phase), let total = progress.totalBytes, total > 0 {
+                    Text("\(Int(min(1, Double(progress.processedBytes) / Double(total)) * 100))%")
+                        .monospacedDigit().foregroundStyle(VeilTheme.secondary)
+                }
+            }
+            if let progress, ["processing", "verifying", "snapshot", "packing", "unpacking"].contains(progress.phase), let total = progress.totalBytes, total > 0 {
+                ProgressView(value: min(1, Double(progress.processedBytes) / Double(total)))
+                Text("\(stage) · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: progress.processedBytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(clamping: total), countStyle: .file))")
+                    .foregroundStyle(VeilTheme.secondary)
+            } else {
+                ProgressView().controlSize(.small)
+                Text("\(stage)…")
+                    .foregroundStyle(VeilTheme.secondary)
+            }
+            if let progress, progress.totalFiles > 0 {
+                Text("已完成 \(progress.completedFiles) / \(progress.totalFiles) 个文件" + (progress.phase == "verifying" ? " · 正在核对" : ""))
+                    .foregroundStyle(VeilTheme.secondary)
+                if let name = progress.currentFile { Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(VeilTheme.secondary) }
+            }
+            if let progress, progress.operation == "import", ["preparing", "processing", "verifying"].contains(progress.phase) {
+                Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelImport() }
+                    .buttonStyle(VeilButtonStyle()).disabled(progress.cancelRequested)
+            }
+        }
+        .font(.system(size: 12)).padding(14).frame(width: 300)
+        .background(VeilTheme.canvas).clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(VeilTheme.border))
+        .shadow(color: .black.opacity(0.1), radius: 12, y: 4)
+        .accessibilityElement(children: .contain)
     }
 }
 

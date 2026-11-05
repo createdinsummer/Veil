@@ -61,6 +61,11 @@ impl VeilUnpacker {
             return Err(invalid("导出副本包含运行锁"));
         }
         // 全部密文都验证分块认证，但不落盘明文。
+        let total = metadata
+            .files
+            .iter()
+            .try_fold(0u64, |total, file| total.checked_add(file.size));
+        veil_core::progress::stage("verifying", total);
         for f in &metadata.files {
             let n = db
                 .node(&f.file_id)?
@@ -78,6 +83,7 @@ impl VeilUnpacker {
                 f.size,
             )?;
         }
+        veil_core::progress::finalizing();
         Ok(metadata)
     }
 }
@@ -138,10 +144,19 @@ impl VeilPacker {
         let count = manager.snapshot_to(temporary.path(), password)?;
         let database = std::fs::read(temporary.path().join(CONTAINER_DB))?;
         let metadata = ContainerDb::open(temporary.path(), password, None)?.metadata()?;
+        let total = metadata.files.iter().try_fold(0u64, |total, file| {
+            total.checked_add(
+                std::fs::metadata(temporary.path().join(&file.encrypted_name))
+                    .ok()?
+                    .len(),
+            )
+        });
+        veil_core::progress::stage("packing", total);
         let mut writer = VeilPackageWriter::new(&self.output_path, &database)?;
         for f in &metadata.files {
             writer.add_file(&f.encrypted_name, &temporary.path().join(&f.encrypted_name))?;
         }
+        veil_core::progress::finalizing();
         if self.overwrite {
             writer.finish()?;
         } else {

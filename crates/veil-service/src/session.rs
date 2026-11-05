@@ -2,14 +2,48 @@
 
 use crate::veil_ops::VeilManager;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use veil_core::metadata::{MetaData, generate_veil_id};
 use zeroize::Zeroizing;
 
 /// 接收来自命令行、桌面端或移动端的业务请求。
 #[derive(Clone, Default)]
-pub struct VeilService(Arc<Mutex<Option<Session>>>);
+pub struct VeilService(
+    Arc<Mutex<Option<Session>>>,
+    veil_core::progress::Progress,
+    Arc<Mutex<()>>,
+    Arc<RwLock<Option<PathBuf>>>,
+);
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ImportKey {
+    container: PathBuf,
+    source_paths: Vec<PathBuf>,
+    destination: String,
+}
+
+fn import_registry() -> Arc<Mutex<HashSet<ImportKey>>> {
+    static REGISTRY: OnceLock<Arc<Mutex<HashSet<ImportKey>>>> = OnceLock::new();
+    Arc::clone(REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashSet::new()))))
+}
+
+struct ImportGuard {
+    active: Arc<Mutex<HashSet<ImportKey>>>,
+    key: ImportKey,
+}
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        active.remove(&self.key);
+    }
+}
 
 /// 容器会话请求；密码只用于本次操作，不应写入日志。
 pub enum ServiceRequest<'a> {
@@ -210,6 +244,8 @@ pub enum ServiceError {
     InvalidInput(&'static str),
     #[error("容器状态不可用")]
     StateUnavailable,
+    #[error("相同来源路径和目标目录的导入任务正在进行，请勿重复提交")]
+    DuplicateImport,
     #[error("请先打开容器")]
     NotOpen,
     #[error("{operation}：{source}")]
@@ -224,6 +260,18 @@ pub enum ServiceError {
     Workflow(#[from] crate::workflow::WorkflowError),
     #[error("{0}")]
     Import(#[from] crate::import::ImportError),
+    #[error(
+        "导入失败：{name}；已完成 {completed} 个文件（其中跳过 {skipped} 个）：{source}。处理问题后可重新选择相同文件继续导入"
+    )]
+    ImportFileFailed {
+        name: String,
+        completed: u64,
+        skipped: u64,
+        #[source]
+        source: veil_core::error::VeilError,
+    },
+    #[error("导入已中止，已完成 {completed} 个文件（其中跳过 {skipped} 个）")]
+    ImportCancelled { completed: u64, skipped: u64 },
     #[error("容器创建未完成：{source}。目录保留在 {path}")]
     CreateFailed {
         path: PathBuf,
@@ -264,6 +312,52 @@ pub struct FileView {
 }
 
 impl VeilService {
+    fn register_import(
+        &self,
+        sources: &[String],
+        directory: &str,
+    ) -> Result<ImportGuard, ServiceError> {
+        let destination = if directory.is_empty() {
+            String::new()
+        } else {
+            crate::veil_ops::normalize_veil_dir(directory)?
+        };
+        let container = self
+            .3
+            .read()
+            .map_err(|_| ServiceError::StateUnavailable)?
+            .clone()
+            .ok_or(ServiceError::NotOpen)?;
+        let mut source_paths = Vec::with_capacity(sources.len());
+        for source in sources {
+            source_paths.push(
+                std::path::absolute(source).map_err(|source| ServiceError::Io {
+                    operation: "无法解析导入来源路径",
+                    source,
+                })?,
+            );
+        }
+        source_paths.sort();
+        source_paths.dedup();
+        let key = ImportKey {
+            container,
+            source_paths,
+            destination,
+        };
+        let registry = import_registry();
+        let mut active = registry
+            .lock()
+            .map_err(|_| ServiceError::StateUnavailable)?;
+        if !active.insert(key.clone()) {
+            return Err(ServiceError::DuplicateImport);
+        }
+        drop(active);
+        Ok(ImportGuard {
+            active: registry,
+            key,
+        })
+    }
+
     /// 调用方需持有返回的句柄，供其他进程查询本进程的线程或任务。
     pub fn listen_execution(&self) -> std::io::Result<crate::execution::ExecutionServer> {
         crate::execution::ExecutionService::global()?.listen()
@@ -271,18 +365,58 @@ impl VeilService {
 
     /// 接收容器会话请求，执行对应的参数校验和业务流程。
     pub fn execute(&self, request: ServiceRequest<'_>) -> Result<ServiceResponse, ServiceError> {
+        let _import = match &request {
+            ServiceRequest::ImportSessionFiles { sources, directory } => {
+                Some(self.register_import(sources, directory)?)
+            }
+            _ => None,
+        };
+        // 不同导入任务沿用原有串行执行方式；重复任务在等待之前已经拒绝。
+        let _import_serial = if _import.is_some() {
+            Some(self.2.lock().map_err(|_| ServiceError::StateUnavailable)?)
+        } else {
+            None
+        };
+        let operation = match &request {
+            ServiceRequest::ImportSessionFiles { .. } => Some("import"),
+            ServiceRequest::ExportSessionFile { .. } => Some("export"),
+            ServiceRequest::ImportPackageInSpace { .. } => Some("import_package"),
+            ServiceRequest::ExportSessionPackage { .. } => Some("export_package"),
+            _ => None,
+        };
+        let _progress = operation.map(|operation| self.1.begin(operation));
         let execution =
             crate::execution::ExecutionService::global().map_err(|source| ServiceError::Io {
                 operation: "无法初始化执行上下文",
                 source,
             })?;
         let _scope = execution.enter_task("VeilService::execute");
-        self.execute_registered(request)
+        let result = self.execute_registered(
+            request,
+            _import.as_ref().map(|guard| guard.key.container.as_path()),
+        );
+        if operation.is_some() {
+            if matches!(&result, Err(ServiceError::ImportCancelled { .. })) {
+                self.1.finish_cancelled();
+            } else {
+                self.1.finish(result.is_ok());
+            }
+        }
+        result
+    }
+
+    pub fn transfer_progress(&self) -> veil_core::progress::Snapshot {
+        self.1.snapshot()
+    }
+
+    pub fn cancel_transfer(&self) -> bool {
+        self.1.request_cancel()
     }
 
     fn execute_registered(
         &self,
         request: ServiceRequest<'_>,
+        import_container: Option<&Path>,
     ) -> Result<ServiceResponse, ServiceError> {
         match request {
             ServiceRequest::GetUserSetting { key } => Ok(ServiceResponse::Setting(
@@ -325,8 +459,10 @@ impl VeilService {
                     .as_mut()
                     .filter(|s| s.veil_id == id)
                 {
-                    session.path = destination;
+                    session.path = destination.clone();
                     session.password = Zeroizing::new(password.into());
+                    *self.3.write().map_err(|_| ServiceError::StateUnavailable)? =
+                        Some(destination);
                 }
                 Ok(ServiceResponse::Done)
             }
@@ -384,7 +520,11 @@ impl VeilService {
                 .map(ServiceResponse::Container)
             }
             ServiceRequest::ImportSessionFiles { sources, directory } => self
-                .import_sources(sources, directory)
+                .import_sources(
+                    sources,
+                    directory,
+                    import_container.ok_or(ServiceError::NotOpen)?,
+                )
                 .map(ServiceResponse::Container),
             ServiceRequest::PreviewSessionFile { name } => {
                 self.preview_file(&name).map(ServiceResponse::Preview)
@@ -596,6 +736,7 @@ impl VeilService {
             &metadata.created_at,
         )?;
         let view = container_view(&path, &metadata);
+        *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
         *session = Some(Session {
             path,
             veil_id: id,
@@ -626,6 +767,7 @@ impl VeilService {
             &metadata.created_at,
         )?;
         let view = container_view(&path, &metadata);
+        *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
         *session = Some(Session {
             path,
             veil_id: metadata.veil_id.clone(),
@@ -646,6 +788,7 @@ impl VeilService {
         &self,
         sources: Vec<String>,
         directory: String,
+        expected_container: &Path,
     ) -> Result<ContainerView, ServiceError> {
         if sources.is_empty() {
             return Err(ServiceError::InvalidInput("请选择文件或文件夹"));
@@ -657,9 +800,18 @@ impl VeilService {
         };
         let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        if session.path != expected_container {
+            return Err(ServiceError::InvalidInput("容器已切换，请重新导入"));
+        }
         let mut files = Vec::new();
         let mut targets = std::collections::HashSet::new();
         for source in sources {
+            if veil_core::progress::check_cancelled().is_err() {
+                return Err(ServiceError::ImportCancelled {
+                    completed: 0,
+                    skipped: 0,
+                });
+            }
             let path = Path::new(&source);
             let name = path
                 .file_name()
@@ -676,14 +828,22 @@ impl VeilService {
             } else {
                 format!("{directory}/")
             };
-            for spec in crate::import::collect_add_specs(
+            let collected = crate::import::collect_add_specs(
                 path,
                 if destination.is_empty() {
                     None
                 } else {
                     Some(&destination)
                 },
-            )? {
+            )
+            .map_err(|error| match error {
+                crate::import::ImportError::Cancelled => ServiceError::ImportCancelled {
+                    completed: 0,
+                    skipped: 0,
+                },
+                other => ServiceError::Import(other),
+            })?;
+            for spec in collected {
                 if !targets.insert(spec.target.clone()) {
                     return Err(ServiceError::InvalidInput("选择的文件包含相同目标路径"));
                 }
@@ -693,7 +853,25 @@ impl VeilService {
         if files.is_empty() {
             return Err(ServiceError::InvalidInput("选择的文件夹没有可添加的文件"));
         }
+        let mut total = Some(0u64);
+        for file in &files {
+            if veil_core::progress::check_cancelled().is_err() {
+                return Err(ServiceError::ImportCancelled {
+                    completed: 0,
+                    skipped: 0,
+                });
+            }
+            total = total.and_then(|total| total.checked_add(file.source.metadata().ok()?.len()));
+        }
+        veil_core::progress::start(total);
+        veil_core::progress::set_file_count(files.len());
         for target in &targets {
+            if veil_core::progress::check_cancelled().is_err() {
+                return Err(ServiceError::ImportCancelled {
+                    completed: 0,
+                    skipped: 0,
+                });
+            }
             for (index, _) in target.match_indices('/') {
                 if targets.contains(&target[..index]) {
                     return Err(ServiceError::InvalidInput("选择的文件包含冲突的目标路径"));
@@ -701,7 +879,64 @@ impl VeilService {
             }
         }
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-        manager.add_files(&files, session.password.as_str())?;
+        let mut completed = 0;
+        let mut skipped = 0;
+        for file in files {
+            if veil_core::progress::check_cancelled().is_err() {
+                return Err(ServiceError::ImportCancelled { completed, skipped });
+            }
+            veil_core::progress::begin_file(&file.target);
+            let outcome = (|| -> veil_core::error::Result<bool> {
+                match manager.path_kind(&file.target, session.password.as_str())? {
+                    crate::veil_ops::ContainerPathKind::Missing(_) => {
+                        manager.add_files_without_cleanup(
+                            std::slice::from_ref(&file),
+                            session.password.as_str(),
+                        )?;
+                        Ok(false)
+                    }
+                    crate::veil_ops::ContainerPathKind::File(_) => {
+                        veil_core::progress::verifying();
+                        if manager.matches_existing_file(
+                            &file.target,
+                            &file.source,
+                            session.password.as_str(),
+                        )? {
+                            Ok(true)
+                        } else {
+                            Err(veil_core::error::VeilError::FileAlreadyExists(
+                                file.target.clone(),
+                            ))
+                        }
+                    }
+                    crate::veil_ops::ContainerPathKind::Directory(_) => Err(
+                        veil_core::error::VeilError::FileAlreadyExists(file.target.clone()),
+                    ),
+                }
+            })();
+            let was_skipped = match outcome {
+                Ok(value) => value,
+                Err(source) => {
+                    if matches!(source, veil_core::error::VeilError::Cancelled) {
+                        return Err(ServiceError::ImportCancelled { completed, skipped });
+                    }
+                    let _ = manager.cleanup(session.password.as_str());
+                    return Err(ServiceError::ImportFileFailed {
+                        name: file.target.clone(),
+                        completed,
+                        skipped,
+                        source,
+                    });
+                }
+            };
+            completed += 1;
+            if was_skipped {
+                skipped += 1;
+            }
+            veil_core::progress::file_done(was_skipped);
+        }
+        veil_core::progress::finalizing();
+        let _ = manager.cleanup(session.password.as_str());
         Ok(container_view(
             &session.path,
             &manager.read_meta(session.password.as_str())?,
@@ -745,7 +980,9 @@ impl VeilService {
     }
 
     fn lock(&self) -> Result<(), ServiceError> {
-        *self.0.lock().map_err(|_| ServiceError::StateUnavailable)? = None;
+        let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = None;
+        *session = None;
         Ok(())
     }
 }
@@ -803,6 +1040,255 @@ fn file_kind(name: &str) -> (&'static str, Option<&'static str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelling_import_preserves_committed_files_and_allows_retry() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let mut sources = Vec::new();
+        for index in 0..6 {
+            let path = root.path().join(format!("file-{index}.txt"));
+            std::fs::write(&path, vec![index as u8; 1024 * 1024]).unwrap();
+            sources.push(path.to_string_lossy().into_owned());
+        }
+        let worker = app.clone();
+        let worker_sources = sources.clone();
+        let task = std::thread::spawn(move || {
+            worker.execute(ServiceRequest::ImportSessionFiles {
+                sources: worker_sources,
+                directory: String::new(),
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.transfer_progress().completed_files == 0 && !task.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "导入未开始");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.cancel_transfer());
+        let result = task.join().unwrap();
+        let completed = match result {
+            Err(ServiceError::ImportCancelled { completed, .. }) => completed,
+            _ => panic!("预期中止导入"),
+        };
+        assert!(completed > 0 && completed < 6);
+        assert_eq!(app.transfer_progress().phase, "cancelled");
+        assert_eq!(
+            manager.read_meta("password").unwrap().files.len(),
+            completed as usize
+        );
+        app.execute(ServiceRequest::ImportSessionFiles {
+            sources,
+            directory: String::new(),
+        })
+        .unwrap();
+        assert_eq!(manager.read_meta("password").unwrap().files.len(), 6);
+        assert_eq!(app.transfer_progress().skipped_files, completed);
+    }
+
+    #[test]
+    fn individual_file_commit_does_not_finish_the_import_progress() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let manager = VeilManager::new(root.path().join("container"));
+        manager.init_veil("test", "password").unwrap();
+        let source = root.path().join("file.txt");
+        std::fs::write(&source, b"data").unwrap();
+        let progress = veil_core::progress::Progress::default();
+        let _scope = progress.begin("import");
+        veil_core::progress::start(Some(8));
+        veil_core::progress::set_file_count(2);
+        veil_core::progress::begin_file("file.txt");
+        manager
+            .add_files_without_cleanup(
+                &[crate::veil_ops::AddFileSpec::new(&source, "file.txt")],
+                "password",
+            )
+            .unwrap();
+        assert_eq!(progress.snapshot().phase, "processing");
+        veil_core::progress::file_done(false);
+        veil_core::progress::begin_file("next.txt");
+        manager
+            .add_files_without_cleanup(
+                &[crate::veil_ops::AddFileSpec::new(&source, "next.txt")],
+                "password",
+            )
+            .unwrap();
+        assert_eq!(progress.snapshot().phase, "processing");
+        veil_core::progress::finalizing();
+        assert_eq!(progress.snapshot().phase, "finalizing");
+    }
+
+    #[test]
+    fn duplicate_import_uses_container_target_and_selected_absolute_paths() {
+        let root = tempfile::TempDir::new().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let first = source.join("first.txt");
+        let second = source.join("second.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let app = VeilService::default();
+        let container = root.path().join("container");
+        *app.3.write().unwrap() = Some(container.clone());
+        let first_path = first.to_string_lossy().into_owned();
+        let second_path = second.to_string_lossy().into_owned();
+        let directory_path = source.to_string_lossy().into_owned();
+        let keys = vec![directory_path.clone(), first_path.clone()];
+        let original_keys = keys.clone();
+        let session_lock = app.0.lock().unwrap();
+        let worker = app.clone();
+        let original = std::thread::spawn(move || {
+            worker.execute(ServiceRequest::ImportSessionFiles {
+                sources: original_keys,
+                directory: "target".into(),
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !import_registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|key| key.container == container)
+        {
+            assert!(std::time::Instant::now() < deadline, "导入任务未登记");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // 重复判断只使用所选路径，目录内容和文件内容的变化不改变任务标识。
+        std::fs::write(&first, b"changed").unwrap();
+        std::fs::write(source.join("added.txt"), b"new").unwrap();
+        let duplicate = VeilService::default();
+        *duplicate.3.write().unwrap() = Some(container.clone());
+        let (send, receive) = std::sync::mpsc::channel();
+        let duplicate_thread = std::thread::spawn(move || {
+            let result = duplicate.execute(ServiceRequest::ImportSessionFiles {
+                sources: vec![first_path, directory_path],
+                directory: "target".into(),
+            });
+            send.send(matches!(result, Err(ServiceError::DuplicateImport)))
+                .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(2));
+        assert!(app.register_import(&keys, "other").is_ok());
+        assert!(app.register_import(&[second_path], "target").is_ok());
+        let other_container = VeilService::default();
+        *other_container.3.write().unwrap() = Some(root.path().join("other-container"));
+        assert!(other_container.register_import(&keys, "target").is_ok());
+        drop(session_lock);
+        duplicate_thread.join().unwrap();
+        assert!(result.unwrap());
+        assert!(matches!(
+            original.join().unwrap(),
+            Err(ServiceError::NotOpen)
+        ));
+        assert!(app.register_import(&keys, "target").is_ok());
+    }
+
+    #[test]
+    fn partial_import_is_committed_and_retry_skips_only_matching_files() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let meta = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: meta.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let first = root.path().join("first.txt");
+        let conflict = root.path().join("conflict.txt");
+        let last = root.path().join("last.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&conflict, b"original").unwrap();
+        manager.add_file(&conflict, "password").unwrap();
+        std::fs::write(&conflict, b"changed!").unwrap();
+        std::fs::write(&last, b"last").unwrap();
+        let request = || ServiceRequest::ImportSessionFiles {
+            sources: [&first, &conflict, &last]
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            directory: String::new(),
+        };
+        let error = match app.execute(request()) {
+            Err(error) => error,
+            Ok(_) => panic!("预期同名文件冲突"),
+        };
+        assert!(matches!(
+            error,
+            ServiceError::ImportFileFailed {
+                completed: 1,
+                skipped: 0,
+                ..
+            }
+        ));
+        assert_eq!(
+            manager
+                .read_file_bytes("first.txt", "password", 100)
+                .unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            manager
+                .read_file_bytes("conflict.txt", "password", 100)
+                .unwrap(),
+            b"original"
+        );
+        assert!(
+            manager
+                .read_file_bytes("last.txt", "password", 100)
+                .is_err()
+        );
+        std::fs::write(&conflict, b"original").unwrap();
+        app.execute(request()).unwrap();
+        let progress = app.transfer_progress();
+        assert_eq!(
+            (
+                progress.phase,
+                progress.completed_files,
+                progress.skipped_files,
+                progress.total_files
+            ),
+            ("completed", 3, 2, 3)
+        );
+        assert_eq!(
+            manager
+                .read_file_bytes("last.txt", "password", 100)
+                .unwrap(),
+            b"last"
+        );
+    }
+
+    #[test]
+    fn failed_transfer_reports_failed_status() {
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(PathBuf::from("/test/container"));
+        assert!(
+            app.execute(ServiceRequest::ImportSessionFiles {
+                sources: vec![],
+                directory: String::new()
+            })
+            .is_err()
+        );
+        let progress = app.transfer_progress();
+        assert_eq!(progress.operation, "import");
+        assert_eq!(progress.phase, "failed");
+    }
 
     fn container(response: ServiceResponse) -> ContainerView {
         match response {

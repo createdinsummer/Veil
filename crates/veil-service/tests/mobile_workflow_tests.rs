@@ -61,6 +61,16 @@ fn package_worker() {
                 destination: package.clone(),
             })
             .unwrap();
+        let progress = service.transfer_progress();
+        assert_eq!(
+            (progress.operation, progress.phase),
+            ("export_package", "completed")
+        );
+        assert!(
+            progress
+                .total_bytes
+                .is_some_and(|total| total > 0 && total == progress.processed_bytes)
+        );
         // 拒绝覆盖已有备份；锁定后不能继续导出。
         assert!(
             service
@@ -98,6 +108,15 @@ fn package_worker() {
             ServiceResponse::Container(view) => view,
             _ => panic!("预期还原后的容器"),
         };
+        let progress = service.transfer_progress();
+        assert_eq!(
+            (progress.operation, progress.phase),
+            ("import_package", "completed")
+        );
+        assert_eq!(
+            (progress.processed_bytes, progress.total_bytes),
+            (content.len() as u64, Some(content.len() as u64))
+        );
         assert_eq!(restored.name, "随身文件");
         assert_eq!(restored.files.len(), 1);
         assert!(std::path::Path::new(&restored.path).starts_with(&spaces[0].path));

@@ -321,12 +321,23 @@ pub fn publish_staged_file(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 fn copy_staged_file(source: &Path, destination: &Path) -> io::Result<()> {
-    copy_file_new(source, destination)?;
+    copy_file_new_impl(source, destination, false, true)?;
     fs::remove_file(source)
 }
 
 /// 向全新文件复制密文并持久化，禁止覆盖并保持私有文件权限。
 pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_file_new_impl(source, destination, false, false)
+}
+pub fn copy_file_new_with_progress(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_file_new_impl(source, destination, true, false)
+}
+fn copy_file_new_impl(
+    source: &Path,
+    destination: &Path,
+    progress: bool,
+    cancellable: bool,
+) -> io::Result<()> {
     let mut input = fs::File::open(source)?;
     let mut output = fs::OpenOptions::new()
         .write(true)
@@ -337,7 +348,20 @@ pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         output.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    io::copy(&mut input, &mut output)?;
+    let copied = if progress {
+        crate::progress::copy(&mut input, &mut output)
+    } else if cancellable {
+        crate::progress::copy_cancellable(&mut input, &mut output)
+    } else {
+        io::copy(&mut input, &mut output)
+    };
+    if let Err(error) = copied {
+        if crate::progress::is_cancelled_io(&error) {
+            drop(output);
+            let _ = fs::remove_file(destination);
+        }
+        return Err(error);
+    }
     sync_file(&output)?;
     Ok(())
 }
@@ -345,6 +369,21 @@ pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod exclusive_publish_tests {
     use super::*;
+    #[test]
+    fn cancelled_staged_copy_removes_its_partial_destination() {
+        let root = tempfile::TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"payload").unwrap();
+        let progress = crate::progress::Progress::default();
+        let _scope = progress.begin("import");
+        crate::progress::start(Some(7));
+        assert!(progress.request_cancel());
+        let error = copy_staged_file(&source, &target).unwrap_err();
+        assert!(crate::progress::is_cancelled_io(&error));
+        assert!(!target.exists());
+        assert_eq!(fs::read(source).unwrap(), b"payload");
+    }
     #[test]
     fn staged_copy_never_overwrites_existing_file() {
         let root = tempfile::TempDir::new().unwrap();

@@ -5,6 +5,8 @@ use walkdir::WalkDir;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
+    #[error("导入已中止")]
+    Cancelled,
     #[error("源路径不存在：{}", .0.display())]
     SourceNotFound(PathBuf),
     #[error("源路径不是文件或目录：{}", .0.display())]
@@ -49,6 +51,9 @@ pub fn collect_add_specs(
 
     let mut specs = Vec::new();
     for entry in WalkDir::new(source).follow_links(false) {
+        if veil_core::progress::check_cancelled().is_err() {
+            return Err(ImportError::Cancelled);
+        }
         let entry = entry.map_err(|error| ImportError::DirectoryRead {
             path: source.to_path_buf(),
             error: error.to_string(),

@@ -11,6 +11,8 @@ use thiserror::Error;
 /// 用于补充由库内部判断出的上下文。各错误来源保持原始错误信息，便于上层记录日志。
 #[derive(Debug, Error)]
 pub enum VeilError {
+    #[error("操作已中止")]
+    Cancelled,
     #[error("数据库错误: {0}")]
     Database(#[from] rusqlite::Error),
     /// 文件系统或字节流读写失败。

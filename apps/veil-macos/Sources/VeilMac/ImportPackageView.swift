@@ -53,6 +53,10 @@ struct ImportPackageView: View {
                     } isTargeted: { isTargeted = $0 }
                 if let selectionError { Text(selectionError).font(.system(size: 11)).foregroundStyle(VeilTheme.danger) }
             }
+            if let title = store.transferTitle {
+                TransferProgressView(title: title, progress: store.transferProgress)
+                    .frame(maxWidth: .infinity)
+            }
             HStack {
                 Spacer()
                 Button("取消") { store.showImportPackage = false }.buttonStyle(VeilButtonStyle())

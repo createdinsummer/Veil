@@ -194,6 +194,31 @@ pub unsafe extern "C" fn veil_client_free(client: *mut VeilService) {
 }
 
 /// # Safety
+/// client 在本调用期间必须有效；允许与正在执行的调用并发。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn veil_client_progress(client: *const VeilService) -> VeilBuffer {
+    if client.is_null() {
+        return VeilBuffer::error("客户端无效");
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        serde_json::to_vec(&unsafe { &*client }.transfer_progress())
+            .map(|bytes| VeilBuffer::new(bytes, 0))
+            .unwrap_or_else(|_| VeilBuffer::error("无法编码进度"))
+    }))
+    .unwrap_or_else(|_| VeilBuffer::error("无法读取进度"))
+}
+
+/// # Safety
+/// client 在本调用期间必须有效；允许与正在执行的调用并发。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn veil_client_cancel_transfer(client: *const VeilService) -> bool {
+    if client.is_null() {
+        return false;
+    }
+    catch_unwind(AssertUnwindSafe(|| unsafe { &*client }.cancel_transfer())).unwrap_or(false)
+}
+
+/// # Safety
 /// client 必须有效；data 必须指向至少 length 字节的可读内存，且在调用期间保持有效。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_call(

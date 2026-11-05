@@ -102,7 +102,8 @@ impl VeilPackageWriter {
         self.temp.write_all(&len.to_le_bytes())?;
         self.temp.write_all(bytes)?;
         self.temp.write_all(&size.to_le_bytes())?;
-        if std::io::copy(&mut Read::by_ref(&mut source).take(size), &mut self.temp)? != size {
+        if crate::progress::copy(&mut Read::by_ref(&mut source).take(size), &mut self.temp)? != size
+        {
             return Err(invalid("源密文长度变化"));
         }
         self.count = self
@@ -179,6 +180,8 @@ impl VeilUnpacker {
         let bytes = self.read_encrypted_metadata()?;
         let mut file = File::open(&self.path)?;
         let header = read_header(&mut file)?;
+        crate::progress::stage("unpacking", Some(file.metadata()?.len()));
+        crate::progress::advance(u64::from(header.header_size) + u64::from(header.metadata_size));
         file.seek(SeekFrom::Current(header.metadata_size as i64))?;
         std::fs::create_dir_all(directory)?;
         let mut names = HashSet::new();
@@ -199,6 +202,7 @@ impl VeilUnpacker {
             let mut size = [0; 8];
             file.read_exact(&mut size)?;
             let size = u64::from_le_bytes(size);
+            crate::progress::advance(2 + len as u64 + 8);
             if size
                 > file
                     .metadata()?
@@ -211,7 +215,8 @@ impl VeilUnpacker {
                 .write(true)
                 .create_new(true)
                 .open(directory.join(&name))?;
-            if std::io::copy(&mut Read::by_ref(&mut file).take(size), &mut output)? != size {
+            if crate::progress::copy(&mut Read::by_ref(&mut file).take(size), &mut output)? != size
+            {
                 return Err(invalid("包内密文被截断"));
             }
             output.sync_all()?;

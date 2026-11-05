@@ -9,6 +9,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var recents: [RecentContainer] = []
     @Published private(set) var container: ContainerSnapshot?
     @Published private(set) var pendingOperations = 0
+    @Published private(set) var transferProgress: TransferProgress?
+    @Published private(set) var transferTitle: String?
     @Published var selectedSpaceID = ""
     @Published var directory = ""
     @Published var categories: Set<FileCategory> = []
@@ -126,6 +128,27 @@ final class AppStore: ObservableObject {
         defer { pendingOperations -= 1 }
         do { try await work(ticket) }
         catch { if ticket == generation { self.error = error.localizedDescription } }
+    }
+
+    private func withTransferProgress<T>(_ title: String, operation: String, work: () async throws -> T) async throws -> T {
+        transferTitle = title
+        transferProgress = nil
+        let poll = Task { @MainActor in
+            while !Task.isCancelled {
+                if let progress = client.transferProgress(), progress.operation == operation,
+                   ["preparing", "processing", "verifying", "snapshot", "packing", "unpacking", "finalizing"].contains(progress.phase) {
+                    transferProgress = progress
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        defer { poll.cancel(); transferTitle = nil; transferProgress = nil }
+        return try await work()
+    }
+
+    func cancelImport() {
+        guard client.cancelTransfer() else { return }
+        transferProgress = client.transferProgress()
     }
 
     private func reloadCatalog() async throws {
@@ -259,7 +282,14 @@ final class AppStore: ObservableObject {
             case .open(let path, _): request = NativeRequest(operation: "open_container", password: password, path: path)
             case .importPackage(let path, let space): request = NativeRequest(operation: "import_package", space: space, password: password, path: path)
             }
-            let view: ContainerSnapshot = try await self.client.json(request)
+            let view: ContainerSnapshot
+            if case .importPackage = form {
+                view = try await self.withTransferProgress("正在导入容器", operation: "import_package") {
+                    try await self.client.json(request)
+                }
+            } else {
+                view = try await self.client.json(request)
+            }
             guard ticket == self.generation else {
                 // actor 调度不保证先进先出；即使锁定先于迟到的解锁执行，也须再次清理会话。
                 try await self.client.execute(NativeRequest(operation: "lock"))
@@ -339,10 +369,26 @@ final class AppStore: ObservableObject {
         let scoped = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { scoped.forEach { $0.stopAccessingSecurityScopedResource() } }
         await perform { ticket in
-            let view: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "import_files", sources: urls.map(\.path), directory: destination))
-            guard ticket == self.generation else { return }
-            self.container = view
-            self.notice = "文件已添加"
+            try await self.withTransferProgress("正在添加文件", operation: "import") {
+                do {
+                    let view: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "import_files", sources: urls.map(\.path), directory: destination))
+                    guard ticket == self.generation else { return }
+                    self.container = view
+                    if let progress = self.client.transferProgress(), progress.operation == "import" {
+                        self.notice = "已完成 \(progress.completedFiles) 个文件，跳过 \(progress.skippedFiles) 个已存在的相同文件"
+                    } else { self.notice = "文件已添加" }
+                } catch {
+                    let progress = self.client.transferProgress()
+                    if ticket == self.generation,
+                       let refreshed: ContainerSnapshot = try? await self.client.json(NativeRequest(operation: "refresh")),
+                       ticket == self.generation { self.container = refreshed }
+                    if ticket == self.generation, let progress, progress.operation == "import", progress.phase == "cancelled" {
+                        self.notice = "导入已中止，已完成 \(progress.completedFiles) 个文件"
+                        return
+                    }
+                    throw error
+                }
+            }
         }
     }
 
@@ -380,18 +426,24 @@ final class AppStore: ObservableObject {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         await perform { ticket in
-            try await self.client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
-            if ticket == self.generation { self.notice = "文件已导出" }
+            try await self.withTransferProgress("正在导出文件", operation: "export") {
+                try await self.client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
+                if ticket == self.generation { self.notice = "文件已导出" }
+            }
         }
     }
 
     var dragExportGeneration: UInt64 { generation }
 
     func exportDraggedFile(_ file: FileEntry, to url: URL, generation ticket: UInt64) async throws {
-        guard ticket == generation, container != nil else {
+        guard ticket == generation, container != nil, !isBusy else {
             throw ClientError.service("保险箱已关闭，请重新拖动文件。")
         }
-        try await client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
+        pendingOperations += 1
+        defer { pendingOperations -= 1 }
+        try await withTransferProgress("正在导出文件", operation: "export") {
+            try await client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
+        }
     }
 
     func exportPackage() async {
@@ -404,8 +456,10 @@ final class AppStore: ObservableObject {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         await perform { ticket in
-            try await self.client.execute(NativeRequest(operation: "export_package", destination: url.path))
-            if ticket == self.generation { self.notice = "加密备份已导出" }
+            try await self.withTransferProgress("正在导出加密备份", operation: "export_package") {
+                try await self.client.execute(NativeRequest(operation: "export_package", destination: url.path))
+                if ticket == self.generation { self.notice = "加密备份已导出" }
+            }
         }
     }
 

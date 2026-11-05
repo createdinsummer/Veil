@@ -104,9 +104,10 @@ fn desktop_flow_worker() {
     std::fs::write(&source, b"changed").unwrap();
     assert!(matches!(
         service.execute(request()),
-        Err(ServiceError::Core(
-            veil_core::error::VeilError::FileAlreadyExists(_)
-        ))
+        Err(ServiceError::ImportFileFailed {
+            source: veil_core::error::VeilError::FileAlreadyExists(_),
+            ..
+        })
     ));
     match service
         .execute(ServiceRequest::PreviewSessionFile {

@@ -9,5 +9,7 @@ typedef struct { uint8_t *data; size_t length; uint32_t kind; } VeilBuffer;
 VeilService *veil_client_new(void);
 void veil_client_free(VeilService *client);
 VeilBuffer veil_client_call(VeilService *client, const uint8_t *data, size_t length);
+VeilBuffer veil_client_progress(const VeilService *client);
+_Bool veil_client_cancel_transfer(const VeilService *client);
 void veil_buffer_free(VeilBuffer buffer);
 #endif
