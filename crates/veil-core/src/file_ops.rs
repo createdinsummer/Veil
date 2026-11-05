@@ -52,6 +52,26 @@ pub fn encrypt_file_streaming(
     data_key: &[u8; DATA_KEY_LEN],
     base_nonce: &[u8; NONCE_LEN],
 ) -> Result<u64> {
+    encrypt_file_streaming_impl(source_path, destination_path, data_key, base_nonce, false)
+}
+
+/// 写入仅由容器事务引用的密文；目标在元数据提交前不得供读取者使用。
+pub fn encrypt_staged_file(
+    source_path: &Path,
+    destination_path: &Path,
+    data_key: &[u8; DATA_KEY_LEN],
+    base_nonce: &[u8; NONCE_LEN],
+) -> Result<u64> {
+    encrypt_file_streaming_impl(source_path, destination_path, data_key, base_nonce, true)
+}
+
+fn encrypt_file_streaming_impl(
+    source_path: &Path,
+    destination_path: &Path,
+    data_key: &[u8; DATA_KEY_LEN],
+    base_nonce: &[u8; NONCE_LEN],
+    staged: bool,
+) -> Result<u64> {
     let mut source = File::open(source_path)?;
     let plaintext_size = source.metadata()?.len();
     let mut output = create_atomic_output(destination_path)?;
@@ -62,7 +82,7 @@ pub fn encrypt_file_streaming(
         base_nonce,
         plaintext_size,
     )?;
-    publish_atomic_output(output, destination_path, false)?;
+    publish_atomic_output(output, destination_path, false, staged)?;
     Ok(plaintext_size)
 }
 
@@ -86,7 +106,7 @@ pub fn decrypt_file_streaming(
         base_nonce,
         plaintext_size,
     )?;
-    publish_atomic_output(output, destination_path, true)
+    publish_atomic_output(output, destination_path, true, false)
 }
 
 /// 解密到不存在的目标文件；目标已存在时拒绝覆盖。
@@ -106,7 +126,7 @@ pub fn decrypt_file_streaming_without_overwrite(
         base_nonce,
         plaintext_size,
     )?;
-    publish_atomic_output(output, destination_path, false)
+    publish_atomic_output(output, destination_path, false, false)
 }
 
 /// 将密文流式解密到调用方提供的写入器；调用方负责处理失败时的部分输出。
@@ -135,6 +155,51 @@ pub fn rewrite_file_streaming(
     new_nonce: &[u8; NONCE_LEN],
     plaintext_size: u64,
 ) -> Result<()> {
+    rewrite_file_streaming_impl(
+        old_key,
+        new_key,
+        old_path,
+        new_path,
+        old_nonce,
+        new_nonce,
+        plaintext_size,
+        false,
+    )
+}
+
+/// 重写仅由容器事务引用的密文；目标在元数据提交前不得供读取者使用。
+pub fn rewrite_staged_file(
+    old_key: &[u8; DATA_KEY_LEN],
+    new_key: &[u8; DATA_KEY_LEN],
+    old_path: &Path,
+    new_path: &Path,
+    old_nonce: &[u8; NONCE_LEN],
+    new_nonce: &[u8; NONCE_LEN],
+    plaintext_size: u64,
+) -> Result<()> {
+    rewrite_file_streaming_impl(
+        old_key,
+        new_key,
+        old_path,
+        new_path,
+        old_nonce,
+        new_nonce,
+        plaintext_size,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_file_streaming_impl(
+    old_key: &[u8; DATA_KEY_LEN],
+    new_key: &[u8; DATA_KEY_LEN],
+    old_path: &Path,
+    new_path: &Path,
+    old_nonce: &[u8; NONCE_LEN],
+    new_nonce: &[u8; NONCE_LEN],
+    plaintext_size: u64,
+    staged: bool,
+) -> Result<()> {
     let mut old_file = File::open(old_path)?;
     let mut new_file = create_atomic_output(new_path)?;
     rewrite_reader(
@@ -146,7 +211,7 @@ pub fn rewrite_file_streaming(
         new_nonce,
         plaintext_size,
     )?;
-    publish_atomic_output(new_file, new_path, false)
+    publish_atomic_output(new_file, new_path, false, staged)
 }
 
 /// 通过首个分块判断 `.enc` 文件可以使用哪一把数据主密钥解密。
@@ -384,6 +449,7 @@ fn publish_atomic_output(
     output: tempfile::NamedTempFile,
     destination_path: &Path,
     replace: bool,
+    staged: bool,
 ) -> Result<()> {
     crate::fsutil::sync_file(output.as_file())?;
     let parent = parent_or_current(destination_path);
@@ -392,9 +458,13 @@ fn publish_atomic_output(
             .persist(destination_path)
             .map_err(|error| VeilError::Io(error.error))?;
     } else {
-        output
-            .persist_noclobber(destination_path)
-            .map_err(|error| VeilError::Io(error.error))?;
+        if staged {
+            crate::fsutil::publish_staged_file(output.path(), destination_path)?;
+        } else {
+            output
+                .persist_noclobber(destination_path)
+                .map_err(|error| VeilError::Io(error.error))?;
+        }
     }
     let _ = crate::fsutil::sync_directory(parent);
     Ok(())

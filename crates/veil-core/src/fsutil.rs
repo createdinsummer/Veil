@@ -304,6 +304,27 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     ))
 }
 
+/// 发布尚未被元数据引用的密文；不支持排他重命名时先排他创建再复制。
+/// 调用方必须在本函数成功后才提交引用，且失败后的残留文件可安全清理。
+pub fn publish_staged_file(source: &Path, destination: &Path) -> io::Result<()> {
+    match rename_no_replace(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            copy_staged_file(source, destination)
+        }
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ENOTSUP) => {
+            copy_staged_file(source, destination)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn copy_staged_file(source: &Path, destination: &Path) -> io::Result<()> {
+    copy_file_new(source, destination)?;
+    fs::remove_file(source)
+}
+
 /// 向全新文件复制密文并持久化，禁止覆盖并保持私有文件权限。
 pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
     let mut input = fs::File::open(source)?;
@@ -324,6 +345,24 @@ pub fn copy_file_new(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod exclusive_publish_tests {
     use super::*;
+    #[test]
+    fn staged_copy_never_overwrites_existing_file() {
+        let root = tempfile::TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::write(&source, b"new").unwrap();
+        fs::write(&target, b"existing").unwrap();
+        assert_eq!(
+            copy_staged_file(&source, &target).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"existing");
+        assert_eq!(fs::read(&source).unwrap(), b"new");
+        fs::remove_file(&target).unwrap();
+        copy_staged_file(&source, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!source.exists());
+    }
     #[test]
     fn existing_file_and_existing_directory_are_never_replaced() {
         let root = tempfile::TempDir::new().unwrap();

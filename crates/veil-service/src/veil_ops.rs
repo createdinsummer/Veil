@@ -374,14 +374,14 @@ impl VeilManager {
             p.cipher = format!("{}_{}.enc", credential.lock_id, id());
             let staged = staging.join(&p.cipher);
             fault("before_cipher_write");
-            p.size = file_ops::encrypt_file_streaming(
+            p.size = file_ops::encrypt_staged_file(
                 &p.spec.source,
                 &staged,
                 &*p.key.material()?,
                 &p.nonce,
             )?;
             fault("after_cipher_write");
-            crate::fsutil::rename_no_replace(&staged, &self.veil_dir.join(&p.cipher))?;
+            crate::fsutil::publish_staged_file(&staged, &self.veil_dir.join(&p.cipher))?;
             crate::fsutil::sync_directory(&self.veil_dir)?;
             fault("after_cipher_persist");
             if let Some(base) = &p.base {
@@ -878,7 +878,7 @@ impl VeilManager {
             let nonce = file_ops::generate_base_nonce();
             let staging = self.veil_dir.join(".staging").join(&credential.lock_id);
             crate::fsutil::create_dir_all_durable(&staging)?;
-            file_ops::rewrite_file_streaming(
+            file_ops::rewrite_staged_file(
                 &*previous.material()?,
                 &*active.material()?,
                 &self.veil_dir.join(n.cipher()?),
@@ -887,7 +887,10 @@ impl VeilManager {
                 &nonce,
                 n.size.unwrap(),
             )?;
-            crate::fsutil::rename_no_replace(&staging.join(&cipher), &self.veil_dir.join(&cipher))?;
+            crate::fsutil::publish_staged_file(
+                &staging.join(&cipher),
+                &self.veil_dir.join(&cipher),
+            )?;
             crate::fsutil::sync_directory(&self.veil_dir)?;
             let active_id = active.key_id.clone();
             drop(db);
