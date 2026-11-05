@@ -8,11 +8,11 @@ rust-version = "1.89"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-veil-service = { path = "../../../crates/veil-service" }
+veil-service = { path = "../veil-service" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = "1.9"
 
 [dev-dependencies]
 tempfile = "3.8"
-veil-core = { path = "../../../crates/veil-core" }
+veil-core = { path = "../veil-core" }

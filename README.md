@@ -107,7 +107,8 @@ SwiftUI 客户端直接通过应用内的 C ABI 调用 `veil-service`，展示�
 | `crates/veil-cli` | `veil` 命令行程序和集成测试 |
 | `crates/veil-brute-force` | 密码强度测试工具 |
 | `crates/veil-scrollshot` | 独立的录屏转长截图模块与命令行程序 |
-| `apps/veil-macos` | SwiftUI macOS 客户端；`bridge` 是该客户端专用的 Rust 原生调用接口 |
+| `crates/veil-macos-bridge` | macOS 客户端专用的 Rust 原生调用接口 |
+| `apps/veil-macos` | SwiftUI macOS 客户端 |
 | `ui` | 可交互 HTML/CSS 设计稿、JSON 设计参数、SVG 素材及页面截图 |
 
 ## 许可证

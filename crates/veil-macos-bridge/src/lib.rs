@@ -4,7 +4,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     ptr, slice,
 };
-use veil_service::{ServiceRequest, ServiceResponse, VeilService};
+use veil_service::session::{ServiceRequest, ServiceResponse, VeilService};
 use zeroize::{Zeroize, Zeroizing};
 
 /// kind：0 为 JSON，1 为 UTF-8 错误，2 为文件二进制。
