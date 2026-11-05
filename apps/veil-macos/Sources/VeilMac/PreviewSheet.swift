@@ -18,7 +18,7 @@ struct PreviewSheet: View {
                 }
                 Spacer()
                 Button { store.closePreview() } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary).font(.title2) }
-                    .buttonStyle(.plain).keyboardShortcut(.cancelAction).accessibilityLabel("关闭预览")
+                    .buttonStyle(VeilPlainButtonStyle()).keyboardShortcut(.cancelAction).accessibilityLabel("关闭预览")
             }
             if let error = asset.error {
                 ContentUnavailableView("无法预览", systemImage: "doc.questionmark", description: Text(error))

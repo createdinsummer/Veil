@@ -80,9 +80,9 @@
     return `<div class="page-content">
       ${state.status === 'error' ? `<div class="error-box" role="alert">${icon('alert')}空间列表暂时无法读取。<button class="text-button" data-action="retry">重试</button></div>` : ''}
       <div class="page-heading"><div><div class="eyebrow">YOUR PRIVATE SPACE</div><h1>我的容器</h1><p>${escape(currentSpace().name)} · 为重要文件留一个安心的地方。</p></div>${button('新建容器', 'create', 'plus', 'primary')}</div>
-      <section class="welcome-card"><div class="welcome-copy"><span class="pill"><span class="status-dot"></span>一切都在你的掌控中</span><h2>安全，从这里开始。</h2><p>创建一个加密容器，或打开已有容器。<br>你的文件加密保存在本机，由你掌管。</p><div class="button-row">${button('创建容器', 'create', 'plus', 'primary')}${button('打开容器', 'open-first', 'folder')}</div></div><img class="hero-art" src="assets/vault.svg" alt="" aria-hidden="true"></section>
-      <section class="recent-section"><div class="section-heading"><div><h3>${escape(currentSpace().name)}的容器</h3><p>选择容器并输入密码打开</p></div><button class="text-button" data-action="open-first">打开其他容器 ${icon('arrow')}</button></div>
-        ${state.status === 'loading' ? '<div class="recent-grid" aria-busy="true" aria-label="正在加载容器"><div class="skeleton" style="height:74px"></div><div class="skeleton" style="height:74px"></div></div>' : cards.length ? `<div class="recent-grid">${cards.map(containerCard).join('')}</div>` : `<div class="recent-empty"><span class="recent-icon">${icon('folder')}</span><div><strong>这个空间还没有容器</strong><p>创建容器后，它会显示在这里。</p></div></div>`}
+      <section class="welcome-card"><div class="welcome-copy"><span class="pill"><span class="status-dot"></span>一切都在你的掌控中</span><h2>安全，从这里开始。</h2><p>创建一个加密容器，或导入已有容器。<br>你的文件加密保存在本机，由你掌管。</p><div class="button-row">${button('创建容器', 'create', 'plus', 'primary')}${button('导入容器', 'import-container', 'folder')}</div></div><img class="hero-art" src="assets/vault.svg" alt="" aria-hidden="true"></section>
+      <section class="recent-section"><div class="section-heading"><div><h3>${escape(currentSpace().name)}的容器</h3><p>选择容器并输入密码打开</p></div><button class="text-button" data-action="import-container">导入容器 ${icon('arrow')}</button></div>
+        ${state.status === 'loading' ? '<div class="recent-grid" aria-busy="true" aria-label="正在加载容器"><div class="skeleton" style="height:74px"></div><div class="skeleton" style="height:74px"></div></div>' : cards.length ? `<div class="recent-grid">${cards.map(containerCard).join('')}</div>` : `<div class="recent-empty"><span class="recent-icon">${icon('folder')}</span><div><strong>这个空间还没有容器</strong><p>创建或导入容器后，它会显示在这里。</p></div></div>`}
       </section>
     </div>`;
   }
@@ -185,6 +185,18 @@
     modal.innerHTML = content;
     if (!modal.open) modal.showModal();
   }
+  function selectImportFile(file) {
+    const error = $('#import-file-error');
+    if (!file || !file.name.toLowerCase().endsWith('.veil')) {
+      error.hidden = false;
+      return;
+    }
+    state.importName = file.name;
+    $('#import-file-name').textContent = file.name;
+    $('#import-file-hint').textContent = '点击更换文件';
+    $('#import-next').disabled = false;
+    error.hidden = true;
+  }
   function showPreview(id) {
     const file = data.files.find((item) => item.id === id);
     if (!file) return;
@@ -208,11 +220,22 @@
         if (!item) break;
         state.container = item.id; state.space = item.space; navigate('unlock'); break;
       }
-      case 'open-first': {
-        const item = data.containers.find((entry) => entry.space === state.space) || data.containers[0];
-        if (item) { state.container = item.id; state.space = item.space; navigate('unlock'); }
+      case 'import-container':
+        state.importName = '';
+        showDialog(`<h2 id="modal-title">导入容器</h2><p>选择 .veil 文件，导入到「${escape(currentSpace().name)}」。</p><button type="button" class="recent-empty import-dropzone" data-action="choose-import-file" id="import-dropzone">${icon('file')}<span><strong id="import-file-name">选择或拖入文件</strong><small id="import-file-hint">支持 .veil 文件</small></span></button><div id="import-file-error" class="error-box" role="alert" hidden>请选择 .veil 文件</div><p class="demo-caption">界面演示不读取文件内容，不导入真实容器。</p><div class="modal-actions">${button('取消', 'close-dialog')}${button('继续', 'import-next', '', 'primary', 'id="import-next" disabled')}</div>`); break;
+      case 'choose-import-file': {
+        const picker = document.createElement('input');
+        picker.type = 'file';
+        picker.accept = '.veil';
+        picker.addEventListener('change', () => {
+          if (picker.files?.[0] && $('#import-dropzone')) selectImportFile(picker.files[0]);
+        }, { once: true });
+        picker.click();
         break;
       }
+      case 'import-next':
+        if (!state.importName) break;
+        showDialog(`<h2 id="modal-title">导入容器</h2><p>输入容器密码，导入到「${escape(currentSpace().name)}」。</p><form id="import-form"><div class="selected-container">${icon('shield')}<span><strong>${escape(state.importName)}</strong><small>导入到 ${escape(currentSpace().name)}</small></span></div><label class="field">容器密码<input name="password" type="password" placeholder="输入容器密码" autocomplete="off" required><small class="field-hint">演示密码：demo。请勿输入真实密码。</small></label><div id="import-error" class="error-box" role="alert" hidden>演示密码为 demo，请勿使用真实密码</div><p class="demo-caption">仅演示界面流程，不读取文件内容，不导入真实容器。</p><div class="modal-actions">${button('取消', 'close-dialog')}<button type="submit" class="button primary">导入容器</button></div></form>`); break;
       case 'space': state.space = id; navigate('home'); break;
       case 'collapse': if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id); render(); break;
       case 'sidebar': state.sidebarVisible = !state.sidebarVisible; render(); break;
@@ -257,11 +280,34 @@
       case 'reset': data = structuredClone(seed); state = { ...state, space: 'personal', container: 'private', mode: 'type', layout: 'grid', selected: [], directory: '', search: '', status: 'normal', sidebarVisible: true, collapsed: new Set() }; nextID = 1; navigate('home'); toast('示例数据已重置'); break;
     }
   });
+  document.addEventListener('dragover', (event) => {
+    if (event.target instanceof Element && event.target.closest('#import-dropzone')) {
+      event.preventDefault();
+      $('#import-dropzone').classList.add('dragging');
+    }
+  });
+  document.addEventListener('dragleave', (event) => {
+    const zone = $('#import-dropzone');
+    if (zone && event.target instanceof Node && zone.contains(event.target) && !zone.contains(event.relatedTarget)) zone.classList.remove('dragging');
+  });
+  document.addEventListener('drop', (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest('#import-dropzone')) return;
+    event.preventDefault();
+    $('#import-dropzone').classList.remove('dragging');
+    selectImportFile(event.dataTransfer?.files[0]);
+  });
   document.addEventListener('submit', (event) => {
     event.preventDefault();
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
     const values = new FormData(form);
+    if (form.id === 'import-form') {
+      if (values.get('password') !== 'demo') { $('#import-error').hidden = false; return; }
+      const id = `container-${nextID++}`;
+      data.containers.push({ id, space: state.space, name: state.importName.replace(/\.veil$/i, '') || '容器', description: `本机 / ${currentSpace().name}` });
+      state.container = id; state.status = 'normal'; state.directory = ''; state.selected = []; state.search = '';
+      form.reset(); $('#modal').close(); navigate('files'); toast('已导入示例容器'); return;
+    }
     if (form.id === 'space-form') {
       const name = String(values.get('name') || '').trim();
       if (!name || data.spaces.some((space) => space.name === name)) {

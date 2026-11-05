@@ -15,7 +15,7 @@ struct ContainerFormView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Button { store.cancelForm() } label: {
                     Label("返回容器", systemImage: "arrow.left").font(.system(size: 12))
-                }.buttonStyle(.plain).foregroundStyle(VeilTheme.secondary)
+                }.buttonStyle(VeilPlainButtonStyle()).foregroundStyle(VeilTheme.secondary)
                     .keyboardShortcut(.cancelAction).disabled(store.isBusy).padding(.bottom, 31)
                 VStack(spacing: 11) {
                     Image(systemName: form.isCreate ? "lock.shield" : "lock.open")
@@ -141,7 +141,7 @@ struct NewSpaceView: View {
                     Text("存储位置").font(.system(size: 12, weight: .medium))
                     Spacer()
                     if directory != nil {
-                        Button("恢复默认位置") { directory = nil }.buttonStyle(.plain)
+                        Button("恢复默认位置") { directory = nil }.buttonStyle(VeilPlainButtonStyle())
                             .font(.system(size: 11)).foregroundStyle(VeilTheme.secondary)
                     }
                 }

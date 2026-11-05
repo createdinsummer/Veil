@@ -35,6 +35,33 @@ enum VeilTheme {
     }
 }
 
+private struct PointerCursor: ViewModifier {
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content.onHover { inside in
+            hovering = inside
+            if inside && enabled { NSCursor.pointingHand.set() }
+            else if !inside { NSCursor.arrow.set() }
+        }.onChange(of: enabled) { _, value in
+            if hovering { (value ? NSCursor.pointingHand : NSCursor.arrow).set() }
+        }.onDisappear {
+            if hovering { NSCursor.arrow.set() }
+        }
+    }
+}
+
+extension View {
+    func pointerCursor() -> some View { modifier(PointerCursor()) }
+}
+
+struct VeilPlainButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.contentShape(Rectangle()).pointerCursor()
+    }
+}
+
 struct VeilButtonStyle: ButtonStyle {
     enum Variant { case primary, secondary, subtle }
     var variant: Variant = .secondary
@@ -51,6 +78,7 @@ struct VeilButtonStyle: ButtonStyle {
             .opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.45)
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.12), value: hovering)
+            .contentShape(Rectangle()).pointerCursor()
     }
 
     private var background: Color {
@@ -67,9 +95,10 @@ struct VeilIconButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 13)).foregroundStyle(VeilTheme.secondary)
-            .frame(minWidth: 28, minHeight: 28)
+            .frame(minWidth: 32, minHeight: 32)
             .background(hovering ? VeilTheme.hover : .clear, in: RoundedRectangle(cornerRadius: 6))
             .opacity(enabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
             .onHover { hovering = $0 }
+            .contentShape(Rectangle()).pointerCursor()
     }
 }

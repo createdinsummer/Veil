@@ -40,6 +40,7 @@ struct ContentView: View {
             do { try await Task.sleep(for: .seconds(3)) } catch { return }
             if store.notice == notice { store.notice = nil }
         }
+        .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
         .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
         .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
         .alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
@@ -70,11 +71,11 @@ struct ContentView: View {
             if store.isBusy { ProgressView().controlSize(.small).accessibilityLabel("正在处理") }
             if store.container != nil {
                 Button { Task { await store.exportPackage() } } label: { Label("加密备份", systemImage: "externaldrive") }
-                    .buttonStyle(.plain).disabled(store.isBusy)
+                    .buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy)
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(VeilIconButtonStyle()).help("刷新").disabled(store.isBusy)
                 Button { Task { await store.lock(forgetPassword: true) } } label: { Label("锁定", systemImage: "lock") }
-                    .buttonStyle(.plain).help("锁定容器并清除免密密码")
+                    .buttonStyle(VeilPlainButtonStyle()).help("锁定容器并清除免密密码")
             } else {
                 Label("本地模式", systemImage: "lock").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                 Menu {
@@ -84,7 +85,7 @@ struct ContentView: View {
                     Divider()
                     Button("刷新") { Task { await store.refresh() } }
                 } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).help("容器操作")
+                    .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).pointerCursor().help("容器操作")
             }
         }.font(.system(size: 12))
             .padding(.horizontal, store.container == nil ? 32 : 24)
@@ -118,8 +119,8 @@ private struct SidebarView: View {
                                     else { collapsed.insert(space.id) }
                                 } label: {
                                     Image(systemName: collapsed.contains(space.id) ? "chevron.right" : "chevron.down")
-                                        .font(.system(size: 8, weight: .semibold)).frame(width: 22, height: 30)
-                                }.buttonStyle(.plain).foregroundStyle(VeilTheme.secondary)
+                                        .font(.system(size: 8, weight: .semibold)).frame(width: 28, height: 34)
+                                }.buttonStyle(VeilPlainButtonStyle()).foregroundStyle(VeilTheme.secondary)
                                     .accessibilityLabel(collapsed.contains(space.id) ? "展开\(space.name)" : "收起\(space.name)")
                                 Button { Task { await store.selectSpace(space) } } label: {
                                     HStack(spacing: 8) {
@@ -127,7 +128,7 @@ private struct SidebarView: View {
                                         Text(space.name).font(.system(size: 12)).lineLimit(1)
                                         Spacer(minLength: 0)
                                     }.padding(.vertical, 8).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
+                                }.buttonStyle(VeilPlainButtonStyle())
                                 Button { Task { await store.newContainer(in: space.id) } } label: { Image(systemName: "plus") }
                                     .buttonStyle(VeilIconButtonStyle()).help("在\(space.name)中创建容器")
                             }
@@ -141,7 +142,7 @@ private struct SidebarView: View {
                         Label("新建空间", systemImage: "plus").font(.system(size: 12))
                             .foregroundStyle(VeilTheme.secondary).frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.leading, 25).padding(.vertical, 9).contentShape(Rectangle())
-                    }.buttonStyle(.plain).padding(.top, 2)
+                    }.buttonStyle(VeilPlainButtonStyle()).padding(.top, 2)
                 }.padding(.horizontal, 13).disabled(store.isBusy)
             }.scrollIndicators(.hidden)
             VStack(alignment: .leading, spacing: 15) {
@@ -165,7 +166,7 @@ private struct SidebarContainerRow: View {
                 Spacer(minLength: 0)
             }.padding(.leading, 33).padding(.trailing, 8).frame(minHeight: 32).contentShape(Rectangle())
                 .background(selected ? VeilTheme.selected : hovering ? VeilTheme.hover : .clear, in: RoundedRectangle(cornerRadius: 7))
-        }.buttonStyle(.plain).onHover { hovering = $0 }.help(item.path)
+        }.buttonStyle(VeilPlainButtonStyle()).onHover { hovering = $0 }.help(item.path)
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -198,12 +199,13 @@ private struct HomeView: View {
                                  : "选择容器并输入密码打开").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                         }
                         Spacer()
-                        Button { Task { await store.chooseContainerDirectory() } } label: {
+                        Button { Task { await store.choosePackage() } } label: {
                             HStack(spacing: 6) {
-                                Text("打开其他容器")
+                                Text("导入容器")
                                 Image(systemName: "arrow.right")
                             }.font(.system(size: 11, weight: .semibold)).foregroundStyle(VeilTheme.secondary)
-                        }.buttonStyle(.plain).disabled(store.isBusy)
+                                .padding(.horizontal, 8).frame(minHeight: 32).contentShape(Rectangle())
+                        }.buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy || store.activeSpace == nil)
                     }
                     if let space = store.activeSpace, !space.containers.isEmpty {
                         LazyVGrid(columns: columns, spacing: 12) {
@@ -263,7 +265,7 @@ private struct ContainerCard: View {
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 .background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(hovering ? VeilTheme.secondary.opacity(0.45) : VeilTheme.border))
-        }.buttonStyle(.plain).onHover { hovering = $0 }.disabled(store.isBusy).help(subtitle)
+        }.buttonStyle(VeilPlainButtonStyle()).onHover { hovering = $0 }.disabled(store.isBusy).help(subtitle)
     }
 }
 
@@ -275,7 +277,7 @@ struct FeedbackBanner: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: isError ? "exclamationmark.circle" : "checkmark.circle")
             Text(message).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("关闭提示")
+            Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(VeilPlainButtonStyle()).accessibilityLabel("关闭提示")
         }.font(.system(size: 12)).foregroundStyle(isError ? VeilTheme.danger : VeilTheme.secondary)
             .padding(12).background(isError ? VeilTheme.dangerSurface : VeilTheme.thumbnail)
     }

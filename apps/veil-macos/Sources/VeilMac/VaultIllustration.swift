@@ -68,13 +68,13 @@ struct WelcomeCard: View {
                     .background(VeilTheme.card.opacity(0.52), in: Capsule()).overlay(Capsule().stroke(VeilTheme.border))
                     Text("安全，从这里开始。").font(.system(size: VeilDesign.font("hero"), weight: .semibold)).tracking(-0.6)
                         .foregroundStyle(VeilTheme.heading).padding(.top, 19)
-                    Text("创建一个加密容器，或打开已有容器。\n你的文件加密保存在本机，由你掌管。")
+                    Text("创建一个加密容器，或导入已有容器。\n你的文件加密保存在本机，由你掌管。")
                         .font(.system(size: 12)).foregroundStyle(VeilTheme.secondary).lineSpacing(7).padding(.top, 11)
                     HStack(spacing: 10) {
                         Button("创建容器", systemImage: "plus") { Task { await store.newContainer() } }
                             .buttonStyle(VeilButtonStyle(variant: .primary)).disabled(store.activeSpace == nil)
-                        Button("打开容器", systemImage: "folder") { Task { await store.chooseContainerDirectory() } }
-                            .buttonStyle(VeilButtonStyle())
+                        Button("导入容器", systemImage: "folder") { Task { await store.choosePackage() } }
+                            .buttonStyle(VeilButtonStyle()).disabled(store.activeSpace == nil)
                     }.padding(.top, 22).disabled(store.isBusy)
                 }
                 .padding(.horizontal, 38)

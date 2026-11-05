@@ -27,7 +27,8 @@ struct BrowserView: View {
                 if store.browseMode == .path {
                     ForEach(directoryBreadcrumbs(store.directory)) { crumb in
                         if !crumb.path.isEmpty { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(VeilTheme.muted) }
-                        Button(crumb.title) { store.directory = crumb.path }.buttonStyle(.plain)
+                        Button { store.directory = crumb.path } label: { Text(crumb.title).padding(.horizontal, 3).frame(minHeight: 30).contentShape(Rectangle()) }
+                            .buttonStyle(VeilPlainButtonStyle())
                     }
                 } else {
                     Text("文件分类 / \(store.categories.isEmpty ? "全部" : FileCategory.allCases.filter { store.categories.contains($0) }.map(\.title).joined(separator: "、"))")
@@ -95,7 +96,7 @@ struct BrowserView: View {
                 Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
                 Button("添加文件夹…") { Task { await store.chooseImport(directory: true) } }
             } label: { Label("添加", systemImage: "plus").font(.system(size: 12)).foregroundStyle(VeilTheme.text) }
-                .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy)
+                .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).pointerCursor()
         }.padding(.horizontal, 24).frame(height: 48)
     }
 }
@@ -109,7 +110,7 @@ private struct BrowseTab: View {
             Text(title).font(.system(size: 13, weight: selected ? .semibold : .regular))
                 .foregroundStyle(selected ? VeilTheme.text : VeilTheme.secondary).padding(.vertical, 15)
                 .overlay(alignment: .bottom) { Rectangle().fill(selected ? VeilTheme.accent : .clear).frame(height: 2) }
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+        }.buttonStyle(VeilPlainButtonStyle()).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -123,7 +124,7 @@ private struct FilterButton: View {
                 .foregroundStyle(selected ? VeilTheme.text : VeilTheme.secondary)
                 .background(selected ? VeilTheme.sidebar : VeilTheme.card, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? VeilTheme.secondary.opacity(0.65) : VeilTheme.border))
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+        }.buttonStyle(VeilPlainButtonStyle()).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -138,7 +139,7 @@ private struct LayoutButton: View {
                 .foregroundStyle(selected ? VeilTheme.text : VeilTheme.muted)
                 .background(selected ? VeilTheme.card : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .shadow(color: .black.opacity(selected ? 0.05 : 0), radius: 2, y: 1)
-        }.buttonStyle(.plain).help(title).accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
+        }.buttonStyle(VeilPlainButtonStyle()).help(title).accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -159,7 +160,10 @@ private struct FileTile: View {
                         Image(systemName: entry.symbol).font(.system(size: 36, weight: .light)).foregroundStyle(VeilTheme.secondary)
                     }
                 }.frame(height: VeilDesign.layout("file-preview-height")).clipShape(RoundedRectangle(cornerRadius: 10))
-                Text(entry.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(VeilTheme.text).lineLimit(1).truncationMode(.middle)
+                HStack {
+                    Text(entry.name).font(.system(size: 12, weight: .semibold)).foregroundStyle(VeilTheme.text).lineLimit(1).truncationMode(.middle)
+                    if case .file(let file) = entry { DragExportHandle(file: file, store: store) }
+                }
                 Group {
                     switch entry {
                     case .folder: Text("文件夹")
@@ -168,7 +172,7 @@ private struct FileTile: View {
                 }.font(.system(size: 11)).foregroundStyle(VeilTheme.muted).lineLimit(1)
             }.padding(5).contentShape(Rectangle())
                 .background(hovering ? VeilTheme.canvas : .clear, in: RoundedRectangle(cornerRadius: 9))
-        }.buttonStyle(.plain).onHover { hovering = $0 }.help(entry.path)
+        }.buttonStyle(VeilPlainButtonStyle()).onHover { hovering = $0 }.help(entry.path)
             .disabled(store.isBusy).contextMenu { EntryActions(entry: entry) }
     }
 }
@@ -185,7 +189,7 @@ private struct FileList: View {
                     Text("大小").frame(width: 70, alignment: .leading)
                     Text("版本").frame(width: 40, alignment: .leading)
                     if showDate { Text("加密时间").frame(width: 100, alignment: .leading) }
-                    Text("操作").frame(width: 62)
+                    Text("操作").frame(width: 84)
                 }.font(.system(size: 11)).foregroundStyle(VeilTheme.muted).padding(.horizontal, 8).padding(.vertical, 10)
                 Rectangle().fill(VeilTheme.border).frame(height: 1)
                 ScrollView {
@@ -218,8 +222,8 @@ private struct FileListRow: View {
                         }
                     }
                     Spacer(minLength: 0)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(minHeight: VeilDesign.layout("row-height")).contentShape(Rectangle())
+            }.buttonStyle(VeilPlainButtonStyle()).frame(maxWidth: .infinity, alignment: .leading)
             Group {
                 if case .file(let file) = entry {
                     Text(file.sizeLabel).frame(width: 70, alignment: .leading)
@@ -233,12 +237,13 @@ private struct FileListRow: View {
             }.font(.system(size: 11)).foregroundStyle(VeilTheme.secondary)
             HStack(spacing: 0) {
                 if case .file(let file) = entry {
+                    DragExportHandle(file: file, store: store)
                     Button { Task { await store.exportFile(file) } } label: { Image(systemName: "square.and.arrow.up") }
                         .buttonStyle(VeilIconButtonStyle()).help("导出 \(file.leafName)")
-                } else { Color.clear.frame(width: 28, height: 28) }
+                } else { Color.clear.frame(width: 52, height: 32) }
                 Button { store.pendingDelete = entry } label: { Image(systemName: "trash") }
                     .buttonStyle(VeilIconButtonStyle()).help("删除 \(entry.name)")
-            }.frame(width: 62)
+            }.frame(width: 84)
         }
         .padding(.horizontal, 8).frame(minHeight: VeilDesign.layout("row-height"))
         .background(hovering ? VeilTheme.canvas : .clear, in: RoundedRectangle(cornerRadius: 6))

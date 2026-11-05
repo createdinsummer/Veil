@@ -17,6 +17,7 @@ final class AppStore: ObservableObject {
     @Published var browseMode: BrowseMode = .type
     @Published var form: ContainerForm?
     @Published var showNewSpace = false
+    @Published var showImportPackage = false
     @Published var pendingDelete: BrowserEntry?
     @Published var preview: PreviewAsset?
     @Published var error: String?
@@ -236,16 +237,9 @@ final class AppStore: ObservableObject {
     }
 
     func choosePackage() async {
-        guard !isBusy, let space = activeSpace else { return }
-        let panel = NSOpenPanel()
-        panel.title = "导入 .veil 加密容器"
-        panel.allowedContentTypes = [UTType(filenameExtension: "veil") ?? .data]
-        panel.allowsOtherFileTypes = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        if container != nil { guard await lock() else { return } }
-        resetBrowser()
+        guard !isBusy, activeSpace != nil else { return }
         error = nil
-        form = .importPackage(path: url.path, space: space.id)
+        showImportPackage = true
     }
 
     func submit(_ form: ContainerForm, name: String, password: String, confirmation: String) async {
@@ -391,12 +385,22 @@ final class AppStore: ObservableObject {
         }
     }
 
+    var dragExportGeneration: UInt64 { generation }
+
+    func exportDraggedFile(_ file: FileEntry, to url: URL, generation ticket: UInt64) async throws {
+        guard ticket == generation, container != nil else {
+            throw ClientError.service("保险箱已关闭，请重新拖动文件。")
+        }
+        try await client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
+    }
+
     func exportPackage() async {
         guard !isBusy, let container else { return }
         let panel = NSSavePanel()
         panel.title = "导出加密备份"
-        panel.nameFieldStringValue = container.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_") + ".veil"
         panel.allowedContentTypes = [UTType(filenameExtension: "veil") ?? .data]
+        let name = container.name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+        panel.nameFieldStringValue = name.lowercased().hasSuffix(".veil") ? name : name + ".veil"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         await perform { ticket in
