@@ -138,6 +138,12 @@ impl AppStore {
             }
         }
         migrate(&mut conn, 0x56415050, include_str!("app.sql"), create)?;
+        if create {
+            // 首次写入可能改变文件标识，重新打开后校验数据库结构。
+            drop(conn);
+            conn = veil_core::database::open(&path, None, false)?;
+            migrate(&mut conn, 0x56415050, include_str!("app.sql"), false)?;
+        }
         let mut store = Self {
             conn,
             directory: directory.to_path_buf(),

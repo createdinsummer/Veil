@@ -197,6 +197,10 @@ impl ContainerDb {
         drop(file);
         let mut conn = veil_core::database::open(&path, Some(password), true)?;
         migrate(&mut conn, 0x56444956, include_str!("container.sql"), true)?;
+        // 某些文件系统在空文件首次写入后改变文件标识；刷新连接并重新校验结构。
+        drop(conn);
+        let mut conn = veil_core::database::open(&path, Some(password), false)?;
+        migrate(&mut conn, 0x56444956, include_str!("container.sql"), false)?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO div_info VALUES(1,?1,?2,?3,1,?4)",
