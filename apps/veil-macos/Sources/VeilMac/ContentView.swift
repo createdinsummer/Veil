@@ -3,33 +3,43 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var sidebarVisible = true
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarView().frame(width: VeilDesign.layout("sidebar"))
-            Rectangle().fill(VeilTheme.border).frame(width: 1)
+            if sidebarVisible {
+                SidebarView().frame(width: VeilDesign.layout("sidebar"))
+                Rectangle().fill(VeilTheme.border).frame(width: 1)
+            }
             VStack(spacing: 0) {
                 header
                 Rectangle().fill(VeilTheme.border).frame(height: 1)
                 if store.form == nil, !store.showNewSpace, let error = store.error {
                     FeedbackBanner(message: error, isError: true) { store.error = nil }
                 }
-                if let notice = store.notice {
-                    FeedbackBanner(message: notice, isError: false) { store.notice = nil }
-                }
                 if let form = store.form { ContainerFormView(form: form).id(form.id) }
                 else if let container = store.container { BrowserView(container: container) }
                 else { HomeView() }
-                Rectangle().fill(VeilTheme.border).frame(height: 1)
-                HStack {
-                    Text("VEIL / PRIVATE BY DESIGN").font(.system(size: 9, weight: .semibold)).tracking(1)
-                    Spacer()
-                    Text("你的文件，你的空间").font(.system(size: 10))
-                }.foregroundStyle(VeilTheme.muted).padding(.horizontal, 42).padding(.vertical, 18)
             }.frame(maxWidth: .infinity, maxHeight: .infinity).background(VeilTheme.canvas)
         }
         .foregroundStyle(VeilTheme.text)
         .ignoresSafeArea(.container, edges: .top)
+        .overlay(alignment: .bottomTrailing) {
+            if let notice = store.notice {
+                FeedbackBanner(message: notice, isError: false) { store.notice = nil }
+                    .frame(maxWidth: 340)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(VeilTheme.border))
+                    .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+                    .padding(.trailing, 20).padding(.bottom, 20)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+        }
+        .task(id: store.notice) {
+            guard let notice = store.notice else { return }
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            if store.notice == notice { store.notice = nil }
+        }
         .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
         .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
         .alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
@@ -47,6 +57,12 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { sidebarVisible.toggle() }
+            } label: { Image(systemName: "sidebar.left") }
+                .buttonStyle(VeilIconButtonStyle())
+                .help(sidebarVisible ? "收起侧栏" : "展开侧栏")
+                .accessibilityLabel(sidebarVisible ? "收起侧栏" : "展开侧栏")
             Text(store.activeSpace?.name ?? "本机").foregroundStyle(VeilTheme.secondary)
             Text("/").foregroundStyle(VeilTheme.muted)
             Text(store.form?.title ?? store.container?.name ?? "我的容器").lineLimit(1)
@@ -70,7 +86,10 @@ struct ContentView: View {
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).help("容器操作")
             }
-        }.font(.system(size: 12)).padding(.horizontal, 42).frame(height: VeilDesign.layout("header"))
+        }.font(.system(size: 12))
+            .padding(.horizontal, store.container == nil ? 32 : 24)
+            .padding(.leading, sidebarVisible ? 0 : 76)
+            .frame(height: store.container == nil ? VeilDesign.layout("header") : 52)
     }
 }
 

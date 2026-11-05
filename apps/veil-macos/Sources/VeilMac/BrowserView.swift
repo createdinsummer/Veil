@@ -7,54 +7,38 @@ struct BrowserView: View {
     private let columns = [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12, alignment: .top)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .bottom, spacing: 22) {
-                BrowseTab(title: "按路径", selected: store.browseMode == .path) { store.browseMode = .path }
-                BrowseTab(title: "按类型", selected: store.browseMode == .type) { store.browseMode = .type }
-                Spacer()
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(VeilTheme.muted)
-                    TextField("搜索文件", text: $store.search).textFieldStyle(.plain)
-                }.font(.system(size: 12)).padding(.horizontal, 10).frame(width: 180, height: 30)
-                    .background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 7))
-                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(VeilTheme.border)).padding(.bottom, 7)
-            }.overlay(alignment: .bottom) { Rectangle().fill(VeilTheme.border).frame(height: 1) }
+        VStack(alignment: .leading, spacing: 0) {
+            toolbar
+            Rectangle().fill(VeilTheme.border).frame(height: 1)
             if store.browseMode == .type {
-                HStack(spacing: 7) {
-                    FilterButton(title: "全部", selected: store.categories.isEmpty) { store.categories = [] }
-                    ForEach(FileCategory.allCases) { category in
-                        FilterButton(title: category.title, selected: store.categories.contains(category)) {
-                            if store.categories.contains(category) { store.categories.remove(category) }
-                            else { store.categories.insert(category) }
-                        }
-                    }
-                }
-            }
-            VStack(spacing: 15) {
-                HStack(spacing: 10) {
-                    if store.browseMode == .path {
-                        HStack(spacing: 7) {
-                            ForEach(directoryBreadcrumbs(store.directory)) { crumb in
-                                if !crumb.path.isEmpty { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(VeilTheme.muted) }
-                                Button(crumb.title) { store.directory = crumb.path }.buttonStyle(.plain)
+                ScrollView(.horizontal) {
+                    HStack(spacing: 7) {
+                        FilterButton(title: "全部", selected: store.categories.isEmpty) { store.categories = [] }
+                        ForEach(FileCategory.allCases) { category in
+                            FilterButton(title: category.title, selected: store.categories.contains(category)) {
+                                if store.categories.contains(category) { store.categories.remove(category) }
+                                else { store.categories.insert(category) }
                             }
-                        }.font(.system(size: 12)).lineLimit(1)
-                    } else {
-                        Text("文件分类 / \(store.categories.isEmpty ? "全部" : FileCategory.allCases.filter { store.categories.contains($0) }.map(\.title).joined(separator: "、"))")
-                            .font(.system(size: 12)).foregroundStyle(VeilTheme.secondary).lineLimit(1)
+                        }
+                    }.padding(.horizontal, 24).padding(.top, 10)
+                }.scrollIndicators(.hidden).frame(height: 44)
+            }
+            HStack(spacing: 7) {
+                if store.browseMode == .path {
+                    ForEach(directoryBreadcrumbs(store.directory)) { crumb in
+                        if !crumb.path.isEmpty { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(VeilTheme.muted) }
+                        Button(crumb.title) { store.directory = crumb.path }.buttonStyle(.plain)
                     }
-                    Spacer(minLength: 4)
-                    HStack(spacing: 2) {
-                        LayoutButton(title: "列表", symbol: "list.bullet", selected: store.layout == .list) { store.layout = .list }
-                        LayoutButton(title: "大图标", symbol: "square.grid.2x2", selected: store.layout == .grid) { store.layout = .grid }
-                    }.padding(3).background(VeilTheme.thumbnail, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(VeilTheme.border))
-                    Menu {
-                        Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
-                        Button("添加文件夹…") { Task { await store.chooseImport(directory: true) } }
-                    } label: { Label("添加", systemImage: "plus").font(.system(size: 12)).foregroundStyle(VeilTheme.secondary) }
-                        .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy)
+                } else {
+                    Text("文件分类 / \(store.categories.isEmpty ? "全部" : FileCategory.allCases.filter { store.categories.contains($0) }.map(\.title).joined(separator: "、"))")
                 }
+                Spacer(minLength: 8)
+                Text("\(store.visibleEntries.count) 项").foregroundStyle(VeilTheme.muted)
+            }
+            .font(.system(size: 11)).foregroundStyle(VeilTheme.secondary).lineLimit(1)
+            .padding(.horizontal, 24).padding(.vertical, 12)
+
+            Group {
                 if store.visibleEntries.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "folder").font(.system(size: 28, weight: .light)).foregroundStyle(VeilTheme.muted)
@@ -64,22 +48,21 @@ struct BrowserView: View {
                             .font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                         Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
                             .buttonStyle(VeilButtonStyle()).padding(.top, 8).disabled(store.isBusy)
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity).frame(minHeight: 260)
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if store.layout == .grid {
                     ScrollView {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 15) {
                             ForEach(store.visibleEntries) { entry in FileTile(entry: entry) }
-                        }
+                        }.padding(.bottom, 20)
                     }
                 } else {
                     FileList(entries: store.visibleEntries)
                 }
-            }
-            .padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(VeilTheme.border))
+            }.padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(.horizontal, VeilDesign.layout("content-padding-x")).padding(.top, 26).padding(.bottom, 30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(VeilTheme.card)
         .onChange(of: store.layout) { _, _ in Task { await store.savePreferences() } }
         .onChange(of: store.browseMode) { _, _ in Task { await store.savePreferences() } }
         .task(id: store.thumbnailKey) { await store.loadThumbnails() }
@@ -88,6 +71,32 @@ struct BrowserView: View {
             Task { await store.importFiles(urls) }
             return true
         }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 18) {
+                BrowseTab(title: "按路径", selected: store.browseMode == .path) { store.browseMode = .path }
+                BrowseTab(title: "按类型", selected: store.browseMode == .type) { store.browseMode = .type }
+            }.fixedSize()
+            Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(VeilTheme.muted)
+                TextField("搜索文件", text: $store.search).textFieldStyle(.plain)
+            }.font(.system(size: 12)).padding(.horizontal, 10)
+                .frame(minWidth: 100, idealWidth: 160, maxWidth: 200).frame(height: 28)
+                .background(VeilTheme.thumbnail, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(VeilTheme.border))
+            HStack(spacing: 2) {
+                LayoutButton(title: "列表", symbol: "list.bullet", selected: store.layout == .list) { store.layout = .list }
+                LayoutButton(title: "大图标", symbol: "square.grid.2x2", selected: store.layout == .grid) { store.layout = .grid }
+            }.padding(2).background(VeilTheme.thumbnail, in: RoundedRectangle(cornerRadius: 7)).fixedSize()
+            Menu {
+                Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
+                Button("添加文件夹…") { Task { await store.chooseImport(directory: true) } }
+            } label: { Label("添加", systemImage: "plus").font(.system(size: 12)).foregroundStyle(VeilTheme.text) }
+                .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy)
+        }.padding(.horizontal, 24).frame(height: 48)
     }
 }
 
@@ -98,7 +107,7 @@ private struct BrowseTab: View {
     var body: some View {
         Button(action: action) {
             Text(title).font(.system(size: 13, weight: selected ? .semibold : .regular))
-                .foregroundStyle(selected ? VeilTheme.text : VeilTheme.secondary).padding(.vertical, 10)
+                .foregroundStyle(selected ? VeilTheme.text : VeilTheme.secondary).padding(.vertical, 15)
                 .overlay(alignment: .bottom) { Rectangle().fill(selected ? VeilTheme.accent : .clear).frame(height: 2) }
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
@@ -125,11 +134,11 @@ private struct LayoutButton: View {
     let action: () -> Void
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbol).font(.system(size: 11)).padding(.horizontal, 9).padding(.vertical, 6)
+            Label(title, systemImage: symbol).labelStyle(.iconOnly).font(.system(size: 12)).frame(width: 28, height: 26)
                 .foregroundStyle(selected ? VeilTheme.text : VeilTheme.muted)
                 .background(selected ? VeilTheme.card : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .shadow(color: .black.opacity(selected ? 0.05 : 0), radius: 2, y: 1)
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+        }.buttonStyle(.plain).help(title).accessibilityLabel(title).accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 

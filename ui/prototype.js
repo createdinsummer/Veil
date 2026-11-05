@@ -27,7 +27,7 @@
     directories: ['旅行照片', '工作资料', '待整理']
   };
   let data = structuredClone(seed);
-  let state = { page: 'home', space: 'personal', container: 'private', mode: 'type', layout: 'grid', selected: [], directory: '', search: '', status: 'normal', collapsed: new Set() };
+  let state = { page: 'home', space: 'personal', container: 'private', mode: 'type', layout: 'grid', selected: [], directory: '', search: '', status: 'normal', sidebarVisible: true, collapsed: new Set() };
   let toastTimer;
   let nextID = 1;
   const basename = (name) => name.split('/').pop();
@@ -70,7 +70,7 @@
   function renderTopbar() {
     const titles = { home: '我的容器', files: currentContainer()?.name || '个人文件', create: '新建容器', unlock: '打开容器', foundations: '视觉规范' };
     const actions = state.page === 'files' ? `<div class="top-actions"><button class="toolbar-button" data-action="backup">${icon('download')}备份</button><button class="toolbar-button" data-action="refresh">${icon('refresh')}刷新</button><button class="toolbar-button" data-action="lock">${icon('lock')}锁定</button></div>` : '<span class="local-status"><span class="status-dot"></span>本地模式</span>';
-    return `<header class="topbar"><div class="topbar-crumb"><span>${escape(currentSpace().name)}</span><span class="slash">/</span><b>${escape(titles[state.page])}</b></div>${actions}</header>`;
+    return `<header class="topbar"><div class="topbar-crumb"><button class="toolbar-button sidebar-toggle" data-action="sidebar" aria-label="${state.sidebarVisible ? '收起侧栏' : '展开侧栏'}" title="${state.sidebarVisible ? '收起侧栏' : '展开侧栏'}">${icon('sidebar')}</button><span>${escape(currentSpace().name)}</span><span class="slash">/</span><b>${escape(titles[state.page])}</b></div>${actions}</header>`;
   }
   function containerCard(item) {
     return `<button class="recent-card" data-action="open" data-id="${item.id}"><span class="recent-icon">${icon('shield')}</span><span class="recent-info"><strong>${escape(item.name)}</strong><small>${escape(item.description)}</small></span>${icon('arrow', 'recent-arrow')}</button>`;
@@ -127,9 +127,13 @@
   }
   function files() {
     return `<div class="page-content browser-content">
-      <div class="browse-tabs" role="tablist" aria-label="浏览方式"><button role="tab" data-action="mode" data-id="path" aria-selected="${state.mode === 'path'}">按路径</button><button role="tab" data-action="mode" data-id="type" aria-selected="${state.mode === 'type'}">按类型</button><label class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索文件" aria-label="搜索文件" value="${escape(state.search)}"></label></div>
+      <div class="browser-controls">
+        <div class="browse-tabs" role="tablist" aria-label="浏览方式"><button role="tab" data-action="mode" data-id="path" aria-selected="${state.mode === 'path'}">按路径</button><button role="tab" data-action="mode" data-id="type" aria-selected="${state.mode === 'type'}">按类型</button></div>
+        <label class="search-box">${icon('search')}<input id="search" type="search" placeholder="搜索文件" aria-label="搜索文件" value="${escape(state.search)}"></label>
+        <div class="browser-actions"><div class="layout-switch" aria-label="展示方式"><button data-action="layout" data-id="list" aria-label="列表" title="列表" aria-pressed="${state.layout === 'list'}">${icon('list')}</button><button data-action="layout" data-id="grid" aria-label="大图标" title="大图标" aria-pressed="${state.layout === 'grid'}">${icon('grid')}</button></div><button class="toolbar-button" data-action="add">${icon('plus')}添加</button></div>
+      </div>
       ${state.mode === 'type' ? `<div class="type-filters" aria-label="文件类型，可多选"><button data-action="filter" data-id="all" aria-pressed="${!state.selected.length}">全部</button>${Object.entries(categoryNames).map(([id, label]) => `<button data-action="filter" data-id="${id}" aria-pressed="${state.selected.includes(id)}">${label}</button>`).join('')}</div>` : ''}
-      <section class="browser-area" aria-label="文件浏览"><div class="browser-toolbar"><div class="breadcrumbs">${breadcrumbs()}</div><div class="browser-actions"><div class="layout-switch" aria-label="展示方式"><button data-action="layout" data-id="list" aria-pressed="${state.layout === 'list'}">${icon('list')}列表</button><button data-action="layout" data-id="grid" aria-pressed="${state.layout === 'grid'}">${icon('grid')}大图标</button></div><button class="toolbar-button" data-action="add">${icon('plus')}添加</button></div></div><div id="browser-results">${results()}</div></section>
+      <section class="browser-area" aria-label="文件浏览"><div class="browser-toolbar"><div class="breadcrumbs">${breadcrumbs()}</div><span class="file-count">${entries().length} 项</span></div><div id="browser-results">${results()}</div></section>
     </div>`;
   }
   function form(create) {
@@ -155,7 +159,9 @@
   function render() {
     const screens = { home, files, create: () => form(true), unlock: () => form(false), foundations };
     if (!screens[state.page]) state.page = 'home';
-    $('#app').innerHTML = `${renderSidebar()}<div class="app-main">${renderTopbar()}${screens[state.page]()}<footer class="app-footer"><span>VEIL <span class="slash">/</span> PRIVATE BY DESIGN</span><span>你的文件，你的空间</span></footer></div>`;
+    $('#app').classList.toggle('browser-open', state.page === 'files');
+    $('#app').classList.toggle('sidebar-hidden', !state.sidebarVisible);
+    $('#app').innerHTML = `${renderSidebar()}<div class="app-main">${renderTopbar()}${screens[state.page]()}</div>`;
     document.querySelectorAll('[data-page]').forEach((link) => {
       if (link.dataset.page === state.page) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
     });
@@ -209,6 +215,7 @@
       }
       case 'space': state.space = id; navigate('home'); break;
       case 'collapse': if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id); render(); break;
+      case 'sidebar': state.sidebarVisible = !state.sidebarVisible; render(); break;
       case 'mode': state.mode = id; render(); break;
       case 'layout': state.layout = id; render(); break;
       case 'filter': state.selected = id === 'all' ? [] : state.selected.includes(id) ? state.selected.filter((value) => value !== id) : [...state.selected, id]; render(); break;
@@ -247,7 +254,7 @@
       case 'delete': showDialog(`<h2 id="modal-title">删除确认</h2><p>确定从容器中删除「${escape(basename(id))}」${data.directories.includes(id) ? '及其全部文件' : ''}？</p><p class="demo-caption">仅移除临时示例条目，可通过「重置示例」恢复。</p><div class="modal-actions">${button('取消', 'close-dialog')}${button('确认删除', 'confirm-delete', 'trash', 'danger', `data-id="${escape(id)}"`)}</div>`); break;
       case 'confirm-delete': data.files = data.files.filter((file) => file.name !== id && !file.name.startsWith(`${id}/`)); data.directories = data.directories.filter((path) => path !== id && !path.startsWith(`${id}/`)); $('#modal').close(); render(); toast('已移除示例条目'); break;
       case 'theme': document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; render(); break;
-      case 'reset': data = structuredClone(seed); state = { ...state, space: 'personal', container: 'private', mode: 'type', layout: 'grid', selected: [], directory: '', search: '', status: 'normal', collapsed: new Set() }; nextID = 1; navigate('home'); toast('示例数据已重置'); break;
+      case 'reset': data = structuredClone(seed); state = { ...state, space: 'personal', container: 'private', mode: 'type', layout: 'grid', selected: [], directory: '', search: '', status: 'normal', sidebarVisible: true, collapsed: new Set() }; nextID = 1; navigate('home'); toast('示例数据已重置'); break;
     }
   });
   document.addEventListener('submit', (event) => {
@@ -284,7 +291,7 @@
     form.reset(); state.status = 'normal'; state.directory = ''; state.selected = []; state.search = ''; navigate('files'); toast(create ? '已创建示例容器，以下为演示文件。' : '已解锁示例容器');
   });
   document.addEventListener('input', (event) => {
-    if (event.target.id === 'search') { state.search = event.target.value; $('#browser-results').innerHTML = results(); }
+    if (event.target.id === 'search') { state.search = event.target.value; $('#browser-results').innerHTML = results(); $('.file-count').textContent = `${entries().length} 项`; }
   });
   $('#viewport').addEventListener('change', resize);
   $('#page-state').addEventListener('change', (event) => { state.status = event.target.value; render(); });
