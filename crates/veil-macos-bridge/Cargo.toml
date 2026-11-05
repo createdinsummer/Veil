@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 veil-service = { path = "../veil-service" }

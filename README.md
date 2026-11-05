@@ -26,7 +26,7 @@ Veil 面向需要长期保管、迁移和备份本地文件的用户。它不依
 | `veil-brute-force` | 对自行创建并通过 `veil pack` 生成的 `.veil` 文件进行密码强度测试 |
 | `veil-macos` | 独立的 SwiftUI macOS 客户端，通过原生调用接口复用 `veil-service` |
 
-界面设计稿入口为 [`ui/index.html`](ui/index.html)，可直接用浏览器打开。包含首页、文件浏览、创建与解锁流程、视觉规范，以及明暗外观、窗口尺寸和页面状态切换；交互只使用临时示例数据。设计参数集中在 `ui/tokens.json`，修改参数或 SVG 图标后运行 `node ui/tools/build.mjs`，使用 `--check` 检查生成文件是否同步。
+界面设计稿入口为 [`ui/index.html`](ui/index.html)，可直接用浏览器打开。 iOS 界面设计稿入口为 [`ui/ios/index.html`](ui/ios/index.html)，包含手机首页、容器流程及文件预览示例。包含首页、文件浏览、创建与解锁流程、视觉规范，以及明暗外观、窗口尺寸和页面状态切换；交互只使用临时示例数据。设计参数集中在 `ui/tokens.json`，修改参数或 SVG 图标后运行 `node ui/tools/build.mjs`，使用 `--check` 检查生成文件是否同步。
 
 ## 工作模型
 
@@ -88,6 +88,8 @@ DMG 使用固定的左右拖动布局，窗口为 640×360，图标为 88 点；
 客户端支持空间管理（新建空间时可选择存储目录）、容器创建与解锁、文件与文件夹导入、分类与目录浏览、搜索、内置预览、导出、删除及 `.veil` 加密备份导入和导出，使用原生窗口、菜单、文件对话框及文件拖入。解锁成功后密码只在应用进程内存中保留（默认 1 小时，时长保存在 `app.db` 的 `unlock_cache_seconds` 设置项，旧库自动补齐），期间重新打开同一容器无需再次输入；主动锁定、关闭免密或超出时长后需要重新输入密码。
 
 SwiftUI 客户端直接通过应用内的 C ABI 调用 `veil-service`，展示逻辑保留在 Swift，不新增公共展示层。它与 CLI 使用相同的本机数据目录和容器格式；休眠、屏幕休眠、系统用户会话失活及应用退出时锁定。内置预览沿用服务层的 16 MiB 读取限制，视频预览所需的临时文件在关闭预览或锁定时清理。原生接口测试使用 `cargo test -p veil-macos-bridge`。
+
+iOS 客户端位于 `apps/veil-ios`，需要 Xcode、XcodeGen 和 Rust 的 iOS 目标。在 Apple Silicon Mac 上运行 `bash scripts/ios/build.sh simulator` 构建模拟器发布版，运行 `bash scripts/ios/build.sh device` 构建未签名的真机发布版；两者都使用发布版 Rust 加解密库。真机安装需在生成的 Xcode 工程中配置签名。客户端使用应用私有目录，支持空间和容器管理、文件导入与导出、图片和文本预览、加密备份导入与导出；进入后台时锁定容器。
 
 ## 关键边界
 

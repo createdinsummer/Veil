@@ -164,6 +164,21 @@ fn serialize(
     Ok(VeilBuffer::new(data, 0))
 }
 
+/// 在创建客户端前配置移动端应用私有目录。
+///
+/// # Safety
+/// path 必须指向有效的、以 NUL 结尾的 UTF-8 字符串。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn veil_configure_app_data_dir(path: *const std::ffi::c_char) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let Ok(path) = unsafe { std::ffi::CStr::from_ptr(path) }.to_str() else {
+        return false;
+    };
+    veil_service::storage::app::configure_app_data_dir(path.into()).is_ok()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn veil_client_new() -> *mut VeilService {
     Box::into_raw(Box::new(VeilService::default()))

@@ -78,6 +78,12 @@ pub fn nearest_existing_path(path: &Path) -> Result<PathBuf, VeilError> {
     }
 }
 
+// iOS 只使用应用私有目录，不枚举系统或外接卷。
+#[cfg(target_os = "ios")]
+fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
+    Ok(vec![PathBuf::from("/")])
+}
+
 #[cfg(target_os = "macos")]
 fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
     use std::os::unix::ffi::OsStrExt;
@@ -161,6 +167,11 @@ fn mount_roots() -> Result<Vec<PathBuf>, VeilError> {
 }
 
 fn is_external_mount(root: &Path) -> bool {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = root;
+        false
+    }
     #[cfg(target_os = "macos")]
     {
         root.starts_with("/Volumes")

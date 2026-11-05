@@ -76,6 +76,35 @@ pub struct RecentContainer {
     pub path: String,
 }
 
+/// 仅识别 iOS 应用容器下由本应用生成的默认空间路径。
+#[cfg(any(target_os = "ios", test))]
+fn ios_relocated_space_path(old: &Path, current_root: &Path, space_id: &str) -> Option<PathBuf> {
+    if !veil_core::metadata::is_uuid_v4(space_id) {
+        return None;
+    }
+    fn container_id(path: &Path, suffix: &Path) -> Option<String> {
+        let app_root = path
+            .strip_prefix("/private/var/mobile/Containers/Data/Application")
+            .or_else(|_| path.strip_prefix("/var/mobile/Containers/Data/Application"))
+            .ok()?;
+        let mut parts = app_root.components();
+        let uuid = parts.next()?.as_os_str().to_str()?;
+        if !veil_core::metadata::is_uuid_v4(&uuid.to_ascii_lowercase()) || parts.as_path() != suffix
+        {
+            return None;
+        }
+        Some(uuid.to_ascii_lowercase())
+    }
+    let app_suffix = Path::new("Library/Application Support/Veil");
+    let old_suffix = app_suffix.join("spaces").join(space_id);
+    let old_id = container_id(old, &old_suffix)?;
+    let current_id = container_id(current_root, app_suffix)?;
+    if old_id == current_id {
+        return None;
+    }
+    Some(current_root.join("spaces").join(space_id))
+}
+
 pub struct AppStore {
     pub(crate) conn: Connection,
     pub directory: PathBuf,
@@ -157,7 +186,47 @@ impl AppStore {
             )?;
         }
         tx.commit()?;
+        #[cfg(target_os = "ios")]
+        store.rebind_ios_sandbox_spaces()?;
         Ok(store)
+    }
+
+    /// iOS 更新或还原应用时，私有数据目录的系统标识可能发生变化。
+    /// 只重新绑定应用默认空间，并且必须在新位置找到原有空间目录。
+    #[cfg(target_os = "ios")]
+    fn rebind_ios_sandbox_spaces(&mut self) -> Result<()> {
+        let root = std::fs::canonicalize(&self.directory)?;
+        let spaces = self.spaces()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for space in spaces {
+            let Some(old) = space.local_path else {
+                continue;
+            };
+            let Some(new) = ios_relocated_space_path(&old, &root, &space.id) else {
+                continue;
+            };
+            if old.is_dir() || !new.is_dir() {
+                continue;
+            }
+            let new = std::fs::canonicalize(new)?;
+            tx.execute(
+                "UPDATE space_info SET local_path=?1,updated_at=?2 WHERE id=?3 AND local_path=?4",
+                params![
+                    new.to_string_lossy().as_ref(),
+                    now(),
+                    space.id,
+                    old.to_string_lossy().as_ref()
+                ],
+            )?;
+            // 最近访问记录只是缓存；路径随空间重新绑定一同更新。
+            let old_prefix = format!("{}/", old.display());
+            let new_prefix = format!("{}/", new.display());
+            tx.execute("UPDATE local_record SET value_json=json_set(value_json,'$.path',?1 || substr(json_extract(value_json,'$.path'), length(?2)+1)),updated_at=?3 WHERE record_type='recent_div' AND substr(json_extract(value_json,'$.path'),1,length(?2))=?2", params![new_prefix, old_prefix, now()])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
     pub fn device_id(&self) -> Result<String> {
         self.system("device_id")?
@@ -535,6 +604,37 @@ fn validate_record<T: Serialize>(kind: &str, key: &str, value: &T) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ios_space_relocation_only_accepts_own_default_space() {
+        let id = "aab695cd-3e2c-48d6-9d27-e2ec6770db17";
+        let old = format!(
+            "/private/var/mobile/Containers/Data/Application/62291DE1-522B-499F-A6A5-E8344D5B3A8C/Library/Application Support/Veil/spaces/{id}"
+        );
+        let root = Path::new(
+            "/private/var/mobile/Containers/Data/Application/9DA3F8B1-D6DA-4804-936F-D85706175424/Library/Application Support/Veil",
+        );
+        assert_eq!(
+            ios_relocated_space_path(Path::new(&old), root, id),
+            Some(root.join("spaces").join(id))
+        );
+        assert_eq!(
+            ios_relocated_space_path(Path::new(&old), root, "not-an-id"),
+            None
+        );
+        assert_eq!(
+            ios_relocated_space_path(Path::new(&old.replace("/spaces/", "/other/")), root, id),
+            None
+        );
+        assert_eq!(
+            ios_relocated_space_path(Path::new(&old), Path::new("/tmp/other"), id),
+            None
+        );
+        assert_eq!(
+            ios_relocated_space_path(&root.join("spaces").join(id), root, id),
+            None
+        );
+    }
 
     #[test]
     fn unlock_cache_setting_defaults_backfills_and_validates() {
