@@ -1,6 +1,7 @@
 //! Veil 应用服务：统一容器操作、工作区、会话流程与执行状态查询。
 
 pub mod commands;
+pub mod comparison;
 pub mod config;
 pub mod execution;
 pub mod hints;

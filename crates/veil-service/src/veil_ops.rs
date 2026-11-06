@@ -102,6 +102,7 @@ struct Pending {
     nonce: [u8; 12],
     cipher: String,
     size: u64,
+    hash: String,
     base_key: Option<DataKey>,
     unchanged: bool,
 }
@@ -141,6 +142,9 @@ pub(crate) struct LockedDirectory {
     id: String,
 }
 impl LockedDirectory {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
     pub(crate) fn covers(&self, target: &str) -> bool {
         self.path.is_empty()
             || target
@@ -651,6 +655,7 @@ impl VeilManager {
                 nonce: file_ops::generate_base_nonce(),
                 cipher: String::new(),
                 size: 0,
+                hash: String::new(),
                 unchanged: false,
             });
         }
@@ -732,12 +737,14 @@ impl VeilManager {
             let staged = staging.join(&p.cipher);
             cancelled_files.files.push(staged.clone());
             fault("before_cipher_write");
-            p.size = file_ops::encrypt_staged_file(
+            let (size, hash) = file_ops::encrypt_staged_file_with_hash(
                 &p.spec.source,
                 &staged,
                 &*p.key.material()?,
                 &p.nonce,
             )?;
+            p.size = size;
+            p.hash = hash.to_hex().to_string();
             fault("after_cipher_write");
             let published = self.veil_dir.join(&p.cipher);
             crate::fsutil::publish_staged_file(&staged, &published).map_err(|error| {
@@ -1069,13 +1076,14 @@ impl VeilManager {
                     _ => error.into(),
                 })?;
             }
+            tx.execute("INSERT INTO file_hash(file_id,blake3) VALUES(?1,?2) ON CONFLICT(file_id) DO UPDATE SET blake3=excluded.blake3", params![p.identity, p.hash])?;
             if release_owned {
                 locks::release_in(&tx, c)?;
             }
         }
         Ok(())
     }
-    fn read_locked(
+    pub(crate) fn read_locked(
         &self,
         name: &str,
         password: &str,
@@ -1112,7 +1120,23 @@ impl VeilManager {
 
     /// 对已存在的目标逐块核对明文；只有内容相同时才能作为已完成文件跳过。
     pub fn matches_existing_file(&self, name: &str, source: &Path, password: &str) -> Result<bool> {
-        self.matches_existing_file_inner(name, source, password, None)
+        use crate::comparison::{ComparisonChecks, ComparisonState, FileInput, compare_files};
+        let report = compare_files(
+            FileInput::ContainerCiphertext {
+                manager: self,
+                password,
+                path: name,
+            },
+            FileInput::External {
+                path: source,
+                version: None,
+            },
+            ComparisonChecks {
+                content: true,
+                ..Default::default()
+            },
+        )?;
+        Ok(report.content == Some(ComparisonState::Same))
     }
     pub(crate) fn matches_existing_file_in_directory(
         &self,
@@ -1122,115 +1146,10 @@ impl VeilManager {
         guard: &LeaseGuard,
         directory: &LockedDirectory,
     ) -> Result<bool> {
-        self.matches_existing_file_inner(name, source, password, Some((guard, directory)))
-    }
-    fn matches_existing_file_inner(
-        &self,
-        name: &str,
-        source: &Path,
-        password: &str,
-        directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
-    ) -> Result<bool> {
-        use std::io::{Read, Write};
-        struct Compare<R> {
-            source: R,
-            matches: bool,
-        }
-        impl<R: Read> Write for Compare<R> {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let mut input = vec![0; bytes.len()];
-                self.source.read_exact(&mut input)?;
-                self.matches &= input == bytes;
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        if let Some((_, directory)) = directory_guard {
-            if !directory.covers(&normalize_veil_dir(name)?) {
-                return Err(invalid("操作超出目录锁范围"));
-            }
-        }
-        let input = fs::File::open(source)?;
-        let before = input.metadata()?;
-        let (db, node, owned_guard, key) = if let Some((guard, directory)) = directory_guard {
-            let db = self.open_db(password)?;
-            let node = db
-                .resolve(name)?
-                .filter(|node| node.kind == "file")
-                .ok_or_else(|| VeilError::FileNotFound(name.into()))?;
-            let credential = guard
-                .credentials()?
-                .into_iter()
-                .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
-                .ok_or_else(|| invalid("目录锁凭证缺失"))?;
-            locks::validate(
-                &db.conn,
-                &credential,
-                Some(if credential.is_shared_write() {
-                    LockMode::SharedWrite
-                } else {
-                    LockMode::Write
-                }),
-            )?;
-            let key = db
-                .keys()?
-                .into_iter()
-                .find(|key| Some(&key.key_id) == node.key_id.as_ref())
-                .ok_or_else(|| invalid("文件引用未知密钥"))?
-                .material()?;
-            (db, node, None, key)
-        } else {
-            let (db, node, guard, key) = self.read_locked(name, password, LockMode::Read)?;
-            if guard
-                .credentials()?
-                .iter()
-                .any(|credential| credential.is_read_only())
-            {
-                return Err(invalid("文件正在写入，无法安全核对已导入内容"));
-            }
-            (db, node, Some(guard), key)
-        };
-        if Some(before.len()) != node.size {
-            return Ok(false);
-        }
-        let mut comparison = Compare {
-            source: input,
-            matches: true,
-        };
-        file_ops::decrypt_file_to_writer(
-            &self.veil_dir.join(node.cipher()?),
-            &mut comparison,
-            &key,
-            &node.nonce()?,
-            before.len(),
+        let report = crate::comparison::compare_in_locked_directory(
+            self, name, password, source, guard, directory,
         )?;
-        let after = comparison.source.metadata()?;
-        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-            return Err(invalid("核对期间源文件发生变化"));
-        }
-        if let Some((guard, directory)) = directory_guard {
-            let credential = guard
-                .credentials()?
-                .into_iter()
-                .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
-                .ok_or_else(|| invalid("目录锁凭证缺失"))?;
-            locks::validate(
-                &db.conn,
-                &credential,
-                Some(if credential.is_shared_write() {
-                    LockMode::SharedWrite
-                } else {
-                    LockMode::Write
-                }),
-            )?;
-        } else if let Some(guard) = owned_guard {
-            for credential in guard.credentials()? {
-                locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
-            }
-        }
-        Ok(comparison.matches)
+        Ok(report.content == Some(crate::comparison::ComparisonState::Same))
     }
     pub fn extract_file(&self, name: &str, output: &Path, password: &str) -> Result<()> {
         self.extract_file_with_version(name, output, password)

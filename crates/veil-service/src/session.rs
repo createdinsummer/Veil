@@ -1476,6 +1476,17 @@ mod tests {
                 if fail { 0 } else { 2 }
             );
             if fail {
+                let db = crate::storage::container::ContainerDb::open(
+                    &manager.veil_dir,
+                    "password",
+                    None,
+                )
+                .unwrap();
+                let hashes: i64 = db
+                    .conn
+                    .query_row("SELECT count(*) FROM file_hash", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(hashes, 0);
                 assert_eq!(
                     std::fs::read_dir(&manager.veil_dir)
                         .unwrap()

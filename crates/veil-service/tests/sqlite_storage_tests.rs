@@ -7,6 +7,63 @@ use veil_service::{
 };
 
 #[test]
+fn container_v1_migrates_and_new_file_hashes_follow_content() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("veil");
+    let manager = VeilManager::new(path.clone());
+    manager.init_veil("test", "password").unwrap();
+    let source = root.path().join("input");
+    std::fs::write(&source, b"first").unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&source, "file")], "password")
+        .unwrap();
+    let db = veil_core::database::open(&path.join(CONTAINER_DB), Some("password"), false).unwrap();
+    let hash: String = db
+        .query_row("SELECT blake3 FROM file_hash", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(hash, blake3::hash(b"first").to_hex().to_string());
+    db.execute_batch("DROP TABLE file_hash; PRAGMA user_version=1;")
+        .unwrap();
+    drop(db);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers = (0..3)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let manager = manager.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                manager.read_file_bytes("file", "password", 100)
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        assert_eq!(worker.join().unwrap().unwrap(), b"first");
+    }
+    let db = veil_core::database::open(&path.join(CONTAINER_DB), Some("password"), false).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM file_hash", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    std::fs::write(&source, b"second").unwrap();
+    manager
+        .add_files(&[AddFileSpec::new(&source, "file")], "password")
+        .unwrap();
+    let db = veil_core::database::open(&path.join(CONTAINER_DB), Some("password"), false).unwrap();
+    let hash: String = db
+        .query_row("SELECT blake3 FROM file_hash", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(hash, blake3::hash(b"second").to_hex().to_string());
+}
+
+#[test]
 fn snapshot_copies_multiple_files_with_progress() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("source"));

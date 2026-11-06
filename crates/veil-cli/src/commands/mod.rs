@@ -38,6 +38,7 @@ pub(crate) fn request(request: ServiceRequest<'_>) -> Result<ServiceResponse> {
             ServiceError::Core(error) => error.into(),
             ServiceError::Workflow(error) => map_workflow_error(error),
             ServiceError::Import(error) => match error {
+                veil_service::import::ImportError::Cancelled => VeilError::Cancelled.into(),
                 veil_service::import::ImportError::SourceNotFound(path) => crate::cli_error!(AddSourceNotFound, "path" => path.display()),
                 veil_service::import::ImportError::NotFile(path) => crate::cli_error!(AddNotFile, "path" => path.display()),
                 veil_service::import::ImportError::InvalidDestination(path) => crate::cli_error!(AddInvalidDestination, "path" => path),

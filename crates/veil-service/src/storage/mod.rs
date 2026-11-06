@@ -67,6 +67,7 @@ fn verify_schema(conn: &Connection, application_id: i64, schema: &str) -> Result
     use std::sync::OnceLock;
     static APP: OnceLock<String> = OnceLock::new();
     static CONTAINER: OnceLock<String> = OnceLock::new();
+    static CONTAINER_V2: OnceLock<String> = OnceLock::new();
     fn fingerprint(conn: &Connection) -> Result<String> {
         let mut query = conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' OR type='trigger' ORDER BY type,name")?;
         let definitions = query
@@ -86,6 +87,7 @@ fn verify_schema(conn: &Connection, application_id: i64, schema: &str) -> Result
     }
     let cached = match application_id {
         0x56415050 => &APP,
+        0x56444956 if schema.contains("CREATE TABLE file_hash") => &CONTAINER_V2,
         0x56444956 => &CONTAINER,
         _ => return Err(invalid("未知数据库类型")),
     };

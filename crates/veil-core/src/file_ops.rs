@@ -65,6 +65,42 @@ pub fn encrypt_staged_file(
     encrypt_file_streaming_impl(source_path, destination_path, data_key, base_nonce, true)
 }
 
+/// 在同一遍读取中计算实际加密明文的 BLAKE3 哈希。
+pub fn encrypt_staged_file_with_hash(
+    source_path: &Path,
+    destination_path: &Path,
+    data_key: &[u8; DATA_KEY_LEN],
+    base_nonce: &[u8; NONCE_LEN],
+) -> Result<(u64, blake3::Hash)> {
+    struct HashReader<R> {
+        inner: R,
+        hasher: blake3::Hasher,
+    }
+    impl<R: Read> Read for HashReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buf)?;
+            self.hasher.update(&buf[..count]);
+            Ok(count)
+        }
+    }
+    let file = File::open(source_path)?;
+    let size = file.metadata()?.len();
+    let mut source = HashReader {
+        inner: file,
+        hasher: blake3::Hasher::new(),
+    };
+    let mut output = create_atomic_output(destination_path)?;
+    encrypt_reader(
+        &mut source,
+        output.as_file_mut(),
+        data_key,
+        base_nonce,
+        size,
+    )?;
+    publish_atomic_output(output, destination_path, false, true)?;
+    Ok((size, source.hasher.finalize()))
+}
+
 fn encrypt_file_streaming_impl(
     source_path: &Path,
     destination_path: &Path,
@@ -139,6 +175,77 @@ pub fn decrypt_file_to_writer(
 ) -> Result<()> {
     let mut source = File::open(source_path)?;
     decrypt_reader(&mut source, writer, data_key, base_nonce, plaintext_size)
+}
+
+/// 流式读取经过认证的文件明文，不创建明文临时文件。
+pub struct DecryptedFileReader {
+    source: File,
+    key: zeroize::Zeroizing<[u8; DATA_KEY_LEN]>,
+    nonce: [u8; NONCE_LEN],
+    size: u64,
+    chunk: u32,
+    count: u32,
+    buffer: zeroize::Zeroizing<Vec<u8>>,
+    offset: usize,
+    verified_end: bool,
+}
+
+impl DecryptedFileReader {
+    pub fn open(
+        path: &Path,
+        key: &[u8; DATA_KEY_LEN],
+        nonce: &[u8; NONCE_LEN],
+        size: u64,
+    ) -> Result<Self> {
+        Ok(Self {
+            source: File::open(path)?,
+            key: zeroize::Zeroizing::new(*key),
+            nonce: *nonce,
+            size,
+            chunk: 0,
+            count: chunk_count(size)?,
+            buffer: zeroize::Zeroizing::new(Vec::new()),
+            offset: 0,
+            verified_end: false,
+        })
+    }
+}
+
+impl Read for DecryptedFileReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.offset == self.buffer.len() {
+            crate::progress::check_cancelled().map_err(std::io::Error::other)?;
+            if self.chunk == self.count {
+                if !self.verified_end {
+                    ensure_reader_eof(&mut self.source).map_err(std::io::Error::other)?;
+                    self.verified_end = true;
+                }
+                return Ok(0);
+            }
+            let ciphertext = read_chunk_ciphertext(&mut self.source, self.size, self.chunk)
+                .map_err(std::io::Error::other)?;
+            let nonce = chunk_nonce(&self.nonce, self.chunk);
+            let aad = chunk_aad(self.chunk);
+            self.buffer = zeroize::Zeroizing::new(
+                decrypt_chunk(&self.key, &nonce, &ciphertext, &aad)
+                    .map_err(std::io::Error::other)?,
+            );
+            self.chunk += 1;
+            self.offset = 0;
+            if self.buffer.is_empty() {
+                ensure_reader_eof(&mut self.source).map_err(std::io::Error::other)?;
+                self.verified_end = true;
+                return Ok(0);
+            }
+        }
+        let count = out.len().min(self.buffer.len() - self.offset);
+        out[..count].copy_from_slice(&self.buffer[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
 }
 
 /// 在读取旧密文的同时用新密钥写入新密文文件。

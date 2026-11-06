@@ -240,7 +240,7 @@ pub struct FileEntry {
     /// RFC 3339 格式的加密时间。
     pub encrypted_at: String,
 
-    /// 可选的预留文件哈希字段。
+    /// 可选的明文 BLAKE3 哈希；旧文件在首次按哈希比较后补登记。
     pub hash: Option<String>,
 }
 

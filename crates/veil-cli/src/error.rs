@@ -424,6 +424,14 @@ impl From<veil_core::error::VeilError> for CommandError {
         use veil_core::error::VeilError;
 
         let (code, detail) = match error {
+            VeilError::Cancelled => (ErrorCode::Work, "操作已中止".into()),
+            VeilError::LockConflict { level, scope } => (
+                ErrorCode::Work,
+                format!("锁冲突：级别 {level}，范围 {scope}"),
+            ),
+            VeilError::ImportBatchFailed { file, message } => {
+                (ErrorCode::Work, format!("导入文件 {file} 失败: {message}"))
+            }
             VeilError::Database(error) => (ErrorCode::Config, error.to_string()),
             VeilError::Io(error) => (ErrorCode::Io, error.to_string()),
             VeilError::CommitUncertain(error) => (

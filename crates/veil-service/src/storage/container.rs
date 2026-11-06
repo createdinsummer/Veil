@@ -1,11 +1,36 @@
 //! SQLCipher 容器业务表，不维护目录树内存缓存。
-use super::{id, invalid, json, migrate, now, parse};
+use super::{id, invalid, json, migrate, now, parse, verify_schema};
 use crate::error::{Result, VeilError};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use veil_core::metadata::{FileEntry, MetaData};
 use zeroize::{Zeroize, Zeroizing};
+
+fn migrate_container(conn: &mut Connection, create: bool) -> Result<()> {
+    const APP_ID: i64 = 0x56444956;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let application_id: i64 = conn.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if version == 0 && create {
+        migrate(conn, APP_ID, include_str!("container_v1.sql"), true)?;
+    } else if application_id != APP_ID || !matches!(version, 1 | 2) {
+        return Err(invalid("数据库结构版本或应用标识不受支持"));
+    }
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 1 {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if current == 1 {
+            verify_schema(&tx, APP_ID, include_str!("container_v1.sql"))?;
+            tx.execute_batch("CREATE TABLE file_hash (\n file_id TEXT PRIMARY KEY NOT NULL REFERENCES file_info(id) ON DELETE CASCADE,\n blake3 TEXT NOT NULL CHECK(length(blake3)=64 AND blake3 NOT GLOB '*[^0-9a-f]*')\n) STRICT;")?;
+            tx.pragma_update(None, "user_version", 2)?;
+        } else if current != 2 {
+            return Err(invalid("数据库结构版本不受支持"));
+        }
+        tx.commit()?;
+    }
+    verify_schema(conn, APP_ID, include_str!("container.sql"))
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DataKey {
@@ -196,11 +221,11 @@ impl ContainerDb {
         }
         drop(file);
         let mut conn = veil_core::database::open(&path, Some(password), true)?;
-        migrate(&mut conn, 0x56444956, include_str!("container.sql"), true)?;
+        migrate_container(&mut conn, true)?;
         // 某些文件系统在空文件首次写入后改变文件标识；刷新连接并重新校验结构。
         drop(conn);
         let mut conn = veil_core::database::open(&path, Some(password), false)?;
-        migrate(&mut conn, 0x56444956, include_str!("container.sql"), false)?;
+        migrate_container(&mut conn, false)?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO div_info VALUES(1,?1,?2,?3,1,?4)",
@@ -234,7 +259,7 @@ impl ContainerDb {
             false,
             timeout,
         )?;
-        migrate(&mut conn, 0x56444956, include_str!("container.sql"), false)?;
+        migrate_container(&mut conn, false)?;
         let db = Self {
             conn,
             directory: directory.into(),
@@ -315,7 +340,16 @@ impl ContainerDb {
                 if !keys.iter().any(|k| Some(&k.key_id) == n.key_id.as_ref()) {
                     return Err(invalid("文件引用未知密钥"));
                 }
-                files.push(n.entry(path)?);
+                let mut entry = n.entry(path)?;
+                entry.hash = self
+                    .conn
+                    .query_row(
+                        "SELECT blake3 FROM file_hash WHERE file_id=?1",
+                        [&n.id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                files.push(entry);
             } else if !path.is_empty() {
                 directories.push(veil_core::metadata::DirectoryEntry {
                     id: n.id.clone(),

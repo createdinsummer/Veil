@@ -29,3 +29,7 @@ CREATE TABLE operation_locks (
  owner_endpoint TEXT CHECK(owner_endpoint IS NULL OR json_valid(owner_endpoint)),owner_token TEXT NOT NULL,expires_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX operation_resource ON operation_locks(resource_type,resource_id,expires_at);
+CREATE TABLE file_hash (
+ file_id TEXT PRIMARY KEY NOT NULL REFERENCES file_info(id) ON DELETE CASCADE,
+ blake3 TEXT NOT NULL CHECK(length(blake3)=64 AND blake3 NOT GLOB '*[^0-9a-f]*')
+) STRICT;
