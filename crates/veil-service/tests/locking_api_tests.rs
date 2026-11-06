@@ -106,8 +106,22 @@ fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
         .is_err()
     );
     assert!(
-        veil.matches_existing_file("dir/file", &source, "password")
-            .is_err()
+        veil_service::comparison::compare_files(
+            veil_service::comparison::FileInput::ContainerCiphertext {
+                manager: &veil,
+                path: "dir/file",
+                password: "password",
+            },
+            veil_service::comparison::FileInput::External {
+                path: &source,
+                version: None
+            },
+            veil_service::comparison::ComparisonChecks {
+                content: true,
+                ..Default::default()
+            },
+        )
+        .is_err()
     );
     assert!(
         veil.snapshot_to(&root.path().join("backup"), "password")

@@ -22,6 +22,8 @@ use zeroize::Zeroizing;
 
 /// 路径冲突由调用方判断；此处的容器路径仅用于定位已有密文。
 pub enum FileInput<'a> {
+    /// 调用方在事务内读取的容器文件版本快照，仅支持版本比较。
+    ContainerMetadata { version: &'a VersionSnapshot },
     /// 调用方已解密的容器文件明文，版本快照可缺省。
     ContainerPlaintext {
         bytes: &'a [u8],
@@ -32,6 +34,14 @@ pub enum FileInput<'a> {
         manager: &'a VeilManager,
         password: &'a str,
         path: &'a str,
+    },
+    /// 复用调用方持有的目录租约，避免申请重叠的文件租约。
+    ContainerCiphertextInDirectory {
+        manager: &'a VeilManager,
+        password: &'a str,
+        path: &'a str,
+        guard: &'a LeaseGuard,
+        directory: &'a LockedDirectory,
     },
     /// 容器外的明文文件，版本快照可由调用方提供。
     External {
@@ -74,6 +84,83 @@ pub struct ComparisonReport {
     pub outcome: ConflictOutcome,
 }
 
+/// 判断容器内目标路径是否已被文件或目录占用；不比较文件内容。
+/// 结果是当前快照，写入时仍须在事务内检查路径约束。
+pub fn check_path_conflict(
+    manager: &VeilManager,
+    path: &str,
+    password: &str,
+    directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
+) -> Result<bool> {
+    let db = manager.open_db(password)?;
+    if let Some((guard, directory)) = directory_guard {
+        if !directory.covers(&crate::veil_ops::normalize_veil_dir(path)?) {
+            return Err(invalid("操作超出目录锁范围"));
+        }
+        let credential = guard
+            .credentials()?
+            .into_iter()
+            .find(|credential| credential.directory_id() == Some(directory.id()))
+            .ok_or_else(|| invalid("目录锁凭证缺失"))?;
+        locks::validate(
+            &db.conn,
+            &credential,
+            Some(if credential.is_shared_write() {
+                LockMode::SharedWrite
+            } else {
+                LockMode::Write
+            }),
+        )?;
+    }
+    Ok(db.resolve(path)?.is_some())
+}
+
+/// 目标路径不存在则无冲突；目标为目录则冲突；目标为文件则按指定条件比较。
+/// 所有选中条件相同才无冲突，条件不可比较时保留 Indeterminate。
+/// 不决定跳过、覆盖或替换等业务策略。
+pub fn check_file_conflict(
+    manager: &VeilManager,
+    path: &str,
+    password: &str,
+    source: FileInput<'_>,
+    checks: ComparisonChecks,
+    directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
+) -> Result<ConflictOutcome> {
+    validate_checks(checks)?;
+    if !check_path_conflict(manager, path, password, directory_guard)? {
+        return Ok(ConflictOutcome::NoConflict);
+    }
+    let db = manager.open_db(password)?;
+    match db.resolve(path)? {
+        None => return Ok(ConflictOutcome::NoConflict),
+        Some(node) if node.kind != "file" => return Ok(ConflictOutcome::Conflict),
+        Some(_) => {}
+    }
+    drop(db);
+    let target = match directory_guard {
+        Some((guard, directory)) => FileInput::ContainerCiphertextInDirectory {
+            manager,
+            password,
+            path,
+            guard,
+            directory,
+        },
+        None => FileInput::ContainerCiphertext {
+            manager,
+            password,
+            path,
+        },
+    };
+    Ok(compare_files(target, source, checks)?.outcome)
+}
+
+fn validate_checks(checks: ComparisonChecks) -> Result<()> {
+    if !checks.hash && !checks.content && !checks.version {
+        return Err(invalid("请选择至少一个比较条件"));
+    }
+    Ok(())
+}
+
 struct LockedContainer<'a> {
     manager: &'a VeilManager,
     db: ContainerDb,
@@ -104,6 +191,7 @@ impl ComparisonGuard<'_> {
 }
 
 enum Prepared<'a> {
+    Metadata(&'a VersionSnapshot),
     Plaintext {
         bytes: &'a [u8],
         version: Option<&'a VersionSnapshot>,
@@ -119,6 +207,7 @@ enum Prepared<'a> {
 impl<'a> Prepared<'a> {
     fn new(input: FileInput<'a>) -> Result<Self> {
         Ok(match input {
+            FileInput::ContainerMetadata { version } => Self::Metadata(version),
             FileInput::ContainerPlaintext { bytes, version } => Self::Plaintext { bytes, version },
             FileInput::External { path, version } => {
                 let before = fs::metadata(path)?;
@@ -130,6 +219,47 @@ impl<'a> Prepared<'a> {
                     before,
                     version,
                 }
+            }
+            FileInput::ContainerCiphertextInDirectory {
+                manager,
+                password,
+                path,
+                guard,
+                directory,
+            } => {
+                if !directory.covers(&crate::veil_ops::normalize_veil_dir(path)?) {
+                    return Err(invalid("操作超出目录锁范围"));
+                }
+                let db = manager.open_db(password)?;
+                let node = db
+                    .resolve(path)?
+                    .filter(|node| node.kind == "file")
+                    .ok_or_else(|| VeilError::FileNotFound(path.into()))?;
+                let credential = guard
+                    .credentials()?
+                    .into_iter()
+                    .find(|credential| credential.directory_id() == Some(directory.id()))
+                    .ok_or_else(|| invalid("目录锁凭证缺失"))?;
+                let mode = if credential.is_shared_write() {
+                    LockMode::SharedWrite
+                } else {
+                    LockMode::Write
+                };
+                locks::validate(&db.conn, &credential, Some(mode))?;
+                let key = db
+                    .keys()?
+                    .into_iter()
+                    .find(|key| Some(&key.key_id) == node.key_id.as_ref())
+                    .ok_or_else(|| invalid("文件引用未知密钥"))?
+                    .material()?;
+                Self::Ciphertext(LockedContainer {
+                    manager,
+                    db,
+                    node,
+                    guard: ComparisonGuard::Directory(guard, directory.id()),
+                    mode,
+                    key,
+                })
             }
             FileInput::ContainerCiphertext {
                 manager,
@@ -151,6 +281,7 @@ impl<'a> Prepared<'a> {
 
     fn reader(&self) -> Result<Box<dyn Read + '_>> {
         Ok(match self {
+            Self::Metadata(_) => return Err(invalid("仅提供元数据的输入不支持哈希或明文比较")),
             Self::Plaintext { bytes, .. } => Box::new(Cursor::new(*bytes)),
             Self::External { path, .. } => Box::new(File::open(path)?),
             Self::Ciphertext(item) => Box::new(DecryptedFileReader::open(
@@ -180,13 +311,14 @@ impl<'a> Prepared<'a> {
                     ));
                 }
             }
-            Self::Plaintext { .. } => {}
+            Self::Plaintext { .. } | Self::Metadata(_) => {}
         }
         Ok(())
     }
 
     fn version(&self) -> Result<Option<VersionSnapshot>> {
         Ok(match self {
+            Self::Metadata(version) => Some((*version).clone()),
             Self::Plaintext { version, .. } | Self::External { version, .. } => {
                 version.map(Clone::clone)
             }
@@ -300,9 +432,7 @@ pub fn compare_files(
     right: FileInput<'_>,
     checks: ComparisonChecks,
 ) -> Result<ComparisonReport> {
-    if !checks.hash && !checks.content && !checks.version {
-        return Err(invalid("请选择至少一个比较条件"));
-    }
+    validate_checks(checks)?;
     let mut left = Prepared::new(left)?;
     let mut right = Prepared::new(right)?;
     compare_prepared(&mut left, &mut right, checks)
@@ -361,60 +491,4 @@ fn compare_prepared(
         version,
         outcome,
     })
-}
-
-/// 导入任务持有目录锁时复用该锁，不再申请重叠的文件锁。
-pub(crate) fn compare_in_locked_directory(
-    manager: &VeilManager,
-    path: &str,
-    password: &str,
-    source: &Path,
-    guard: &LeaseGuard,
-    directory: &LockedDirectory,
-) -> Result<ComparisonReport> {
-    if !directory.covers(&crate::veil_ops::normalize_veil_dir(path)?) {
-        return Err(invalid("操作超出目录锁范围"));
-    }
-    let db = manager.open_db(password)?;
-    let node = db
-        .resolve(path)?
-        .filter(|node| node.kind == "file")
-        .ok_or_else(|| VeilError::FileNotFound(path.into()))?;
-    let credential = guard
-        .credentials()?
-        .into_iter()
-        .find(|credential| credential.directory_id() == Some(directory.id()))
-        .ok_or_else(|| invalid("目录锁凭证缺失"))?;
-    let mode = if credential.is_shared_write() {
-        LockMode::SharedWrite
-    } else {
-        LockMode::Write
-    };
-    locks::validate(&db.conn, &credential, Some(mode))?;
-    let key = db
-        .keys()?
-        .into_iter()
-        .find(|key| Some(&key.key_id) == node.key_id.as_ref())
-        .ok_or_else(|| invalid("文件引用未知密钥"))?
-        .material()?;
-    let mut left = Prepared::Ciphertext(LockedContainer {
-        manager,
-        db,
-        node,
-        guard: ComparisonGuard::Directory(guard, directory.id()),
-        mode,
-        key,
-    });
-    let mut right = Prepared::new(FileInput::External {
-        path: source,
-        version: None,
-    })?;
-    compare_prepared(
-        &mut left,
-        &mut right,
-        ComparisonChecks {
-            content: true,
-            ..Default::default()
-        },
-    )
 }

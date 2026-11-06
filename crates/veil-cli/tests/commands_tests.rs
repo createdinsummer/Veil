@@ -963,7 +963,13 @@ fn add_replaces_existing_file() {
 
     std::fs::write(&source, "second").unwrap();
     env.command()
-        .args(["add", &env.path(&link), &env.path(&source)])
+        .args([
+            "add",
+            &env.path(&link),
+            &env.path(&source),
+            "--on-conflict",
+            "overwrite",
+        ])
         .assert()
         .success();
 
@@ -1108,4 +1114,49 @@ fn default_veil_count(env: &TestEnv) -> usize {
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_dir())
         .count()
+}
+
+#[test]
+fn add_requires_explicit_choice_even_for_identical_content() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("conflict-choice");
+    let source = env.write_file("same.txt", "original");
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+    // 管道输入不能冒充交互终端；相同内容也不能自动跳过。
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .write_stdin("o\n")
+        .assert()
+        .failure();
+    env.command()
+        .args([
+            "add",
+            &env.path(&link),
+            &env.path(&source),
+            "--on-conflict",
+            "skip",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已跳过 1 个文件"));
+    std::fs::write(&source, "changed").unwrap();
+    env.command()
+        .args([
+            "add",
+            &env.path(&link),
+            &env.path(&source),
+            "--on-conflict",
+            "error",
+        ])
+        .assert()
+        .failure();
+    let output = env.work.path().join("check.txt");
+    env.command()
+        .args(["ex", &env.path(&link), "same.txt", &env.path(&output)])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "original");
 }

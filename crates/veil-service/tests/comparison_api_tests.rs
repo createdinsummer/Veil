@@ -199,3 +199,124 @@ fn empty_content_is_compared_and_corruption_is_detected() {
         .unwrap();
     assert!(check().is_err());
 }
+
+#[test]
+fn conflict_entries_distinguish_paths_files_and_unavailable_checks() {
+    use veil_service::comparison::{check_file_conflict, check_path_conflict};
+    #[cfg(debug_assertions)]
+    veil_core::kdf::enable_fast_test_kdf();
+    let root = TempDir::new().unwrap();
+    let manager = VeilManager::new(root.path().join("container"));
+    manager.init_veil("test", "password").unwrap();
+    let source = root.path().join("source");
+    std::fs::write(&source, b"same").unwrap();
+    let hash = ComparisonChecks {
+        hash: true,
+        ..Default::default()
+    };
+    let conflict = |path: &str, checks| {
+        check_file_conflict(
+            &manager,
+            path,
+            "password",
+            FileInput::External {
+                path: &source,
+                version: None,
+            },
+            checks,
+            None,
+        )
+    };
+    assert!(!check_path_conflict(&manager, "file", "password", None).unwrap());
+    assert_eq!(conflict("file", hash).unwrap(), ConflictOutcome::NoConflict);
+    assert!(conflict("file", ComparisonChecks::default()).is_err());
+    manager
+        .add_files(&[AddFileSpec::new(&source, "file")], "password")
+        .unwrap();
+    manager.create_directory("folder", "password").unwrap();
+    assert!(check_path_conflict(&manager, "file", "password", None).unwrap());
+    assert!(check_path_conflict(&manager, "folder", "password", None).unwrap());
+    assert_eq!(conflict("folder", hash).unwrap(), ConflictOutcome::Conflict);
+    assert_eq!(conflict("file", hash).unwrap(), ConflictOutcome::NoConflict);
+    let combined = ComparisonChecks {
+        hash: true,
+        version: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        conflict("file", combined).unwrap(),
+        ConflictOutcome::Indeterminate
+    );
+    std::fs::write(&source, b"diff").unwrap();
+    assert_eq!(conflict("file", hash).unwrap(), ConflictOutcome::Conflict);
+    assert_eq!(
+        conflict("file", combined).unwrap(),
+        ConflictOutcome::Conflict
+    );
+}
+
+#[test]
+fn metadata_inputs_compare_identity_and_versions_without_reading_content() {
+    let base = VersionSnapshot {
+        veil_id: "container".into(),
+        file_id: "file".into(),
+        version_history: vec!["00000000-0000-4000-8000-000000000001".into()],
+    };
+    let compare = |other: &VersionSnapshot, checks| {
+        compare_files(
+            FileInput::ContainerMetadata { version: &base },
+            FileInput::ContainerMetadata { version: other },
+            checks,
+        )
+    };
+    let version_only = ComparisonChecks {
+        version: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        compare(&base, version_only).unwrap().version,
+        Some(ComparisonState::Same)
+    );
+    let mut other = base.clone();
+    other.veil_id = "another-container".into();
+    assert_eq!(
+        compare(&other, version_only).unwrap().version,
+        Some(ComparisonState::Different)
+    );
+    other = base.clone();
+    other.file_id = "another-file".into();
+    assert_eq!(
+        compare(&other, version_only).unwrap().version,
+        Some(ComparisonState::Different)
+    );
+    other = base.clone();
+    other
+        .version_history
+        .push("00000000-0000-4000-8000-000000000002".into());
+    assert_eq!(
+        compare(&other, version_only).unwrap().version,
+        Some(ComparisonState::Different)
+    );
+    other.version_history.clear();
+    assert!(compare(&other, version_only).is_err());
+    assert!(
+        compare(
+            &base,
+            ComparisonChecks {
+                hash: true,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        compare(
+            &base,
+            ComparisonChecks {
+                content: true,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+}

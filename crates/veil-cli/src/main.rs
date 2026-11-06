@@ -85,6 +85,9 @@ enum Commands {
         // 选项形式的密码，与位置参数密码互斥。
         #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
+        /// 同名目标的处理策略，默认交互选择（相同内容也询问）。
+        #[arg(long, value_enum, default_value = "ask")]
+        on_conflict: commands::add::ConflictPolicy,
     },
 
     /// 从容器删除文件。
@@ -931,6 +934,7 @@ fn main() {
             input,
             output,
             password,
+            on_conflict,
         } => {
             let veil = require_veil(veil, "add");
             let inp = input_pos.or(input);
@@ -938,7 +942,7 @@ fn main() {
             let pwd = password_pos.or(password);
 
             if let Some(inp) = inp {
-                commands::add::run(&veil, &inp, out.as_deref(), pwd)
+                commands::add::run(&veil, &inp, out.as_deref(), pwd, on_conflict)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingInputPath, "add");
             }

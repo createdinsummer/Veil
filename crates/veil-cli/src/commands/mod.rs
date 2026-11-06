@@ -177,12 +177,6 @@ impl CliContainer {
             _ => unreachable!(),
         }
     }
-    fn add_file(&self, source: &Path, password: &str) -> std::result::Result<String, VeilError> {
-        match self.execute(ContainerOperation::AddFile { source, password })? {
-            ContainerOperationResult::AddedFile(v) => Ok(v),
-            _ => unreachable!(),
-        }
-    }
     fn extract_file(
         &self,
         name: &str,

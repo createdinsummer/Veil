@@ -8,7 +8,7 @@ use crate::storage::{
     locks::{self, LeaseGuard, LockManager, LockMode, LockOptions},
     now,
 };
-use crate::version::{VersionRelation, VersionSnapshot, compare_version_history};
+use crate::version::VersionSnapshot;
 use rusqlite::{TransactionBehavior, params};
 use std::{
     collections::HashSet,
@@ -137,7 +137,7 @@ impl QueuedImport {
 }
 
 /// 路径和节点 ID 在取得租约后共同校验，供任务内工作线程复用。
-pub(crate) struct LockedDirectory {
+pub struct LockedDirectory {
     path: String,
     id: String,
 }
@@ -1118,39 +1118,6 @@ impl VeilManager {
         Ok((db, node, guard, key))
     }
 
-    /// 对已存在的目标逐块核对明文；只有内容相同时才能作为已完成文件跳过。
-    pub fn matches_existing_file(&self, name: &str, source: &Path, password: &str) -> Result<bool> {
-        use crate::comparison::{ComparisonChecks, ComparisonState, FileInput, compare_files};
-        let report = compare_files(
-            FileInput::ContainerCiphertext {
-                manager: self,
-                password,
-                path: name,
-            },
-            FileInput::External {
-                path: source,
-                version: None,
-            },
-            ComparisonChecks {
-                content: true,
-                ..Default::default()
-            },
-        )?;
-        Ok(report.content == Some(ComparisonState::Same))
-    }
-    pub(crate) fn matches_existing_file_in_directory(
-        &self,
-        name: &str,
-        source: &Path,
-        password: &str,
-        guard: &LeaseGuard,
-        directory: &LockedDirectory,
-    ) -> Result<bool> {
-        let report = crate::comparison::compare_in_locked_directory(
-            self, name, password, source, guard, directory,
-        )?;
-        Ok(report.content == Some(crate::comparison::ComparisonState::Same))
-    }
     pub fn extract_file(&self, name: &str, output: &Path, password: &str) -> Result<()> {
         self.extract_file_with_version(name, output, password)
             .map(|_| ())
@@ -1735,11 +1702,22 @@ fn verify_base(identity: &str, node: Option<&Node>, base: &VersionSnapshot) -> R
     let Some(node) = node else {
         return Err(VeilError::VersionConflict("基础文件已删除".into()));
     };
-    if base.veil_id != identity
-        || base.file_id != node.id
-        || compare_version_history(node.versions()?, &base.version_history)?
-            != VersionRelation::Same
-    {
+    use crate::comparison::{ComparisonChecks, ComparisonState, FileInput, compare_files};
+    let current = VersionSnapshot {
+        veil_id: identity.to_owned(),
+        file_id: node.id.clone(),
+        version_history: node.versions()?.to_vec(),
+    };
+    // 使用当前事务中的快照比较，不重新打开数据库或申请文件租约。
+    let report = compare_files(
+        FileInput::ContainerMetadata { version: &current },
+        FileInput::ContainerMetadata { version: base },
+        ComparisonChecks {
+            version: true,
+            ..Default::default()
+        },
+    )?;
+    if report.version != Some(ComparisonState::Same) {
         return Err(VeilError::VersionConflict(
             "文件身份或基础版本不匹配".into(),
         ));

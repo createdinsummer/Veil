@@ -89,26 +89,17 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                     continue;
                 }
                 let file_path = parts[1];
-                match manager.add_file(std::path::Path::new(file_path), pwd) {
-                    Ok(encrypted_name) => {
-                        crate::outln!(
-                            "{}",
-                            crate::i18n::t2(
-                                "shell.added",
-                                "file",
-                                file_path,
-                                "encrypted",
-                                &encrypted_name
-                            )
-                            .green()
-                        );
-                    }
-                    Err(e) => {
-                        crate::outln!(
-                            "{}",
-                            crate::i18n::t1("shell.add_failed", "error", &e.to_string()).red()
-                        );
-                    }
+                if let Err(error) = super::add::run(
+                    veil_name,
+                    file_path,
+                    None,
+                    Some(pwd.to_owned()),
+                    super::add::ConflictPolicy::Ask,
+                ) {
+                    crate::outln!(
+                        "{}",
+                        crate::i18n::t1("shell.add_failed", "error", &error.to_string()).red()
+                    );
                 }
             }
             "rm" | "delete" => {

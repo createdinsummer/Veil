@@ -313,20 +313,41 @@ fn import_one_file(
         Ok(_) => Ok(false),
         Err(veil_core::error::VeilError::FileAlreadyExists(_)) => {
             veil_core::progress::verifying();
-            let result = if let Some((guard, id)) = directory_guard {
-                manager.matches_existing_file_in_directory(
-                    &file.target,
-                    &file.source,
-                    password,
-                    guard,
-                    id,
-                )
-            } else {
-                manager.matches_existing_file(&file.target, &file.source, password)
+            use crate::comparison::{
+                ComparisonChecks, ConflictOutcome, FileInput, check_file_conflict,
+                check_path_conflict,
             };
+            let result = check_file_conflict(
+                manager,
+                &file.target,
+                password,
+                FileInput::External {
+                    path: &file.source,
+                    version: None,
+                },
+                ComparisonChecks {
+                    hash: true,
+                    ..Default::default()
+                },
+                directory_guard,
+            );
             match result {
-                Ok(true) => Ok(true),
-                Ok(false) | Err(veil_core::error::VeilError::FileNotFound(_)) => Err(
+                Ok(ConflictOutcome::NoConflict) => {
+                    if check_path_conflict(manager, &file.target, password, directory_guard)? {
+                        Ok(true)
+                    } else {
+                        // 检测期间目标被移除时重新导入，不能误记为已完成。
+                        manager.add_files_for_import(
+                            std::slice::from_ref(file),
+                            password,
+                            directory_guard,
+                            transaction_gate,
+                            batch,
+                        )?;
+                        Ok(false)
+                    }
+                }
+                Ok(_) | Err(veil_core::error::VeilError::FileNotFound(_)) => Err(
                     veil_core::error::VeilError::FileAlreadyExists(file.target.clone()),
                 ),
                 Err(error) => Err(error),
@@ -1646,6 +1667,37 @@ mod tests {
                 vec![index as u8; 4096]
             );
         }
+        // 缺失哈希时，目录租约内补算并缓存；再次导入只跳过相同文件。
+        manager
+            .open_db("password")
+            .unwrap()
+            .conn
+            .execute("DELETE FROM file_hash", [])
+            .unwrap();
+        app.execute(ServiceRequest::ImportSessionFiles {
+            sources: vec![folder.to_string_lossy().into_owned()],
+            directory: String::new(),
+        })
+        .unwrap();
+        assert_eq!(app.transfer_progress().skipped_files, 24);
+        assert!(
+            manager
+                .list_files("password")
+                .unwrap()
+                .iter()
+                .all(|file| file.hash.is_some())
+        );
+        std::fs::write(folder.join("file-0"), vec![99u8; 4096]).unwrap();
+        assert!(matches!(
+            app.execute(ServiceRequest::ImportSessionFiles {
+                sources: vec![folder.to_string_lossy().into_owned()],
+                directory: String::new(),
+            }),
+            Err(ServiceError::ImportFileFailed {
+                source: veil_core::error::VeilError::FileAlreadyExists(_),
+                ..
+            })
+        ));
     }
 
     #[test]
