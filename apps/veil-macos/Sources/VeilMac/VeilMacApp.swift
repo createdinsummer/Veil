@@ -65,6 +65,24 @@ struct VeilMacApp: App {
                         }
                     }
                 }.disabled(store.isBusy)
+                Menu("导入提交间隔") {
+                    ForEach(1...60, id: \.self) { seconds in
+                        Button("\(seconds) 秒" + (store.importCommitIntervalSeconds == seconds ? "（当前）" : "")) {
+                            Task { await store.setImportCommitInterval(seconds: seconds) }
+                        }
+                    }
+                }.disabled(store.isBusy)
+                Menu("导入提交数量") {
+                    ForEach(0..<10, id: \.self) { group in
+                        Menu("\(group * 10 + 1)～\(group * 10 + 10) 条") {
+                            ForEach((group * 10 + 1)...(group * 10 + 10), id: \.self) { count in
+                                Button("\(count) 条" + (store.importCommitCount == count ? "（当前）" : "")) {
+                                    Task { await store.setImportCommitCount(count) }
+                                }
+                            }
+                        }
+                    }
+                }.disabled(store.isBusy)
             }
         }
     }

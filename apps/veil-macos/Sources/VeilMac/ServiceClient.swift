@@ -16,6 +16,7 @@ struct NativeRequest: Encodable, Sendable {
     var key: String? = nil
     var value: String? = nil
     var seconds: Int? = nil
+    var count: Int? = nil
 }
 
 enum ClientError: LocalizedError {
@@ -36,17 +37,21 @@ struct TransferProgress: Decodable, Sendable {
     let processedBytes: UInt64
     let totalBytes: UInt64?
     let completedFiles: UInt64
+    let pendingFiles: UInt64
     let skippedFiles: UInt64
     let totalFiles: UInt64
     let currentFile: String?
     let cancelRequested: Bool
+    let parallelWorkers: UInt64
 
     enum CodingKeys: String, CodingKey {
         case operation, phase
         case processedBytes = "processed_bytes", totalBytes = "total_bytes"
         case completedFiles = "completed_files", skippedFiles = "skipped_files"
+        case pendingFiles = "pending_files"
         case totalFiles = "total_files", currentFile = "current_file"
         case cancelRequested = "cancel_requested"
+        case parallelWorkers = "parallel_workers"
     }
 }
 
@@ -57,7 +62,7 @@ private final class RustHandle: @unchecked Sendable {
     deinit { veil_client_free(pointer) }
 }
 
-/// 文件与加密调用在 actor 上串行执行，不阻塞界面主线程。
+/// 耗时调用在后台执行，允许其他请求在导入期间进入服务。
 actor ServiceClient {
     nonisolated private let handle = RustHandle()
 
@@ -71,7 +76,9 @@ actor ServiceClient {
 
     nonisolated func cancelTransfer() -> Bool { veil_client_cancel_transfer(handle.pointer) }
 
-    private func perform(_ request: NativeRequest) throws -> (UInt32, Data) {
+    private func perform(_ request: NativeRequest) async throws -> (UInt32, Data) {
+        let handle = self.handle
+        return try await Task.detached {
         var input = try JSONEncoder().encode(request)
         defer { input.resetBytes(in: 0..<input.count) }
         let response = input.withUnsafeBytes { raw in
@@ -84,28 +91,39 @@ actor ServiceClient {
             throw ClientError.service(String(decoding: data, as: UTF8.self))
         }
         return (response.kind, data)
+        }.value
     }
 
-    func json<T: Decodable & Sendable>(_ request: NativeRequest, as type: T.Type = T.self) throws -> T {
-        let (kind, data) = try perform(request)
+    func json<T: Decodable & Sendable>(_ request: NativeRequest, as type: T.Type = T.self) async throws -> T {
+        let (kind, data) = try await perform(request)
         guard kind == 0 else { throw ClientError.invalidResponse }
         return try JSONDecoder().decode(type, from: data)
     }
 
-    func execute(_ request: NativeRequest) throws {
-        let (kind, _) = try perform(request)
+    func execute(_ request: NativeRequest) async throws {
+        let (kind, _) = try await perform(request)
         guard kind == 0 else { throw ClientError.invalidResponse }
     }
 
-    func preview(name: String) throws -> Data {
-        let (kind, data) = try perform(NativeRequest(operation: "preview_file", name: name))
-        guard kind == 2 else { throw ClientError.invalidResponse }
-        return data
+    func preview(name: String) async throws -> Data {
+        try await previewWithStatus(name: name).data
+    }
+
+    func previewWithStatus(name: String) async throws -> (data: Data, unstable: Bool) {
+        let (kind, data) = try await perform(NativeRequest(operation: "preview_file", name: name))
+        guard kind == 2 || kind == 3 else { throw ClientError.invalidResponse }
+        return (data, kind == 3)
+    }
+
+    func exportWithStatus(name: String, destination: String) async throws -> Bool {
+        let (kind, _) = try await perform(NativeRequest(operation: "export_file", name: name, destination: destination))
+        guard kind == 0 || kind == 4 else { throw ClientError.invalidResponse }
+        return kind == 4
     }
 
     /// 在后台 actor 中按实际显示尺寸缩小，原图与缩略图均不写入磁盘。
-    func thumbnail(name: String) throws -> Data {
-        let bytes = try preview(name: name)
+    func thumbnail(name: String) async throws -> Data {
+        let bytes = try await preview(name: name)
         guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

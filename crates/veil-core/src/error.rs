@@ -31,6 +31,13 @@ pub enum VeilError {
     #[error("工作区错误: {0}")]
     WorkError(String),
 
+    /// 申请锁时遇到的已有锁。
+    #[error("锁冲突：级别 {level}，范围 {scope}")]
+    LockConflict { level: String, scope: String },
+
+    #[error("导入文件 {file} 失败: {message}")]
+    ImportBatchFailed { file: String, message: String },
+
     /// 全局配置读写或解析失败。
     #[error("配置错误: {0}")]
     ConfigError(String),

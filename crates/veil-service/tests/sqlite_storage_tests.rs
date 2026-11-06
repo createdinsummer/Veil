@@ -5,6 +5,41 @@ use veil_service::{
     storage::{app::AppStore, container::ContainerDb},
     veil_ops::{AddFileSpec, VeilManager},
 };
+
+#[test]
+fn snapshot_copies_multiple_files_with_progress() {
+    let root = TempDir::new().unwrap();
+    let manager = VeilManager::new(root.path().join("source"));
+    manager.init_veil("test", "password").unwrap();
+    let mut files = Vec::new();
+    for index in 0..8 {
+        let source = root.path().join(format!("input-{index}"));
+        std::fs::write(&source, vec![index as u8; 4096]).unwrap();
+        files.push(AddFileSpec::new(source, format!("folder/file-{index}")));
+    }
+    manager.add_files(&files, "password").unwrap();
+    let progress = veil_core::progress::Progress::default();
+    let _scope = progress.begin("export_package");
+    let destination = root.path().join("snapshot");
+    assert_eq!(manager.snapshot_to(&destination, "password").unwrap(), 8);
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot.phase, "snapshot");
+    assert!(
+        snapshot
+            .total_bytes
+            .is_some_and(|total| total > 0 && total == snapshot.processed_bytes)
+    );
+    assert!((1..=4).contains(&snapshot.parallel_workers));
+    let restored = VeilManager::new(destination);
+    for index in [0, 3, 7] {
+        assert_eq!(
+            restored
+                .read_file_bytes(&format!("folder/file-{index}"), "password", 4096)
+                .unwrap(),
+            vec![index as u8; 4096]
+        );
+    }
+}
 #[test]
 fn encrypted_container_roundtrip_tree_versions_rekey_and_package() {
     let root = TempDir::new().unwrap();

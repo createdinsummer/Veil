@@ -12,6 +12,13 @@ pub const UNLOCK_CACHE_SETTING: &str = "unlock_cache_seconds";
 /// 解锁成功后密码在本机内存中的保留时长；新库与缺少该配置的旧库都使用 1 小时。
 pub const DEFAULT_UNLOCK_CACHE_SECONDS: u64 = 3600;
 pub const MAX_UNLOCK_CACHE_SECONDS: u64 = 86_400;
+/// 导入任务合并文件记录时的最长等待时间，单位为秒。
+pub const IMPORT_COMMIT_INTERVAL_SETTING: &str = "import_commit_interval_seconds";
+pub const DEFAULT_IMPORT_COMMIT_INTERVAL_SECONDS: u64 = 1;
+pub const MAX_IMPORT_COMMIT_INTERVAL_SECONDS: u64 = 60;
+pub const IMPORT_COMMIT_COUNT_SETTING: &str = "import_commit_count";
+pub const DEFAULT_IMPORT_COMMIT_COUNT: u64 = 8;
+pub const MAX_IMPORT_COMMIT_COUNT: u64 = 100;
 
 static PLATFORM_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 /// 移动端在初始化服务前传入应用私有目录；桌面端与 CLI 使用相同默认策略。
@@ -191,6 +198,31 @@ impl AppStore {
                 ],
             )?;
         }
+        let import_interval: Option<String> = tx
+            .query_row(
+                "SELECT value_json FROM user_setting WHERE key=?1",
+                [IMPORT_COMMIT_INTERVAL_SETTING],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if import_interval.is_none() {
+            tx.execute(
+                "INSERT INTO user_setting VALUES (?1,?2,?3)",
+                params![
+                    IMPORT_COMMIT_INTERVAL_SETTING,
+                    json(&DEFAULT_IMPORT_COMMIT_INTERVAL_SECONDS)?,
+                    now()
+                ],
+            )?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO user_setting VALUES (?1,?2,?3)",
+            params![
+                IMPORT_COMMIT_COUNT_SETTING,
+                json(&DEFAULT_IMPORT_COMMIT_COUNT)?,
+                now()
+            ],
+        )?;
         tx.commit()?;
         #[cfg(target_os = "ios")]
         store.rebind_ios_sandbox_spaces()?;
@@ -441,6 +473,10 @@ impl AppStore {
             "layout" => "grid".into(),
             "view_mode" => "type".into(),
             UNLOCK_CACHE_SETTING => serde_json::json!(DEFAULT_UNLOCK_CACHE_SECONDS),
+            IMPORT_COMMIT_INTERVAL_SETTING => {
+                serde_json::json!(DEFAULT_IMPORT_COMMIT_INTERVAL_SECONDS)
+            }
+            IMPORT_COMMIT_COUNT_SETTING => serde_json::json!(DEFAULT_IMPORT_COMMIT_COUNT),
             _ => return Err(invalid("未知用户设置")),
         };
         let value: Option<String> = self
@@ -458,6 +494,17 @@ impl AppStore {
     pub fn unlock_cache_seconds(&self) -> Result<u64> {
         let value = self.user_setting(UNLOCK_CACHE_SETTING)?;
         value.as_u64().ok_or_else(|| invalid("免密时长无效"))
+    }
+    pub fn import_commit_interval_seconds(&self) -> Result<u64> {
+        self.user_setting(IMPORT_COMMIT_INTERVAL_SETTING)?
+            .as_u64()
+            .ok_or_else(|| invalid("导入提交间隔无效"))
+    }
+    pub fn import_commit_count(&self) -> Result<usize> {
+        self.user_setting(IMPORT_COMMIT_COUNT_SETTING)?
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| invalid("导入提交数量无效"))
     }
     pub fn set_user_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         validate_setting(key, value)?;
@@ -522,6 +569,24 @@ impl AppStore {
     }
 }
 fn validate_setting(key: &str, value: &serde_json::Value) -> Result<()> {
+    if key == IMPORT_COMMIT_COUNT_SETTING {
+        if !value
+            .as_u64()
+            .is_some_and(|count| (1..=MAX_IMPORT_COMMIT_COUNT).contains(&count))
+        {
+            return Err(invalid("导入提交数量必须是 1 至 100 的整数"));
+        }
+        return Ok(());
+    }
+    if key == IMPORT_COMMIT_INTERVAL_SETTING {
+        if !value
+            .as_u64()
+            .is_some_and(|seconds| (1..=MAX_IMPORT_COMMIT_INTERVAL_SECONDS).contains(&seconds))
+        {
+            return Err(invalid("导入提交间隔必须是 1 至 60 的整数秒"));
+        }
+        return Ok(());
+    }
     if key == UNLOCK_CACHE_SETTING {
         if !value
             .as_u64()
@@ -610,6 +675,65 @@ fn validate_record<T: Serialize>(kind: &str, key: &str, value: &T) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_commit_interval_is_persistent_and_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AppStore::open(directory.path()).unwrap();
+        assert_eq!(store.import_commit_interval_seconds().unwrap(), 1);
+        store
+            .set_user_setting(IMPORT_COMMIT_INTERVAL_SETTING, &serde_json::json!(5))
+            .unwrap();
+        assert!(
+            store
+                .set_user_setting(IMPORT_COMMIT_INTERVAL_SETTING, &serde_json::json!(0))
+                .is_err()
+        );
+        assert!(
+            store
+                .set_user_setting(IMPORT_COMMIT_INTERVAL_SETTING, &serde_json::json!(61))
+                .is_err()
+        );
+        drop(store);
+        assert_eq!(
+            AppStore::open(directory.path())
+                .unwrap()
+                .import_commit_interval_seconds()
+                .unwrap(),
+            5
+        );
+    }
+
+    #[test]
+    fn import_commit_count_is_persistent_and_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AppStore::open(directory.path()).unwrap();
+        assert_eq!(store.import_commit_count().unwrap(), 8);
+        for boundary in [1, 100] {
+            store
+                .set_user_setting(IMPORT_COMMIT_COUNT_SETTING, &serde_json::json!(boundary))
+                .unwrap();
+            assert_eq!(store.import_commit_count().unwrap(), boundary as usize);
+        }
+        store
+            .set_user_setting(IMPORT_COMMIT_COUNT_SETTING, &serde_json::json!(37))
+            .unwrap();
+        for invalid in [0, 101] {
+            assert!(
+                store
+                    .set_user_setting(IMPORT_COMMIT_COUNT_SETTING, &serde_json::json!(invalid))
+                    .is_err()
+            );
+        }
+        drop(store);
+        assert_eq!(
+            AppStore::open(directory.path())
+                .unwrap()
+                .import_commit_count()
+                .unwrap(),
+            37
+        );
+    }
 
     #[test]
     fn ios_space_relocation_only_accepts_own_default_space() {

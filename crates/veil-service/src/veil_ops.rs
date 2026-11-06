@@ -14,6 +14,11 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 use zeroize::Zeroizing;
 
@@ -101,15 +106,78 @@ struct Pending {
     unchanged: bool,
 }
 
+pub(crate) struct ImportBatchContext {
+    pub sender: mpsc::SyncSender<QueuedImport>,
+    pub directory_guard: Option<Arc<LeaseGuard>>,
+    pub owner: crate::execution::ExecutionOwner,
+}
+
+pub(crate) struct QueuedImport {
+    pending: Vec<Pending>,
+    cancelled_files: CancelledFiles,
+    guard: Arc<LeaseGuard>,
+    directory_id: Option<String>,
+    veil_id: String,
+    release_owned: bool,
+}
+
+impl QueuedImport {
+    pub(crate) fn target(&self) -> &str {
+        &self.pending[0].spec.target
+    }
+}
+
+#[cfg(test)]
+impl QueuedImport {
+    pub(crate) fn invalidate_key(&mut self) -> String {
+        self.pending[0].key.key_id = "invalid".into();
+        self.pending[0].spec.target.clone()
+    }
+}
+
+/// 路径和节点 ID 在取得租约后共同校验，供任务内工作线程复用。
+pub(crate) struct LockedDirectory {
+    path: String,
+    id: String,
+}
+impl LockedDirectory {
+    pub(crate) fn covers(&self, target: &str) -> bool {
+        self.path.is_empty()
+            || target
+                .strip_prefix(&self.path)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+    pub(crate) fn path_len(&self) -> usize {
+        self.path.len()
+    }
+}
+
 /// 仅在提交前中止时清除本次操作创建的密文；提交结果不确定时交给常规恢复流程。
 struct CancelledFiles {
     files: Vec<PathBuf>,
     staging: Vec<PathBuf>,
-    committed: bool,
+    committed: std::cell::Cell<bool>,
+}
+
+fn deepest_directory(conn: &rusqlite::Connection, path: &str) -> Result<Node> {
+    let mut prefix = String::new();
+    let mut current = container::resolve(conn, "")?.ok_or_else(|| invalid("根目录缺失"))?;
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        match container::resolve(conn, &prefix)? {
+            Some(node) if node.kind == "directory" => current = node,
+            Some(_) => return Err(invalid("父路径是文件")),
+            None => break,
+        }
+    }
+    Ok(current)
 }
 impl Drop for CancelledFiles {
     fn drop(&mut self) {
-        if self.committed || veil_core::progress::check_cancelled().is_ok() {
+        if self.committed.get() {
             return;
         }
         for path in &self.files {
@@ -275,9 +343,60 @@ impl VeilManager {
         let tx = db
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ancestor = deepest_directory(&tx, &path)?;
+        locks::ensure_parent_available(&tx, &ancestor.id)?;
         let node = container::ensure_directory(&tx, &path)?;
         tx.commit()?;
         Ok(node.id)
+    }
+    pub(crate) fn lock_import_directories(
+        &self,
+        paths: &[String],
+        password: &str,
+        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(LeaseGuard, Vec<LockedDirectory>)> {
+        let mut directories = Vec::new();
+        for path in paths {
+            veil_core::progress::check_cancelled()?;
+            let db = self.open_db(password)?;
+            let identity = match db.resolve(path)? {
+                Some(node) if node.kind == "directory" => node.id,
+                Some(_) => return Err(invalid("导入目标不是目录")),
+                None if !path.is_empty() => {
+                    drop(db);
+                    self.create_directory(path, password)?
+                }
+                None => return Err(invalid("根目录缺失")),
+            };
+            directories.push(LockedDirectory {
+                path: path.clone(),
+                id: identity,
+            });
+        }
+        let mut options = self.lock_options.clone();
+        options.cancellation = Some(cancellation);
+        let guard = self
+            .lock_manager(password)
+            .with_options(options)
+            .acquire_directories(
+                &directories
+                    .iter()
+                    .map(|directory| directory.id.clone())
+                    .collect::<Vec<_>>(),
+                LockMode::SharedWrite,
+            )?;
+        let db = self.open_db(password)?;
+        for directory in &directories {
+            if db
+                .resolve(&directory.path)?
+                .is_none_or(|node| node.id != directory.id || node.kind != "directory")
+            {
+                return Err(VeilError::VersionConflict(
+                    "申请目录锁期间目标目录发生变化".into(),
+                ));
+            }
+        }
+        Ok((guard, directories))
     }
     pub fn path_kind(&self, path: &str, password: &str) -> Result<ContainerPathKind> {
         let db = self.open_db(password)?;
@@ -302,25 +421,164 @@ impl VeilManager {
             .remove(0))
     }
     pub fn add_files(&self, files: &[AddFileSpec], password: &str) -> Result<Vec<String>> {
-        self.add_files_inner(files, password, true)
+        self.add_files_inner(files, password, true, None, None, None, None)
     }
+    /// 使用单文件 SW 租约替换该文件。
+    pub fn add_file_with_shared_lock(
+        &self,
+        file: &AddFileSpec,
+        password: &str,
+        guard: &LeaseGuard,
+    ) -> Result<String> {
+        Ok(self
+            .add_files_inner(
+                std::slice::from_ref(file),
+                password,
+                true,
+                None,
+                None,
+                Some(guard),
+                None,
+            )?
+            .remove(0))
+    }
+    /// 使用已取得的目录 SW 租约写入该目录内的文件。
+    pub fn add_files_with_shared_directory_lock(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+        directory: &str,
+        guard: &LeaseGuard,
+    ) -> Result<Vec<String>> {
+        let path = if directory.is_empty() {
+            String::new()
+        } else {
+            normalize_veil_dir(directory)?
+        };
+        let db = self.open_db(password)?;
+        let node = db
+            .resolve(&path)?
+            .filter(|node| node.kind == "directory")
+            .ok_or_else(|| invalid("目录不存在"))?;
+        let credential = guard
+            .credentials()?
+            .into_iter()
+            .find(|credential| {
+                credential.directory_id() == Some(node.id.as_str()) && credential.is_shared_write()
+            })
+            .ok_or_else(|| invalid("缺少共享写锁凭证"))?;
+        locks::validate(&db.conn, &credential, Some(LockMode::SharedWrite))?;
+        drop(db);
+        self.add_files_inner(
+            files,
+            password,
+            true,
+            Some((guard, &LockedDirectory { path, id: node.id })),
+            None,
+            None,
+            None,
+        )
+    }
+    #[cfg(test)]
     pub(crate) fn add_files_without_cleanup(
         &self,
         files: &[AddFileSpec],
         password: &str,
     ) -> Result<Vec<String>> {
-        self.add_files_inner(files, password, false)
+        self.add_files_inner(files, password, false, None, None, None, None)
+    }
+    #[cfg(test)]
+    pub(crate) fn add_files_in_directory(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+        guard: &LeaseGuard,
+        directory: &LockedDirectory,
+    ) -> Result<Vec<String>> {
+        self.add_files_inner(
+            files,
+            password,
+            false,
+            Some((guard, directory)),
+            None,
+            None,
+            None,
+        )
+    }
+    pub(crate) fn add_files_for_import(
+        &self,
+        files: &[AddFileSpec],
+        password: &str,
+        directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
+        transaction_gate: &std::sync::Mutex<()>,
+        batch: &ImportBatchContext,
+    ) -> Result<Vec<String>> {
+        self.add_files_inner(
+            files,
+            password,
+            false,
+            directory_guard,
+            Some(transaction_gate),
+            None,
+            Some(batch),
+        )
     }
     fn add_files_inner(
         &self,
         files: &[AddFileSpec],
         password: &str,
         cleanup: bool,
+        directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
+        transaction_gate: Option<&std::sync::Mutex<()>>,
+        file_guard: Option<&LeaseGuard>,
+        batch: Option<&ImportBatchContext>,
     ) -> Result<Vec<String>> {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("写入文件");
+        // 续租会持有凭证互斥锁并访问数据库；必须在开始数据库写事务前取出快照。
+        let directory_credential = directory_guard
+            .map(|(guard, directory)| {
+                guard
+                    .credentials()
+                    .map(|credentials| (credentials, directory))
+            })
+            .transpose()?
+            .map(|(credentials, directory)| {
+                credentials
+                    .into_iter()
+                    .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
+                    .ok_or_else(|| invalid("目录锁凭证缺失"))
+            })
+            .transpose()?;
         let mut db = self.open_db(password)?;
         let veil_id = db.info()?.0;
+        if let Some(guard) = file_guard {
+            if files.len() != 1 {
+                return Err(invalid("文件共享写锁只支持单个文件"));
+            }
+            let target = normalize_veil_dir(&files[0].target)?;
+            let node = db
+                .resolve(&target)?
+                .filter(|node| node.kind == "file")
+                .ok_or_else(|| invalid("文件不存在"))?;
+            let credential = guard
+                .credentials()?
+                .into_iter()
+                .find(|c| c.file_id() == Some(node.id.as_str()) && c.is_shared_write())
+                .ok_or_else(|| invalid("缺少目标文件的共享写锁凭证"))?;
+            locks::validate(
+                &db.conn,
+                &credential,
+                Some(if credential.is_shared_write() {
+                    LockMode::SharedWrite
+                } else {
+                    LockMode::Write
+                }),
+            )?;
+        }
+        let prepare_gate = transaction_gate
+            .map(|gate| gate.lock().map_err(|_| invalid("导入事务状态不可用")))
+            .transpose()?;
         let tx = db
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -334,6 +592,9 @@ impl VeilManager {
         let mut pending = Vec::new();
         for spec in files {
             let target = normalize_veil_dir(&spec.target)?;
+            if directory_guard.is_some_and(|(_, directory)| !directory.covers(&target)) {
+                return Err(invalid("操作超出目录锁范围"));
+            }
             if !targets.insert(target.clone()) {
                 return Err(invalid("批量目标重复"));
             }
@@ -341,6 +602,20 @@ impl VeilManager {
                 return Err(invalid("源路径必须是文件"));
             }
             let (parent_path, name) = split_parent(&target);
+            if let Some(credential) = &directory_credential {
+                locks::validate(
+                    &tx,
+                    credential,
+                    Some(if credential.is_shared_write() {
+                        LockMode::SharedWrite
+                    } else {
+                        LockMode::Write
+                    }),
+                )?;
+            } else {
+                let ancestor = deepest_directory(&tx, parent_path)?;
+                locks::ensure_parent_available(&tx, &ancestor.id)?;
+            }
             let parent = container::ensure_directory(&tx, parent_path)?;
             let base = container::resolve(&tx, &target)?;
             if base.as_ref().is_some_and(|n| n.kind != "file") {
@@ -380,36 +655,77 @@ impl VeilManager {
             });
         }
         tx.commit()?;
+        drop(prepare_gate);
         drop(db);
-        let guard = self.lock_manager(password).acquire(
-            &pending
+        let own_guard = if directory_guard.is_none() && file_guard.is_none() {
+            let resources = pending
                 .iter()
-                .map(|p| p.identity.clone())
-                .collect::<Vec<_>>(),
-            LockMode::Write,
-        )?;
+                .map(|p| locks::pending_resource(&p.identity, &p.parent))
+                .collect::<Vec<_>>();
+            let manager = self.lock_manager(password);
+            let guard = if let Some(context) = batch {
+                manager.acquire_for(
+                    &resources,
+                    LockMode::SharedWrite,
+                    context.owner.clone(),
+                    None,
+                )?
+            } else {
+                manager.acquire(&resources, LockMode::SharedWrite)?
+            };
+            Some(Arc::new(guard))
+        } else {
+            None
+        };
+        let guard = directory_guard
+            .map(|(guard, _)| guard)
+            .or(file_guard)
+            .or(own_guard.as_deref())
+            .ok_or_else(|| invalid("锁凭证缺失"))?;
         let credentials = guard.credentials()?;
+        if file_guard.is_some()
+            && (pending.len() != 1
+                || pending[0].base.is_none()
+                || !credentials.iter().any(|c| {
+                    c.file_id() == Some(pending[0].identity.as_str()) && c.is_shared_write()
+                }))
+        {
+            return Err(invalid("缺少目标文件的共享写锁凭证"));
+        }
         let mut cancelled_files = CancelledFiles {
             files: Vec::new(),
             staging: Vec::new(),
-            committed: false,
+            committed: std::cell::Cell::new(false),
         };
         // 申请锁可能等待其他写入完成；先复核快照，避免访问已经失去引用的旧密文。
-        let current = self.open_db(password)?;
-        for p in &pending {
-            if let Some(base) = &p.base {
-                if current.node(&p.identity)?.as_ref() != Some(base) {
-                    return Err(VeilError::VersionConflict("文件在申请锁期间已变化".into()));
+        if pending.iter().any(|p| p.base.is_some()) {
+            let current = self.open_db(password)?;
+            for p in &pending {
+                if let Some(base) = &p.base {
+                    if current.node(&p.identity)?.as_ref() != Some(base) {
+                        return Err(VeilError::VersionConflict("文件在申请锁期间已变化".into()));
+                    }
                 }
             }
         }
-        drop(current);
         for p in &mut pending {
-            let credential = credentials
-                .iter()
-                .find(|c| c.resource_id == p.identity)
-                .unwrap();
-            let staging = self.veil_dir.join(".staging").join(&credential.lock_id);
+            let credential = if let Some((_, directory)) = directory_guard {
+                credentials
+                    .iter()
+                    .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
+            } else {
+                credentials
+                    .iter()
+                    .find(|c| c.file_id() == Some(p.identity.as_str()))
+            }
+            .ok_or_else(|| invalid("锁凭证缺失"))?;
+            let lease_staging = self.veil_dir.join(".staging").join(&credential.lock_id);
+            // 同一目录租约由多个工作线程共享；各文件使用自己的子目录。
+            let staging = if directory_guard.is_some() || file_guard.is_some() {
+                lease_staging.join(id())
+            } else {
+                lease_staging
+            };
             crate::fsutil::create_dir_all_durable(&staging)?;
             cancelled_files.staging.push(staging.clone());
             p.cipher = format!("{}_{}.enc", credential.lock_id, id());
@@ -451,26 +767,247 @@ impl VeilManager {
             }
         }
         veil_core::progress::check_cancelled()?;
+        if let Some(batch) = batch {
+            let batch_guard = match &own_guard {
+                Some(guard) => Arc::clone(guard),
+                None => batch
+                    .directory_guard
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| invalid("导入锁凭证缺失"))?,
+            };
+            let ciphers = pending.iter().map(|file| file.cipher.clone()).collect();
+            let queued = QueuedImport {
+                pending,
+                guard: batch_guard,
+                directory_id: directory_guard.map(|(_, directory)| directory.id.clone()),
+                veil_id,
+                release_owned: own_guard.is_some(),
+                cancelled_files,
+            };
+            veil_core::progress::file_queued();
+            if batch.sender.send(queued).is_err() {
+                veil_core::progress::file_dequeued();
+                return Err(invalid("导入提交队列已关闭"));
+            }
+            return Ok(ciphers);
+        }
         // 重新打开可识别其他进程改密；旧密码连接不能提交较早启动的写入。
+        let credentials = guard.credentials()?;
         let mut db = self.open_db(password)?;
         if db.info()?.0 != veil_id {
             return Err(VeilError::VeilIdConflict("写入期间容器身份已变化".into()));
         }
-        let tx = db
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let commit_gate = transaction_gate
+            .map(|gate| gate.lock().map_err(|_| invalid("导入事务状态不可用")))
+            .transpose()?;
+        let commit = veil_core::database::commit_batch(
+            &mut db.conn,
+            |tx| {
+                Self::apply_pending(
+                    tx,
+                    &pending,
+                    &credentials,
+                    directory_guard.map(|(_, directory)| directory.id.as_str()),
+                    own_guard.is_some(),
+                    &veil_id,
+                )?;
+                veil_core::progress::check_cancelled()?;
+                fault("before_metadata_commit");
+                Ok(())
+            },
+            || {
+                cancelled_files.committed.set(true);
+            },
+        );
+        drop(commit_gate);
+        drop(db);
+        #[cfg(feature = "fault-injection")]
+        let injected_uncertainty = std::env::var_os("VEIL_TEST_COMMIT_UNCERTAIN").is_some();
+        #[cfg(not(feature = "fault-injection"))]
+        let injected_uncertainty = false;
+        if let Err(error) = &commit {
+            if !matches!(error, VeilError::CommitUncertain(_)) {
+                return commit.map(|_| Vec::new());
+            }
+        }
+        if commit.is_err() || injected_uncertainty {
+            // 提交错误不能等同于回滚；只在重新确认全部引用后返回成功。
+            let confirmed = self.open_db(password).and_then(|db| {
+                for file in &pending {
+                    if db
+                        .node(&file.identity)?
+                        .and_then(|node| node.cipher_name)
+                        .as_deref()
+                        != Some(file.cipher.as_str())
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            });
+            if !matches!(confirmed, Ok(true)) {
+                return Err(VeilError::CommitUncertain(std::io::Error::other(
+                    "无法确认文件写入事务结果，请重新读取容器状态",
+                )));
+            }
+        }
+        fault("after_metadata_commit");
+        // 本次写入的临时目录通常已空；仅尝试删除空目录，不碰其他任务的文件。
+        for directory in &cancelled_files.staging {
+            let _ = fs::remove_dir(directory);
+        }
+        drop(own_guard);
+        if cleanup {
+            let _ = self.cleanup(password);
+        }
+        Ok(pending.into_iter().map(|p| p.cipher).collect())
+    }
+    pub(crate) fn commit_import_batch(
+        &self,
+        batch: Vec<QueuedImport>,
+        password: &str,
+        stopped: &AtomicBool,
+    ) -> Result<()> {
+        let result = (|| -> Result<()> {
+            veil_core::progress::check_cancelled()?;
+            if stopped.load(Ordering::Acquire) {
+                return Err(VeilError::Cancelled);
+            }
+            let credentials = batch
+                .iter()
+                .map(|item| {
+                    item.guard
+                        .credentials()
+                        .map_err(|error| VeilError::ImportBatchFailed {
+                            file: item.target().to_owned(),
+                            message: error.to_string(),
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut db = self.open_db(password)?;
+            let identity = db.info()?.0;
+            if batch.iter().any(|item| item.veil_id != identity) {
+                return Err(VeilError::VeilIdConflict("导入期间容器身份已变化".into()));
+            }
+            let commit = veil_core::database::commit_batch(
+                &mut db.conn,
+                |tx| {
+                    for (item, credentials) in batch.iter().zip(&credentials) {
+                        Self::apply_pending(
+                            tx,
+                            &item.pending,
+                            credentials,
+                            item.directory_id.as_deref(),
+                            item.release_owned,
+                            &identity,
+                        )
+                        .map_err(|error| VeilError::ImportBatchFailed {
+                            file: item.pending[0].spec.target.clone(),
+                            message: error.to_string(),
+                        })?;
+                    }
+                    veil_core::progress::check_cancelled()?;
+                    if stopped.load(Ordering::Acquire) {
+                        return Err(VeilError::Cancelled);
+                    }
+                    fault("before_metadata_commit");
+                    Ok(())
+                },
+                || {
+                    for item in &batch {
+                        item.cancelled_files.committed.set(true);
+                    }
+                },
+            );
+            drop(db);
+            #[cfg(feature = "fault-injection")]
+            let commit =
+                if commit.is_ok() && std::env::var_os("VEIL_TEST_COMMIT_UNCERTAIN").is_some() {
+                    Err(VeilError::CommitUncertain(std::io::Error::other(
+                        "模拟提交结果不确定",
+                    )))
+                } else {
+                    commit
+                };
+            match commit {
+                Err(VeilError::CommitUncertain(error)) => {
+                    let confirmed = self.open_db(password).and_then(|db| {
+                        for item in &batch {
+                            for file in &item.pending {
+                                if db
+                                    .node(&file.identity)?
+                                    .and_then(|node| node.cipher_name)
+                                    .as_deref()
+                                    != Some(file.cipher.as_str())
+                                {
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        Ok(true)
+                    });
+                    if !matches!(confirmed, Ok(true)) {
+                        return Err(VeilError::CommitUncertain(error));
+                    }
+                }
+                other => other?,
+            }
+            fault("after_metadata_commit");
+            Ok(())
+        })();
+        for item in &batch {
+            veil_core::progress::file_dequeued();
+            if result.is_ok() {
+                for directory in &item.cancelled_files.staging {
+                    let _ = fs::remove_dir(directory);
+                }
+                veil_core::progress::file_done(false);
+            }
+        }
+        result
+    }
+
+    pub(crate) fn cancel_import_batch(batch: Vec<QueuedImport>) {
+        for _ in &batch {
+            veil_core::progress::file_dequeued();
+        }
+        drop(batch);
+    }
+
+    fn apply_pending(
+        tx: &rusqlite::Transaction<'_>,
+        pending: &[Pending],
+        credentials: &[locks::Credential],
+        directory_id: Option<&str>,
+        release_owned: bool,
+        veil_id: &str,
+    ) -> Result<()> {
         let active = container::keys(&tx)?
             .into_iter()
             .find(|k| k.status == "active")
             .unwrap();
-        let credentials = guard.credentials()?;
         let mut obsolete = Vec::new();
-        for p in &pending {
-            let c = credentials
-                .iter()
-                .find(|c| c.resource_id == p.identity)
-                .unwrap();
-            locks::validate(&tx, c, Some(LockMode::Write))?;
+        for p in pending {
+            let c = if let Some(directory) = directory_id {
+                credentials
+                    .iter()
+                    .find(|credential| credential.directory_id() == Some(directory))
+            } else {
+                credentials
+                    .iter()
+                    .find(|c| c.file_id() == Some(p.identity.as_str()))
+            }
+            .ok_or_else(|| invalid("锁凭证缺失"))?;
+            locks::validate(
+                &tx,
+                c,
+                Some(if c.is_shared_write() {
+                    LockMode::SharedWrite
+                } else {
+                    LockMode::Write
+                }),
+            )?;
             if p.key.key_id != active.key_id {
                 return Err(invalid("活动文件密钥已变化，请重试"));
             }
@@ -487,10 +1024,10 @@ impl VeilManager {
                     return Err(VeilError::VersionConflict("文件位置已变化".into()));
                 }
                 verify_base(
-                    &veil_id,
+                    veil_id,
                     Some(current),
                     &VersionSnapshot {
-                        veil_id: veil_id.clone(),
+                        veil_id: veil_id.to_owned(),
                         file_id: base.id.clone(),
                         version_history: base.versions()?.to_vec(),
                     },
@@ -532,50 +1069,17 @@ impl VeilManager {
                     _ => error.into(),
                 })?;
             }
-            locks::release_in(&tx, c)?;
-        }
-        veil_core::progress::check_cancelled()?;
-        fault("before_metadata_commit");
-        // 提交一旦开始，不能依据中止请求推断数据库是否已引用密文。
-        cancelled_files.committed = true;
-        let commit = tx.commit();
-        drop(db);
-        #[cfg(feature = "fault-injection")]
-        let injected_uncertainty = std::env::var_os("VEIL_TEST_COMMIT_UNCERTAIN").is_some();
-        #[cfg(not(feature = "fault-injection"))]
-        let injected_uncertainty = false;
-        if commit.is_err() || injected_uncertainty {
-            // 提交错误不能等同于回滚；只在重新确认全部引用后返回成功。
-            let confirmed = self.open_db(password).and_then(|db| {
-                for file in &pending {
-                    if db
-                        .node(&file.identity)?
-                        .and_then(|node| node.cipher_name)
-                        .as_deref()
-                        != Some(file.cipher.as_str())
-                    {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            });
-            if !matches!(confirmed, Ok(true)) {
-                return Err(VeilError::CommitUncertain(std::io::Error::other(
-                    "无法确认文件写入事务结果，请重新读取容器状态",
-                )));
+            if release_owned {
+                locks::release_in(&tx, c)?;
             }
         }
-        fault("after_metadata_commit");
-        drop(guard);
-        if cleanup {
-            let _ = self.cleanup(password);
-        }
-        Ok(pending.into_iter().map(|p| p.cipher).collect())
+        Ok(())
     }
     fn read_locked(
         &self,
         name: &str,
         password: &str,
+        mode: LockMode,
     ) -> Result<(ContainerDb, Node, LeaseGuard, Zeroizing<[u8; 32]>)> {
         let db = self.open_db(password)?;
         let identity = db.info()?.0;
@@ -585,14 +1089,14 @@ impl VeilManager {
             .ok_or_else(|| VeilError::FileNotFound(name.into()))?;
         let guard = self
             .lock_manager(password)
-            .acquire(std::slice::from_ref(&node.id), LockMode::Read)?;
+            .acquire(std::slice::from_ref(&node.id), mode)?;
         drop(db);
         let db = self.open_db(password)?;
         if db.info()?.0 != identity {
             return Err(VeilError::VeilIdConflict("读取期间容器身份已变化".into()));
         }
         for credential in guard.credentials()? {
-            locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
+            locks::validate(&db.conn, &credential, Some(mode))?;
         }
         let node = db
             .node(&node.id)?
@@ -608,6 +1112,25 @@ impl VeilManager {
 
     /// 对已存在的目标逐块核对明文；只有内容相同时才能作为已完成文件跳过。
     pub fn matches_existing_file(&self, name: &str, source: &Path, password: &str) -> Result<bool> {
+        self.matches_existing_file_inner(name, source, password, None)
+    }
+    pub(crate) fn matches_existing_file_in_directory(
+        &self,
+        name: &str,
+        source: &Path,
+        password: &str,
+        guard: &LeaseGuard,
+        directory: &LockedDirectory,
+    ) -> Result<bool> {
+        self.matches_existing_file_inner(name, source, password, Some((guard, directory)))
+    }
+    fn matches_existing_file_inner(
+        &self,
+        name: &str,
+        source: &Path,
+        password: &str,
+        directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
+    ) -> Result<bool> {
         use std::io::{Read, Write};
         struct Compare<R> {
             source: R,
@@ -624,9 +1147,51 @@ impl VeilManager {
                 Ok(())
             }
         }
+        if let Some((_, directory)) = directory_guard {
+            if !directory.covers(&normalize_veil_dir(name)?) {
+                return Err(invalid("操作超出目录锁范围"));
+            }
+        }
         let input = fs::File::open(source)?;
         let before = input.metadata()?;
-        let (db, node, guard, key) = self.read_locked(name, password)?;
+        let (db, node, owned_guard, key) = if let Some((guard, directory)) = directory_guard {
+            let db = self.open_db(password)?;
+            let node = db
+                .resolve(name)?
+                .filter(|node| node.kind == "file")
+                .ok_or_else(|| VeilError::FileNotFound(name.into()))?;
+            let credential = guard
+                .credentials()?
+                .into_iter()
+                .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
+                .ok_or_else(|| invalid("目录锁凭证缺失"))?;
+            locks::validate(
+                &db.conn,
+                &credential,
+                Some(if credential.is_shared_write() {
+                    LockMode::SharedWrite
+                } else {
+                    LockMode::Write
+                }),
+            )?;
+            let key = db
+                .keys()?
+                .into_iter()
+                .find(|key| Some(&key.key_id) == node.key_id.as_ref())
+                .ok_or_else(|| invalid("文件引用未知密钥"))?
+                .material()?;
+            (db, node, None, key)
+        } else {
+            let (db, node, guard, key) = self.read_locked(name, password, LockMode::Read)?;
+            if guard
+                .credentials()?
+                .iter()
+                .any(|credential| credential.is_read_only())
+            {
+                return Err(invalid("文件正在写入，无法安全核对已导入内容"));
+            }
+            (db, node, Some(guard), key)
+        };
         if Some(before.len()) != node.size {
             return Ok(false);
         }
@@ -645,8 +1210,25 @@ impl VeilManager {
         if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
             return Err(invalid("核对期间源文件发生变化"));
         }
-        for credential in guard.credentials()? {
-            locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
+        if let Some((guard, directory)) = directory_guard {
+            let credential = guard
+                .credentials()?
+                .into_iter()
+                .find(|credential| credential.directory_id() == Some(directory.id.as_str()))
+                .ok_or_else(|| invalid("目录锁凭证缺失"))?;
+            locks::validate(
+                &db.conn,
+                &credential,
+                Some(if credential.is_shared_write() {
+                    LockMode::SharedWrite
+                } else {
+                    LockMode::Write
+                }),
+            )?;
+        } else if let Some(guard) = owned_guard {
+            for credential in guard.credentials()? {
+                locks::validate(&db.conn, &credential, Some(LockMode::Read))?;
+            }
         }
         Ok(comparison.matches)
     }
@@ -661,6 +1243,7 @@ impl VeilManager {
         password: &str,
     ) -> Result<VersionSnapshot> {
         self.extract_file_inner(name, output, password, true)
+            .map(|(version, _)| version)
     }
     fn extract_file_inner(
         &self,
@@ -668,10 +1251,14 @@ impl VeilManager {
         output: &Path,
         password: &str,
         overwrite: bool,
-    ) -> Result<VersionSnapshot> {
+    ) -> Result<(VersionSnapshot, bool)> {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("读取文件");
-        let (db, node, guard, key) = self.read_locked(name, password)?;
+        let (db, node, guard, key) = self.read_locked(name, password, LockMode::SharedWrite)?;
+        let unstable = guard
+            .credentials()?
+            .iter()
+            .any(|credential| credential.is_read_only());
         veil_core::progress::start(node.size);
         let version = VersionSnapshot {
             veil_id: db.info()?.0,
@@ -694,10 +1281,11 @@ impl VeilManager {
         )?;
         veil_core::progress::finalizing();
         fault("before_plaintext_publish");
+        let credentials = guard.credentials()?;
         let mut fresh = self.open_db(password)?;
         let tx = fresh.conn.transaction()?;
-        for credential in guard.credentials()? {
-            locks::validate(&tx, &credential, Some(LockMode::Read))?;
+        for credential in credentials {
+            locks::validate(&tx, &credential, Some(LockMode::SharedWrite))?;
         }
         if overwrite {
             temporary
@@ -710,7 +1298,7 @@ impl VeilManager {
         }
         crate::fsutil::sync_directory(parent)?;
         tx.commit()?;
-        Ok(version)
+        Ok((version, unstable))
     }
     pub fn extract_file_without_overwrite(
         &self,
@@ -721,10 +1309,32 @@ impl VeilManager {
         self.extract_file_inner(name, output, password, false)
             .map(|_| ())
     }
+    pub fn extract_file_without_overwrite_with_status(
+        &self,
+        name: &str,
+        output: &Path,
+        password: &str,
+    ) -> Result<bool> {
+        self.extract_file_inner(name, output, password, false)
+            .map(|(_, unstable)| unstable)
+    }
     pub fn read_file_bytes(&self, name: &str, password: &str, limit: u64) -> Result<Vec<u8>> {
+        self.read_file_bytes_with_status(name, password, limit)
+            .map(|(bytes, _)| bytes)
+    }
+    pub fn read_file_bytes_with_status(
+        &self,
+        name: &str,
+        password: &str,
+        limit: u64,
+    ) -> Result<(Vec<u8>, bool)> {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("预览文件");
-        let (db, node, guard, key) = self.read_locked(name, password)?;
+        let (db, node, guard, key) = self.read_locked(name, password, LockMode::ReadOnly)?;
+        let unstable = guard
+            .credentials()?
+            .iter()
+            .any(|credential| credential.is_read_only());
         if node.size.unwrap() > limit {
             return Err(invalid("文件超过预览大小限制"));
         }
@@ -737,9 +1347,9 @@ impl VeilManager {
             node.size.unwrap(),
         )?;
         for c in guard.credentials()? {
-            locks::validate(&db.conn, &c, Some(LockMode::Read))?;
+            locks::validate(&db.conn, &c, Some(LockMode::ReadOnly))?;
         }
-        Ok(bytes)
+        Ok((bytes, unstable))
     }
     pub fn remove_file(&self, name: &str, password: &str) -> Result<()> {
         self.remove_path(name, password).map(|_| ())
@@ -753,15 +1363,15 @@ impl VeilManager {
             .resolve(&path)?
             .ok_or_else(|| VeilError::FileNotFound(path.clone()))?;
         let before = db.subtree(&node.id)?;
-        let files = before
-            .iter()
-            .filter(|n| n.kind == "file")
-            .map(|n| n.id.clone())
-            .collect::<Vec<_>>();
         drop(db);
-        let guard = self
-            .lock_manager(password)
-            .acquire(&files, LockMode::Write)?;
+        let guard = if node.kind == "directory" {
+            self.lock_manager(password)
+                .acquire_directory(&node.id, LockMode::Write)?
+        } else {
+            self.lock_manager(password)
+                .acquire(std::slice::from_ref(&node.id), LockMode::Write)?
+        };
+        let credentials = guard.credentials()?;
         let mut db = self.open_db(password)?;
         let tx = db
             .conn
@@ -771,7 +1381,7 @@ impl VeilManager {
                 "删除前子树已变化，请重试".into(),
             ));
         }
-        for c in guard.credentials()? {
+        for c in credentials {
             locks::release_in(&tx, &c)?;
         }
         tx.execute("WITH RECURSIVE tree(id) AS (SELECT id FROM file_info WHERE id=?1 UNION ALL SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.id) DELETE FROM file_info WHERE id IN (SELECT id FROM tree)",[&node.id])?;
@@ -802,6 +1412,12 @@ impl VeilManager {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let n =
             container::resolve(&tx, &from)?.ok_or_else(|| VeilError::FileNotFound(from.clone()))?;
+        let source_resource = if n.kind == "directory" {
+            locks::directory_resource(&n.id)
+        } else {
+            n.id.clone()
+        };
+        locks::ensure_available(&tx, &source_resource, LockMode::Write)?;
         if let Some(destination) = container::resolve(&tx, &to)? {
             if destination.id == n.id {
                 tx.commit()?;
@@ -823,6 +1439,7 @@ impl VeilManager {
         let parent = container::resolve(&tx, parent)?
             .filter(|n| n.kind == "directory")
             .ok_or_else(|| invalid("目标父目录不存在"))?;
+        locks::ensure_parent_available(&tx, &parent.id)?;
         let cycle:bool=tx.query_row("WITH RECURSIVE ancestors(id,parent_id) AS (SELECT id,parent_id FROM file_info WHERE id=?1 UNION ALL SELECT f.id,f.parent_id FROM file_info f JOIN ancestors a ON f.id=a.parent_id) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=?2)",params![parent.id,n.id],|r|r.get(0))?;
         if cycle {
             return Err(VeilError::WorkError("不能把目录移动到自身或子目录".into()));
@@ -845,11 +1462,30 @@ impl VeilManager {
     pub fn cleanup(&self, password: &str) -> Result<usize> {
         let mut db = self.open_db(password)?;
         let dead = locks::dead_locks(&db.conn)?;
+        // 初始快照中仍被引用的密文可以直接保留；未引用候选仍须在写事务内复核。
+        let referenced: HashSet<String> = {
+            let mut query = db
+                .conn
+                .prepare("SELECT cipher_name FROM file_info WHERE cipher_name IS NOT NULL")?;
+            query
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        {
+            let tx = db
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            locks::reap(&tx, &dead)?;
+            tx.commit()?;
+        }
         let mut removed = 0;
         for entry in fs::read_dir(&self.veil_dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if !entry.file_type()?.is_file() || container::validate_cipher(&name).is_err() {
+                continue;
+            }
+            if referenced.contains(&name) {
                 continue;
             }
             let lock_id = name.split('_').next().unwrap();
@@ -891,7 +1527,14 @@ impl VeilManager {
         Ok(removed)
     }
     pub fn change_password(&self, old: &str, new: &str) -> Result<()> {
+        let guard = self.lock_manager(old).acquire_container(LockMode::Write)?;
+        let credential = guard
+            .credentials()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("目录锁凭证缺失"))?;
         let db = self.open_db(old)?;
+        locks::validate(&db.conn, &credential, Some(LockMode::Write))?;
         let result = veil_core::database::rekey(&db.conn, new);
         drop(db);
         if self.open_db(new).is_err() {
@@ -904,6 +1547,8 @@ impl VeilManager {
                 "无法确认数据库改密结果，请重新验证数据库",
             )));
         }
+        // 改密已确认成功；释放失败时租约会过期，不能误报密码仍未修改。
+        let _ = guard.release_after_rekey(new);
         fault("after_database_rekey");
         Ok(())
     }
@@ -930,6 +1575,8 @@ impl VeilManager {
         let tx = db
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let root = container::resolve(&tx, "")?.ok_or_else(|| invalid("根目录缺失"))?;
+        locks::ensure_available(&tx, &locks::directory_resource(&root.id), LockMode::Write)?;
         let mut keys = container::keys(&tx)?;
         if keys.len() == 1 {
             keys[0].status = "retiring".into();
@@ -997,11 +1644,11 @@ impl VeilManager {
             crate::fsutil::sync_directory(&self.veil_dir)?;
             let active_id = active.key_id.clone();
             drop(db);
+            let c = guard.credentials()?.remove(0);
             let mut db = self.open_db(password)?;
             let tx = db
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let c = guard.credentials()?.remove(0);
             locks::validate(&tx, &c, Some(LockMode::Write))?;
             if container::node(&tx, &identity)?.as_ref() != Some(&n)
                 || !container::keys(&tx)?
@@ -1061,9 +1708,21 @@ impl VeilManager {
             .map(|n| n.id.clone())
             .collect::<Vec<_>>();
         drop(db);
+        let root_id = &before
+            .iter()
+            .find(|node| node.parent_id.is_none())
+            .ok_or_else(|| invalid("根目录缺失"))?
+            .id;
         let guard = self
             .lock_manager(password)
-            .acquire(&files, LockMode::Read)?;
+            .acquire_directory(root_id, LockMode::Read)?;
+        if guard
+            .credentials()?
+            .iter()
+            .any(|credential| credential.is_read_only())
+        {
+            return Err(invalid("容器正在写入，无法创建一致的备份"));
+        }
         let mut source = self.open_db(password)?;
         let reader = self.open_db(password)?;
         let tx = source
@@ -1095,22 +1754,54 @@ impl VeilManager {
         target.execute("DELETE FROM operation_locks", [])?;
         drop(target);
         // 数据库引用的文件受读租约保护；新增文件属于之后的数据库版本。
-        let total = before
+        let names: Vec<String> = before
             .iter()
             .filter(|n| n.kind == "file")
-            .try_fold(0u64, |total, node| {
-                total.checked_add(
-                    fs::metadata(self.veil_dir.join(node.cipher().ok()?))
-                        .ok()?
-                        .len(),
-                )
-            });
+            .map(|node| node.cipher().map(str::to_owned))
+            .collect::<Result<_>>()?;
+        let total = names.iter().try_fold(0u64, |total, name| {
+            total.checked_add(fs::metadata(self.veil_dir.join(name)).ok()?.len())
+        });
         veil_core::progress::stage("snapshot", total);
-        for n in before.iter().filter(|n| n.kind == "file") {
-            crate::fsutil::copy_file_new_with_progress(
-                &self.veil_dir.join(n.cipher()?),
-                &destination.join(n.cipher()?),
-            )?;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let count = veil_core::progress::worker_count(names.len());
+        veil_core::progress::set_parallel_workers(count);
+        let next = AtomicUsize::new(0);
+        let stopped = AtomicBool::new(false);
+        let failure = std::sync::Mutex::new(None);
+        let progress = veil_core::progress::current();
+        std::thread::scope(|scope| {
+            for _ in 0..count {
+                let names = &names;
+                let next = &next;
+                let stopped = &stopped;
+                let failure = &failure;
+                let progress = &progress;
+                scope.spawn(move || {
+                    let _attachment = progress.as_ref().map(|progress| progress.attach());
+                    loop {
+                        if stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(name) = names.get(index) else { break };
+                        if let Err(error) = crate::fsutil::copy_file_new_with_progress(
+                            &self.veil_dir.join(name),
+                            &destination.join(name),
+                        ) {
+                            stopped.store(true, Ordering::Release);
+                            let mut failure = failure.lock().unwrap_or_else(|e| e.into_inner());
+                            if failure.is_none() {
+                                *failure = Some(error);
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(error) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            return Err(error.into());
         }
         let db = self.open_db(password)?;
         for c in guard.credentials()? {
@@ -1187,12 +1878,12 @@ mod cancellation_tests {
         drop(CancelledFiles {
             files: vec![uncommitted.clone()],
             staging: vec![staged_dir.clone()],
-            committed: false,
+            committed: std::cell::Cell::new(false),
         });
         drop(CancelledFiles {
             files: vec![committed.clone()],
             staging: vec![],
-            committed: true,
+            committed: std::cell::Cell::new(true),
         });
         assert!(!uncommitted.exists());
         assert!(!staged_dir.exists());

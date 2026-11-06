@@ -27,6 +27,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var thumbnails: [String: Data] = [:]
     /// 解锁成功后密码在本机内存中的保留时长，来自 app.db。
     @Published private(set) var unlockCacheSeconds = 3600
+    @Published private(set) var importCommitIntervalSeconds = 1
+    @Published private(set) var importCommitCount = 8
 
     private let client = ServiceClient()
     private var generation: UInt64 = 0
@@ -66,6 +68,7 @@ final class AppStore: ObservableObject {
     }
 
     var isBusy: Bool { pendingOperations > 0 }
+    var canBrowse: Bool { !isBusy || transferProgress?.operation == "import" }
     var activeSpace: Space? { spaces.first { $0.id == selectedSpaceID } ?? spaces.first { $0.isDefault } ?? spaces.first }
     var visibleEntries: [BrowserEntry] {
         guard let container else { return [] }
@@ -113,15 +116,19 @@ final class AppStore: ObservableObject {
             let layout: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "layout"))
             let mode: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "view_mode"))
             let cache: Double = try await self.client.json(NativeRequest(operation: "get_preference", key: "unlock_cache_seconds"))
+            let interval: Int = try await self.client.json(NativeRequest(operation: "get_preference", key: "import_commit_interval_seconds"))
+            let count: Int = try await self.client.json(NativeRequest(operation: "get_preference", key: "import_commit_count"))
             self.layout = FileLayout(rawValue: layout) ?? .grid
             self.browseMode = BrowseMode(rawValue: mode) ?? .type
             self.unlockCacheSeconds = Int(cache.rounded())
+            self.importCommitIntervalSeconds = interval
+            self.importCommitCount = count
             self.loaded = true
         }
     }
 
-    private func perform(_ work: (UInt64) async throws -> Void) async {
-        guard !isBusy else { return }
+    private func perform(allowDuringImport: Bool = false, _ work: (UInt64) async throws -> Void) async {
+        guard !isBusy || (allowDuringImport && canBrowse) else { return }
         pendingOperations += 1
         error = nil
         let ticket = generation
@@ -134,10 +141,18 @@ final class AppStore: ObservableObject {
         transferTitle = title
         transferProgress = nil
         let poll = Task { @MainActor in
+            var lastCompleted: UInt64 = 0
             while !Task.isCancelled {
                 if let progress = client.transferProgress(), progress.operation == operation,
                    ["preparing", "processing", "verifying", "snapshot", "packing", "unpacking", "finalizing"].contains(progress.phase) {
                     transferProgress = progress
+                    if operation == "import", progress.completedFiles > lastCompleted {
+                        lastCompleted = progress.completedFiles
+                        let ticket = generation
+                        if let view: ContainerSnapshot = try? await client.json(NativeRequest(operation: "refresh")), ticket == generation {
+                            container = view
+                        }
+                    }
                 }
                 try? await Task.sleep(for: .milliseconds(250))
             }
@@ -323,7 +338,7 @@ final class AppStore: ObservableObject {
     }
 
     func refresh() async {
-        await perform { ticket in
+        await perform(allowDuringImport: true) { ticket in
             if self.container != nil {
                 let view: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "refresh"))
                 guard ticket == self.generation else { return }
@@ -349,6 +364,22 @@ final class AppStore: ObservableObject {
             self.unlockCacheSeconds = seconds
             if seconds == 0 { self.unlockedPasswords.removeAll() }
             self.notice = seconds == 0 ? "已关闭免密重开" : "免密时长已设为 \(self.unlockCacheDescription)"
+        }
+    }
+
+    func setImportCommitInterval(seconds: Int) async {
+        await perform { _ in
+            try await self.client.execute(NativeRequest(operation: "set_import_commit_interval", seconds: seconds))
+            self.importCommitIntervalSeconds = seconds
+            self.notice = "导入提交间隔已设为 \(seconds) 秒"
+        }
+    }
+
+    func setImportCommitCount(_ count: Int) async {
+        await perform { _ in
+            try await self.client.execute(NativeRequest(operation: "set_import_commit_count", count: count))
+            self.importCommitCount = count
+            self.notice = "导入提交数量已设为 \(count) 条"
         }
     }
 
@@ -400,16 +431,17 @@ final class AppStore: ObservableObject {
     }
 
     func showPreview(_ file: FileEntry) async {
-        guard !isBusy else { return }
+        guard canBrowse else { return }
         closePreview()
         let asset = PreviewAsset(file: file)
         preview = asset
         guard file.previewMime != nil else { asset.error = "此类型暂不支持内置预览，可导出后查看。"; return }
-        await perform { ticket in
+        await perform(allowDuringImport: true) { ticket in
             do {
-                let data = try await self.client.preview(name: file.name)
+                let result = try await self.client.previewWithStatus(name: file.name)
                 guard ticket == self.generation, self.preview === asset else { return }
-                try asset.install(data)
+                asset.unstable = result.unstable
+                try asset.install(result.data)
             } catch {
                 if ticket == self.generation && self.preview === asset { asset.error = error.localizedDescription }
             }
@@ -427,8 +459,8 @@ final class AppStore: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         await perform { ticket in
             try await self.withTransferProgress("正在导出文件", operation: "export") {
-                try await self.client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
-                if ticket == self.generation { self.notice = "文件已导出" }
+                let unstable = try await self.client.exportWithStatus(name: file.name, destination: url.path)
+                if ticket == self.generation { self.notice = unstable ? "文件已导出；内容正在写入，结果可能发生变化" : "文件已导出" }
             }
         }
     }
@@ -442,7 +474,8 @@ final class AppStore: ObservableObject {
         pendingOperations += 1
         defer { pendingOperations -= 1 }
         try await withTransferProgress("正在导出文件", operation: "export") {
-            try await client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
+            let unstable = try await client.exportWithStatus(name: file.name, destination: url.path)
+            if unstable { notice = "文件已导出；内容正在写入，结果可能发生变化" }
         }
     }
 
@@ -484,6 +517,7 @@ final class PreviewAsset: ObservableObject, Identifiable {
     @Published var data: Data?
     @Published var videoURL: URL?
     @Published var error: String?
+    @Published var unstable = false
     private var temporaryDirectory: URL?
 
     init(file: FileEntry) { self.file = file }

@@ -2,7 +2,10 @@
 use serde::Serialize;
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[derive(Clone, Default, Serialize)]
@@ -12,20 +15,40 @@ pub struct Snapshot {
     pub processed_bytes: u64,
     pub total_bytes: Option<u64>,
     pub completed_files: u64,
+    pub pending_files: u64,
     pub skipped_files: u64,
     pub total_files: u64,
     pub current_file: Option<String>,
     pub cancel_requested: bool,
+    pub parallel_workers: u64,
 }
 
 #[derive(Clone, Default)]
-pub struct Progress(Arc<Mutex<Snapshot>>);
+pub struct Progress(Arc<Mutex<Snapshot>>, Arc<AtomicBool>);
 
 thread_local! { static CURRENT: RefCell<Option<Progress>> = const { RefCell::new(None) }; }
+
+pub fn current() -> Option<Progress> {
+    CURRENT.with(|current| current.borrow().clone())
+}
+pub fn worker_count(files: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .min(4)
+        .min(files)
+}
 
 pub struct Scope {
     previous: Option<Progress>,
     active: Progress,
+}
+/// 将已有任务绑定到工作线程，不改变任务状态或所有权。
+pub struct Attachment(Option<Progress>);
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        CURRENT.with(|current| *current.borrow_mut() = self.0.take());
+    }
 }
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -47,10 +70,14 @@ impl Drop for Scope {
     }
 }
 impl Progress {
+    pub fn attach(&self) -> Attachment {
+        Attachment(CURRENT.with(|current| current.replace(Some(self.clone()))))
+    }
     pub fn snapshot(&self) -> Snapshot {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     pub fn begin(&self, operation: &'static str) -> Scope {
+        self.1.store(false, Ordering::Release);
         *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Snapshot {
             operation,
             phase: "preparing",
@@ -74,7 +101,11 @@ impl Progress {
             return false;
         }
         snapshot.cancel_requested = true;
+        self.1.store(true, Ordering::Release);
         true
+    }
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.1)
     }
     pub fn finish_cancelled(&self) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).phase = "cancelled";
@@ -101,8 +132,10 @@ pub fn stage(phase: &'static str, total: Option<u64>) {
         p.processed_bytes = 0;
         p.current_file = None;
         p.completed_files = 0;
+        p.pending_files = 0;
         p.skipped_files = 0;
         p.total_files = 0;
+        p.parallel_workers = 0;
     });
 }
 
@@ -193,6 +226,9 @@ pub fn copy_cancellable(
 pub fn set_file_count(total: usize) {
     update(|p| p.total_files = total as u64);
 }
+pub fn set_parallel_workers(count: usize) {
+    update(|p| p.parallel_workers = count as u64);
+}
 pub fn begin_file(name: &str) {
     update(|p| {
         p.phase = "processing";
@@ -206,6 +242,13 @@ pub fn file_done(skipped: bool) {
             p.skipped_files += 1;
         }
     });
+}
+/// 记录加密完成、尚未提交的文件。
+pub fn file_queued() {
+    update(|p| p.pending_files += 1);
+}
+pub fn file_dequeued() {
+    update(|p| p.pending_files = p.pending_files.saturating_sub(1));
 }
 pub fn verifying() {
     update(|p| p.phase = "verifying");

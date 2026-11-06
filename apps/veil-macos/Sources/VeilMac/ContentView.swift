@@ -79,7 +79,7 @@ struct ContentView: View {
                 Button { Task { await store.exportPackage() } } label: { Label("加密备份", systemImage: "externaldrive") }
                     .buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy)
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(VeilIconButtonStyle()).help("刷新").disabled(store.isBusy)
+                    .buttonStyle(VeilIconButtonStyle()).help("刷新").disabled(!store.canBrowse)
                 Button { Task { await store.lock(forgetPassword: true) } } label: { Label("锁定", systemImage: "lock") }
                     .buttonStyle(VeilPlainButtonStyle()).help("锁定容器并清除免密密码")
             } else {
@@ -140,7 +140,14 @@ struct TransferProgressView: View {
             if let progress, progress.totalFiles > 0 {
                 Text("已完成 \(progress.completedFiles) / \(progress.totalFiles) 个文件" + (progress.phase == "verifying" ? " · 正在核对" : ""))
                     .foregroundStyle(VeilTheme.secondary)
-                if let name = progress.currentFile { Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(VeilTheme.secondary) }
+                if progress.operation == "import", progress.pendingFiles > 0 {
+                    Text("已加密，等待提交：\(progress.pendingFiles) 个文件").foregroundStyle(VeilTheme.secondary)
+                }
+                if progress.parallelWorkers > 1 {
+                    Text("最多同时处理 \(progress.parallelWorkers) 个文件").foregroundStyle(VeilTheme.secondary)
+                } else if let name = progress.currentFile {
+                    Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(VeilTheme.secondary)
+                }
             }
             if let progress, progress.operation == "import", ["preparing", "processing", "verifying"].contains(progress.phase) {
                 Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelImport() }

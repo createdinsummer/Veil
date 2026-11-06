@@ -1,10 +1,10 @@
-//! 文件级租约，申请、验证、交接均在短写事务内完成。
+//! 文件与目录范围租约，申请、验证、交接均在短写事务内完成。
 use super::{container::ContainerDb, id, invalid, json, now, parse};
 use crate::{
     error::{Result, VeilError},
     execution::{ExecutionEndpoint, ExecutionOwner, ExecutionServer, ExecutionService, Liveness},
 };
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -14,7 +14,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
-pub use veil_core::locking::LockOptions;
+pub use veil_core::locking::{LockMode, LockOptions};
 use zeroize::Zeroizing;
 
 pub const LEASE: Duration = Duration::from_secs(30);
@@ -36,18 +36,162 @@ fn endpoint(execution: &ExecutionService) -> Option<ExecutionEndpoint> {
     }
     SERVER.get().map(|server| server.endpoint().clone())
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LockMode {
-    Read,
-    Write,
+// 复用现有数据库的 read/write 约束，不改变旧容器表结构。
+const SHARED_WRITE_PREFIX: &str = "veil-sw:";
+const READ_ONLY_PREFIX: &str = "veil-ro:";
+const DIRECTORY_PREFIX: &str = "veil-dir:";
+const CONTAINER_RESOURCE: &str = "veil-container";
+const PENDING_PREFIX: &str = "veil-pending:";
+
+#[derive(Debug, Clone)]
+enum Scope<'a> {
+    Container,
+    File {
+        id: &'a str,
+        parent: Option<&'a str>,
+    },
+    Directory(&'a str),
 }
-impl LockMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Write => "write",
+
+fn decode_scope(resource: &str) -> Scope<'_> {
+    let resource = resource
+        .strip_prefix(SHARED_WRITE_PREFIX)
+        .or_else(|| resource.strip_prefix(READ_ONLY_PREFIX))
+        .unwrap_or(resource);
+    if resource == CONTAINER_RESOURCE {
+        Scope::Container
+    } else if let Some(directory) = resource.strip_prefix(DIRECTORY_PREFIX) {
+        Scope::Directory(directory)
+    } else if let Some(pending) = resource.strip_prefix(PENDING_PREFIX) {
+        match pending.split_once(':') {
+            Some((id, parent)) => Scope::File {
+                id,
+                parent: Some(parent),
+            },
+            None => Scope::File {
+                id: resource,
+                parent: None,
+            },
+        }
+    } else {
+        Scope::File {
+            id: resource,
+            parent: None,
         }
     }
+}
+
+fn is_ancestor(conn: &Connection, ancestor: &str, descendant: &str) -> Result<bool> {
+    Ok(conn.query_row("WITH RECURSIVE parents(id,parent_id) AS (SELECT id,parent_id FROM file_info WHERE id=?1 UNION ALL SELECT f.id,f.parent_id FROM file_info f JOIN parents p ON f.id=p.parent_id) SELECT EXISTS(SELECT 1 FROM parents WHERE id=?2)", params![descendant, ancestor], |row| row.get(0))?)
+}
+
+fn scopes_overlap(conn: &Connection, left: &Scope<'_>, right: &Scope<'_>) -> Result<bool> {
+    match (left, right) {
+        (Scope::Container, _) | (_, Scope::Container) => Ok(true),
+        (Scope::File { id: a, .. }, Scope::File { id: b, .. }) => Ok(a == b),
+        (Scope::Directory(a), Scope::Directory(b)) => {
+            Ok(is_ancestor(conn, a, b)? || is_ancestor(conn, b, a)?)
+        }
+        (Scope::Directory(dir), Scope::File { id, parent })
+        | (Scope::File { id, parent }, Scope::Directory(dir)) => {
+            is_ancestor(conn, dir, parent.unwrap_or(id))
+        }
+    }
+}
+
+fn conflict(conn: &Connection, resource: &str, mode: LockMode) -> Result<Option<(String, String)>> {
+    let mut statement =
+        conn.prepare("SELECT resource_id,mode FROM operation_locks WHERE expires_at>?1")?;
+    let active = statement
+        .query_map([now()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (other, other_mode) in active {
+        if other.starts_with(READ_ONLY_PREFIX) || (mode == LockMode::Read && other_mode == "read") {
+            continue;
+        }
+        if scopes_overlap(conn, &decode_scope(resource), &decode_scope(&other))? {
+            let level = if other.starts_with(SHARED_WRITE_PREFIX) {
+                "SW"
+            } else if other_mode == "read" {
+                "SR"
+            } else {
+                "EW"
+            };
+            return Ok(Some((level.into(), other)));
+        }
+    }
+    Ok(None)
+}
+
+fn conflict_with_exclusive(conn: &Connection, resource: &str) -> Result<Option<String>> {
+    let mut statement = conn
+        .prepare("SELECT resource_id FROM operation_locks WHERE expires_at>?1 AND mode='write'")?;
+    for other in statement.query_map([now()], |row| row.get::<_, String>(0))? {
+        let other = other?;
+        if !other.starts_with(SHARED_WRITE_PREFIX)
+            && scopes_overlap(conn, &decode_scope(resource), &decode_scope(&other))?
+        {
+            return Ok(Some(other));
+        }
+    }
+    Ok(None)
+}
+
+/// 在已有写事务内检查受影响的资源，避免目录结构变更绕过范围锁。
+pub(crate) fn ensure_available(conn: &Connection, resource: &str, mode: LockMode) -> Result<()> {
+    if let Some((level, scope)) = conflict(conn, resource, mode)? {
+        Err(VeilError::LockConflict { level, scope })
+    } else {
+        Ok(())
+    }
+}
+
+/// 修改目录项只与覆盖该位置的目录租约冲突，不锁住同目录的其他文件。
+pub(crate) fn ensure_parent_available(conn: &Connection, parent: &str) -> Result<()> {
+    let mut statement = conn.prepare("SELECT resource_id,mode FROM operation_locks WHERE expires_at>?1 AND (resource_id LIKE 'veil-dir:%' OR resource_id LIKE 'veil-sw:veil-dir:%' OR resource_id=?2 OR resource_id=?3)")?;
+    let directories = statement
+        .query_map(
+            params![
+                now(),
+                CONTAINER_RESOURCE,
+                format!("{SHARED_WRITE_PREFIX}{CONTAINER_RESOURCE}")
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (directory, mode) in directories {
+        let level = if directory.starts_with(SHARED_WRITE_PREFIX) {
+            "SW"
+        } else if mode == "read" {
+            "SR"
+        } else {
+            "EW"
+        };
+        if matches!(decode_scope(&directory), Scope::Container) {
+            return Err(VeilError::LockConflict {
+                level: level.into(),
+                scope: directory,
+            });
+        }
+        if let Scope::Directory(identity) = decode_scope(&directory) {
+            if is_ancestor(conn, identity, parent)? {
+                return Err(VeilError::LockConflict {
+                    level: level.into(),
+                    scope: directory,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn directory_resource(id: &str) -> String {
+    format!("{DIRECTORY_PREFIX}{id}")
+}
+pub(crate) fn pending_resource(id: &str, parent: &str) -> String {
+    format!("{PENDING_PREFIX}{id}:{parent}")
 }
 #[derive(Clone)]
 pub struct LockManager {
@@ -74,6 +218,25 @@ impl std::fmt::Debug for Credential {
     }
 }
 impl Credential {
+    pub fn is_shared_write(&self) -> bool {
+        self.resource_id.starts_with(SHARED_WRITE_PREFIX)
+    }
+    /// 普通读取不保证读取内容稳定。
+    pub fn is_read_only(&self) -> bool {
+        self.resource_id.starts_with(READ_ONLY_PREFIX)
+    }
+    pub(crate) fn directory_id(&self) -> Option<&str> {
+        match decode_scope(&self.resource_id) {
+            Scope::Directory(id) => Some(id),
+            Scope::File { .. } | Scope::Container => None,
+        }
+    }
+    pub(crate) fn file_id(&self) -> Option<&str> {
+        match decode_scope(&self.resource_id) {
+            Scope::File { id, .. } => Some(id),
+            Scope::Directory(_) | Scope::Container => None,
+        }
+    }
     fn local_valid(&self) -> bool {
         let elapsed = self.issued.elapsed().as_millis() as i64;
         Instant::now() < self.valid_until && (now() - self.wall_issued - elapsed).abs() < 1000
@@ -96,6 +259,31 @@ impl LockManager {
         let owner = execution.runtime().current_context().owner().clone();
         self.acquire_for(resources, mode, owner, endpoint(&execution))
     }
+    pub fn acquire_directory(&self, identity: &str, mode: LockMode) -> Result<LeaseGuard> {
+        if identity.is_empty() {
+            return Err(invalid("目录锁资源不能为空"));
+        }
+        self.acquire(&[directory_resource(identity)], mode)
+    }
+    pub fn acquire_container(&self, mode: LockMode) -> Result<LeaseGuard> {
+        self.acquire(&[CONTAINER_RESOURCE.into()], mode)
+    }
+    pub(crate) fn acquire_directories(
+        &self,
+        identities: &[String],
+        mode: LockMode,
+    ) -> Result<LeaseGuard> {
+        if identities.is_empty() || identities.iter().any(|id| id.is_empty()) {
+            return Err(invalid("目录锁资源不能为空"));
+        }
+        self.acquire(
+            &identities
+                .iter()
+                .map(|id| directory_resource(id))
+                .collect::<Vec<_>>(),
+            mode,
+        )
+    }
     pub fn acquire_for(
         &self,
         resources: &[String],
@@ -106,12 +294,24 @@ impl LockManager {
         let mut resources = resources.to_vec();
         resources.sort();
         resources.dedup();
-        if resources.iter().any(|r| r.is_empty()) {
+        if resources.iter().any(|r| {
+            r.is_empty() || r.starts_with(SHARED_WRITE_PREFIX) || r.starts_with(READ_ONLY_PREFIX)
+        }) {
             return Err(invalid("文件锁资源不能为空"));
         }
         let start = Instant::now();
+        let mut last_conflict = None;
         loop {
-            self.check_wait(start)?;
+            if let Err(error) = self.check_wait(start) {
+                return Err(
+                    if matches!(&error, VeilError::WorkError(message) if message == "锁等待超时")
+                    {
+                        last_conflict.unwrap_or(error)
+                    } else {
+                        error
+                    },
+                );
+            }
             let timeout = self
                 .options
                 .timeout
@@ -121,7 +321,12 @@ impl LockManager {
             match self.try_acquire(&resources, mode, &owner, endpoint.as_ref(), timeout, start) {
                 Ok(credentials) => return LeaseGuard::start(self.clone(), credentials),
                 Err(VeilError::Database(ref e)) if busy(e) => {}
-                Err(VeilError::WorkError(ref e)) if e == "文件正忙" => {}
+                Err(error @ VeilError::LockConflict { .. }) => last_conflict = Some(error),
+                Err(VeilError::WorkError(ref message))
+                    if message == "锁等待超时" && last_conflict.is_some() =>
+                {
+                    return Err(last_conflict.unwrap());
+                }
                 Err(e) => return Err(e),
             }
             std::thread::sleep(BACKOFF);
@@ -153,9 +358,10 @@ impl LockManager {
         let mut db =
             ContainerDb::open_with_timeout(&self.directory, &self.password, None, timeout)?;
         let deadline = self.options.timeout.map(|d| start + d);
+        // 范围锁可能与祖先、后代的其他资源冲突，需检查全部租约。
         let dead = dead_locks_until(
             &db.conn,
-            Some(resources),
+            None,
             deadline,
             self.options.cancellation.as_deref(),
         )?;
@@ -165,39 +371,91 @@ impl LockManager {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         reap(&tx, &dead)?;
         self.check_wait(start)?;
+        let mut downgraded = Vec::with_capacity(resources.len());
         for resource in resources {
             self.check_wait(start)?;
-            let conflicts:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM operation_locks WHERE resource_type='file' AND resource_id=?1 AND (?2='write' OR mode='write'))",params![resource,mode.as_str()],|r|r.get(0))?;
-            if conflicts {
-                return Err(VeilError::WorkError("文件正忙".into()));
+            if let Scope::Directory(identity) = decode_scope(resource) {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM file_info WHERE id=?1 AND kind='directory')",
+                    [identity],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(invalid("目录锁目标不存在"));
+                }
             }
+            if let Scope::File {
+                id,
+                parent: Some(parent),
+            } = decode_scope(resource)
+            {
+                if id.is_empty() || parent.is_empty() {
+                    return Err(invalid("文件锁资源无效"));
+                }
+                let actual: Option<Option<String>> = tx
+                    .query_row("SELECT parent_id FROM file_info WHERE id=?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .optional()?;
+                match actual {
+                    Some(Some(actual)) if actual == parent => {}
+                    Some(_) => return Err(invalid("文件锁父目录不匹配")),
+                    None => {
+                        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM file_info WHERE id=?1 AND kind='directory')", [parent], |row| row.get(0))?;
+                        if !exists {
+                            return Err(invalid("文件锁父目录不存在"));
+                        }
+                    }
+                }
+            }
+            let read_only = mode == LockMode::ReadOnly;
+            if read_only {
+                if let Some(scope) = conflict_with_exclusive(&tx, resource)? {
+                    return Err(VeilError::LockConflict {
+                        level: "EW".into(),
+                        scope,
+                    });
+                }
+            } else if let Some((level, scope)) = conflict(&tx, resource, mode)? {
+                return Err(VeilError::LockConflict { level, scope });
+            }
+            downgraded.push(read_only);
         }
         let time = now();
         let issued = Instant::now();
         let mut credentials = Vec::new();
         let token = id();
-        for resource in resources {
+        for (resource, read_only) in resources.iter().zip(downgraded) {
+            let stored_resource = if mode == LockMode::SharedWrite {
+                format!("{SHARED_WRITE_PREFIX}{resource}")
+            } else if read_only {
+                format!("{READ_ONLY_PREFIX}{resource}")
+            } else {
+                resource.clone()
+            };
             let credential = Credential {
                 lock_id: id(),
-                resource_id: resource.clone(),
+                resource_id: stored_resource.clone(),
                 token: token.clone(),
                 owner: owner.clone(),
                 issued,
                 wall_issued: time,
                 valid_until: issued + LEASE,
             };
-            tx.execute(
-                "INSERT INTO operation_locks VALUES (?1,'file',?2,?3,?4,?5,?6,?7)",
-                params![
-                    credential.lock_id,
-                    resource,
-                    mode.as_str(),
-                    json(owner)?,
-                    endpoint.map(json).transpose()?,
-                    credential.token,
-                    time + LEASE.as_millis() as i64
-                ],
-            )?;
+            if !read_only {
+                tx.execute(
+                    "INSERT INTO operation_locks VALUES (?1,'file',?2,?3,?4,?5,?6,?7)",
+                    params![
+                        credential.lock_id,
+                        stored_resource,
+                        mode.as_str(),
+                        json(owner)?,
+                        endpoint.map(json).transpose()?,
+                        credential.token,
+                        time + LEASE.as_millis() as i64
+                    ],
+                )?;
+            }
             credentials.push(credential);
         }
         self.check_wait(start)?;
@@ -205,6 +463,9 @@ impl LockManager {
         Ok(credentials)
     }
     pub fn renew(&self, credentials: &mut [Credential]) -> Result<()> {
+        if credentials.iter().all(Credential::is_read_only) {
+            return Ok(());
+        }
         let mut db = ContainerDb::open(&self.directory, &self.password, None)?;
         let tx = db
             .conn
@@ -229,6 +490,9 @@ impl LockManager {
         Ok(())
     }
     pub fn release(&self, credentials: &[Credential]) -> Result<()> {
+        if credentials.iter().all(Credential::is_read_only) {
+            return Ok(());
+        }
         let mut db = ContainerDb::open(&self.directory, &self.password, None)?;
         let tx = db
             .conn
@@ -251,6 +515,9 @@ impl LockManager {
         owner: ExecutionOwner,
         endpoint: Option<&ExecutionEndpoint>,
     ) -> Result<Vec<Credential>> {
+        if credentials.iter().any(Credential::is_read_only) {
+            return Err(invalid("普通读取不支持锁交接"));
+        }
         let mut db = ContainerDb::open(&self.directory, &self.password, None)?;
         let tx = db
             .conn
@@ -295,6 +562,21 @@ impl LockManager {
     }
 }
 pub(crate) fn validate(conn: &Connection, c: &Credential, mode: Option<LockMode>) -> Result<()> {
+    if c.is_read_only() {
+        return if mode.is_none() || mode == Some(LockMode::ReadOnly) {
+            Ok(())
+        } else {
+            Err(invalid("锁类型不匹配"))
+        };
+    }
+    if let Some(mode) = mode {
+        if (mode == LockMode::SharedWrite) != c.resource_id.starts_with(SHARED_WRITE_PREFIX)
+            || (mode == LockMode::ReadOnly && !c.is_read_only())
+            || (mode == LockMode::Write && c.is_read_only())
+        {
+            return Err(invalid("锁类型不匹配"));
+        }
+    }
     if !c.local_valid() {
         return Err(invalid("文件锁租约已失效，请重新申请"));
     }
@@ -418,6 +700,20 @@ impl LeaseGuard {
     pub fn release(mut self) -> Result<()> {
         self.stop_worker();
         self.manager.release(&self.credentials()?)
+    }
+    /// 数据库改密成功后，使用新密码释放同一组租约。
+    pub(crate) fn release_after_rekey(mut self, password: &str) -> Result<()> {
+        self.stop_worker();
+        let credentials = self.credentials()?;
+        let mut manager = self.manager.clone();
+        manager.password = Arc::new(Zeroizing::new(password.to_owned()));
+        let result = manager.release(&credentials);
+        if result.is_ok() {
+            if let Ok(mut owned) = self.credentials.lock() {
+                owned.clear();
+            }
+        }
+        result
     }
     pub fn handoff(
         mut self,

@@ -20,6 +20,10 @@ struct PreviewSheet: View {
                 Button { store.closePreview() } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary).font(.title2) }
                     .buttonStyle(VeilPlainButtonStyle()).keyboardShortcut(.cancelAction).accessibilityLabel("关闭预览")
             }
+            if asset.unstable {
+                Label("读取期间内容可能发生变化。", systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             if let error = asset.error {
                 ContentUnavailableView("无法预览", systemImage: "doc.questionmark", description: Text(error))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

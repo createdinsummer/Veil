@@ -7,7 +7,7 @@ use std::{
 use veil_service::session::{ServiceRequest, ServiceResponse, VeilService};
 use zeroize::{Zeroize, Zeroizing};
 
-/// kind：0 为 JSON，1 为 UTF-8 错误，2 为文件二进制。
+/// kind：0 为 JSON，1 为 UTF-8 错误，2 为文件二进制，3 为不稳定的文件二进制，4 为不稳定的导出结果。
 /// 所有返回缓冲区均由 veil_buffer_free 释放，调用方不可自行 free。
 #[repr(C)]
 pub struct VeilBuffer {
@@ -86,6 +86,12 @@ enum Request {
     SetUnlockCache {
         seconds: u64,
     },
+    SetImportCommitInterval {
+        seconds: u64,
+    },
+    SetImportCommitCount {
+        count: u64,
+    },
 }
 
 fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String> {
@@ -143,6 +149,20 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
                 value: &value,
             }));
         }
+        Request::SetImportCommitInterval { seconds } => {
+            let value = serde_json::json!(seconds);
+            return serialize(service.execute(ServiceRequest::SetUserSetting {
+                key: "import_commit_interval_seconds",
+                value: &value,
+            }));
+        }
+        Request::SetImportCommitCount { count } => {
+            let value = serde_json::json!(count);
+            return serialize(service.execute(ServiceRequest::SetUserSetting {
+                key: "import_commit_count",
+                value: &value,
+            }));
+        }
     };
     serialize(service.execute(request))
 }
@@ -157,6 +177,8 @@ fn serialize(
         ServiceResponse::Recents(value) => serde_json::to_vec(&value),
         ServiceResponse::Setting(value) => serde_json::to_vec(&value),
         ServiceResponse::Preview(bytes) => return Ok(VeilBuffer::new(bytes, 2)),
+        ServiceResponse::PreviewUnstable(bytes) => return Ok(VeilBuffer::new(bytes, 3)),
+        ServiceResponse::ExportUnstable => return Ok(VeilBuffer::new(Vec::new(), 4)),
         ServiceResponse::Done | ServiceResponse::Locked => Ok(b"null".to_vec()),
         _ => return Err("服务返回了不支持的响应".into()),
     }

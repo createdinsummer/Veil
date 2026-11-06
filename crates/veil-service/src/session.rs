@@ -212,6 +212,8 @@ pub enum ServiceResponse {
     Recents(Vec<crate::storage::app::RecentContainer>),
     Setting(serde_json::Value),
     Preview(Vec<u8>),
+    PreviewUnstable(Vec<u8>),
+    ExportUnstable,
     Done,
     Operation(crate::operations::ContainerOperationResult),
     ContainerPrepared(crate::commands::ContainerHandle),
@@ -282,10 +284,56 @@ pub enum ServiceError {
     UnexpectedResponse,
 }
 
+#[derive(Clone)]
 struct Session {
     path: PathBuf,
     veil_id: String,
     password: Zeroizing<String>,
+}
+
+fn import_one_file(
+    manager: &VeilManager,
+    file: &crate::veil_ops::AddFileSpec,
+    password: &str,
+    directory_guard: Option<(
+        &crate::storage::locks::LeaseGuard,
+        &crate::veil_ops::LockedDirectory,
+    )>,
+    transaction_gate: &Mutex<()>,
+    batch: &crate::veil_ops::ImportBatchContext,
+) -> veil_core::error::Result<bool> {
+    let result = manager.add_files_for_import(
+        std::slice::from_ref(file),
+        password,
+        directory_guard,
+        transaction_gate,
+        batch,
+    );
+    match result {
+        Ok(_) => Ok(false),
+        Err(veil_core::error::VeilError::FileAlreadyExists(_)) => {
+            veil_core::progress::verifying();
+            let result = if let Some((guard, id)) = directory_guard {
+                manager.matches_existing_file_in_directory(
+                    &file.target,
+                    &file.source,
+                    password,
+                    guard,
+                    id,
+                )
+            } else {
+                manager.matches_existing_file(&file.target, &file.source, password)
+            };
+            match result {
+                Ok(true) => Ok(true),
+                Ok(false) | Err(veil_core::error::VeilError::FileNotFound(_)) => Err(
+                    veil_core::error::VeilError::FileAlreadyExists(file.target.clone()),
+                ),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Serialize)]
@@ -527,11 +575,21 @@ impl VeilService {
                 )
                 .map(ServiceResponse::Container),
             ServiceRequest::PreviewSessionFile { name } => {
-                self.preview_file(&name).map(ServiceResponse::Preview)
+                self.preview_file(&name).map(|(bytes, unstable)| {
+                    if unstable {
+                        ServiceResponse::PreviewUnstable(bytes)
+                    } else {
+                        ServiceResponse::Preview(bytes)
+                    }
+                })
             }
             ServiceRequest::ExportSessionFile { name, destination } => {
-                self.export_file(&name, &destination)?;
-                Ok(ServiceResponse::Done)
+                let unstable = self.export_file(&name, &destination)?;
+                Ok(if unstable {
+                    ServiceResponse::ExportUnstable
+                } else {
+                    ServiceResponse::Done
+                })
             }
             ServiceRequest::ExportSessionPackage { destination } => {
                 let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
@@ -697,6 +755,7 @@ impl VeilService {
         name: String,
         password: String,
     ) -> Result<ContainerView, ServiceError> {
+        let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let password = Zeroizing::new(password);
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 100 {
@@ -746,6 +805,7 @@ impl VeilService {
     }
 
     fn open(&self, path: String, password: String) -> Result<ContainerView, ServiceError> {
+        let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let password = Zeroizing::new(password);
         if password.is_empty() {
             return Err(ServiceError::InvalidInput("请输入容器密码"));
@@ -790,6 +850,27 @@ impl VeilService {
         directory: String,
         expected_container: &Path,
     ) -> Result<ContainerView, ServiceError> {
+        let settings = crate::storage::app::AppStore::global()?;
+        let commit_interval =
+            std::time::Duration::from_secs(settings.import_commit_interval_seconds()?);
+        let commit_count = settings.import_commit_count()?;
+        self.import_sources_with_interval(
+            sources,
+            directory,
+            expected_container,
+            commit_interval,
+            commit_count,
+        )
+    }
+
+    fn import_sources_with_interval(
+        &self,
+        sources: Vec<String>,
+        directory: String,
+        expected_container: &Path,
+        commit_interval: std::time::Duration,
+        commit_count: usize,
+    ) -> Result<ContainerView, ServiceError> {
         if sources.is_empty() {
             return Err(ServiceError::InvalidInput("请选择文件或文件夹"));
         }
@@ -798,12 +879,18 @@ impl VeilService {
         } else {
             crate::veil_ops::normalize_veil_dir(&directory)?
         };
-        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
-        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let session = self
+            .0
+            .lock()
+            .map_err(|_| ServiceError::StateUnavailable)?
+            .clone()
+            .ok_or(ServiceError::NotOpen)?;
         if session.path != expected_container {
             return Err(ServiceError::InvalidInput("容器已切换，请重新导入"));
         }
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
         let mut files = Vec::new();
+        let mut directory_paths = Vec::new();
         let mut targets = std::collections::HashSet::new();
         for source in sources {
             if veil_core::progress::check_cancelled().is_err() {
@@ -817,7 +904,8 @@ impl VeilService {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or(ServiceError::InvalidInput("文件名称无效"))?;
-            let destination = if path.is_dir() {
+            let is_directory = path.is_dir();
+            let destination = if is_directory {
                 if directory.is_empty() {
                     name.to_owned()
                 } else {
@@ -828,6 +916,9 @@ impl VeilService {
             } else {
                 format!("{directory}/")
             };
+            if is_directory {
+                directory_paths.push(destination.clone());
+            }
             let collected = crate::import::collect_add_specs(
                 path,
                 if destination.is_empty() {
@@ -863,8 +954,6 @@ impl VeilService {
             }
             total = total.and_then(|total| total.checked_add(file.source.metadata().ok()?.len()));
         }
-        veil_core::progress::start(total);
-        veil_core::progress::set_file_count(files.len());
         for target in &targets {
             if veil_core::progress::check_cancelled().is_err() {
                 return Err(ServiceError::ImportCancelled {
@@ -878,62 +967,228 @@ impl VeilService {
                 }
             }
         }
-        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-        let mut completed = 0;
-        let mut skipped = 0;
-        for file in files {
-            if veil_core::progress::check_cancelled().is_err() {
-                return Err(ServiceError::ImportCancelled { completed, skipped });
-            }
-            veil_core::progress::begin_file(&file.target);
-            let outcome = (|| -> veil_core::error::Result<bool> {
-                match manager.path_kind(&file.target, session.password.as_str())? {
-                    crate::veil_ops::ContainerPathKind::Missing(_) => {
-                        manager.add_files_without_cleanup(
-                            std::slice::from_ref(&file),
-                            session.password.as_str(),
-                        )?;
-                        Ok(false)
-                    }
-                    crate::veil_ops::ContainerPathKind::File(_) => {
-                        veil_core::progress::verifying();
-                        if manager.matches_existing_file(
-                            &file.target,
-                            &file.source,
-                            session.password.as_str(),
-                        )? {
-                            Ok(true)
-                        } else {
-                            Err(veil_core::error::VeilError::FileAlreadyExists(
-                                file.target.clone(),
-                            ))
-                        }
-                    }
-                    crate::veil_ops::ContainerPathKind::Directory(_) => Err(
-                        veil_core::error::VeilError::FileAlreadyExists(file.target.clone()),
-                    ),
-                }
-            })();
-            let was_skipped = match outcome {
-                Ok(value) => value,
-                Err(source) => {
-                    if matches!(source, veil_core::error::VeilError::Cancelled) {
-                        return Err(ServiceError::ImportCancelled { completed, skipped });
-                    }
-                    let _ = manager.cleanup(session.password.as_str());
-                    return Err(ServiceError::ImportFileFailed {
-                        name: file.target.clone(),
-                        completed,
-                        skipped,
-                        source,
+        directory_paths.sort();
+        directory_paths.dedup();
+        let (directory_guard, locked_directories) = if directory_paths.is_empty() {
+            (None, Vec::new())
+        } else {
+            match manager.lock_import_directories(
+                &directory_paths,
+                session.password.as_str(),
+                self.1.cancellation_flag(),
+            ) {
+                Ok((guard, directories)) => (Some(Arc::new(guard)), directories),
+                Err(_) if veil_core::progress::check_cancelled().is_err() => {
+                    return Err(ServiceError::ImportCancelled {
+                        completed: 0,
+                        skipped: 0,
                     });
                 }
-            };
-            completed += 1;
-            if was_skipped {
-                skipped += 1;
+                Err(error) => return Err(error.into()),
             }
-            veil_core::progress::file_done(was_skipped);
+        };
+        veil_core::progress::start(total);
+        veil_core::progress::set_file_count(files.len());
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let worker_count = veil_core::progress::worker_count(files.len());
+        veil_core::progress::set_parallel_workers(worker_count);
+        let next = AtomicUsize::new(0);
+        let stopped = AtomicBool::new(false);
+        let failure = Mutex::new(None);
+        let transaction_gate = Mutex::new(());
+        let owner = crate::execution::ExecutionService::global()
+            .map_err(|source| ServiceError::Io {
+                operation: "无法初始化导入执行上下文",
+                source,
+            })?
+            .runtime()
+            .current_context()
+            .owner()
+            .clone();
+        struct WorkerEnd<'a> {
+            remaining: Arc<AtomicUsize>,
+            stopped: &'a AtomicBool,
+        }
+        impl Drop for WorkerEnd<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.stopped.store(true, Ordering::Release);
+                }
+                self.remaining.fetch_sub(1, Ordering::Release);
+            }
+        }
+        std::thread::scope(|scope| {
+            // 队列及待提交批次均限制数量，避免长间隔导入时无限累积租约。
+            const QUEUE_LIMIT: usize = 8;
+            let (sender, receiver) = std::sync::mpsc::sync_channel(QUEUE_LIMIT);
+            let remaining_workers = Arc::new(AtomicUsize::new(worker_count));
+            for _ in 0..worker_count {
+                let progress = self.1.clone();
+                let manager = &manager;
+                let files = &files;
+                let next = &next;
+                let stopped = &stopped;
+                let failure = &failure;
+                let transaction_gate = &transaction_gate;
+                let password = session.password.as_str();
+                let directory_guard = directory_guard.as_ref();
+                let locked_directories = &locked_directories;
+                let remaining_workers = Arc::clone(&remaining_workers);
+                let context = crate::veil_ops::ImportBatchContext {
+                    sender: sender.clone(),
+                    directory_guard: directory_guard.cloned(),
+                    owner: owner.clone(),
+                };
+                scope.spawn(move || {
+                    let _end = WorkerEnd {
+                        remaining: remaining_workers,
+                        stopped,
+                    };
+                    let _attachment = progress.attach();
+                    loop {
+                        if stopped.load(Ordering::Acquire)
+                            || veil_core::progress::check_cancelled().is_err()
+                        {
+                            break;
+                        }
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(file) = files.get(index) else { break };
+                        veil_core::progress::begin_file(&file.target);
+                        let directory = locked_directories
+                            .iter()
+                            .filter(|directory| directory.covers(&file.target))
+                            .max_by_key(|directory| directory.path_len());
+                        let scoped_guard = directory_guard.map(Arc::as_ref).zip(directory);
+                        match import_one_file(
+                            manager,
+                            file,
+                            password,
+                            scoped_guard,
+                            transaction_gate,
+                            &context,
+                        ) {
+                            Ok(true) => veil_core::progress::file_done(true),
+                            Ok(false) => {}
+                            Err(veil_core::error::VeilError::Cancelled) => {
+                                stopped.store(true, Ordering::Release);
+                                break;
+                            }
+                            Err(error) => {
+                                stopped.store(true, Ordering::Release);
+                                let mut failure = failure.lock().unwrap_or_else(|e| e.into_inner());
+                                if failure.is_none() {
+                                    *failure = Some((file.target.clone(), error));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            let mut pending = Vec::new();
+            let mut deadline = None;
+            loop {
+                let remaining = deadline
+                    .map(|at: std::time::Instant| {
+                        at.saturating_duration_since(std::time::Instant::now())
+                    })
+                    .unwrap_or(std::time::Duration::from_millis(20));
+                let wait = remaining.min(std::time::Duration::from_millis(20));
+                let mut disconnected = false;
+                if pending.len() < commit_count {
+                    match receiver.recv_timeout(wait) {
+                        Ok(item) => {
+                            if pending.is_empty() {
+                                deadline = Some(std::time::Instant::now() + commit_interval);
+                            }
+                            pending.push(item);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                } else if !wait.is_zero() {
+                    std::thread::sleep(wait);
+                }
+                if !pending.is_empty() {
+                    if remaining_workers.load(Ordering::Acquire) == 0 {
+                        while pending.len() < commit_count {
+                            match receiver.try_recv() {
+                                Ok(item) => pending.push(item),
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    let stop = stopped.load(Ordering::Acquire)
+                        || veil_core::progress::check_cancelled().is_err();
+                    if stop
+                        || disconnected
+                        || pending.len() >= commit_count
+                        || remaining_workers.load(Ordering::Acquire) == 0
+                        || deadline.is_some_and(|at| std::time::Instant::now() >= at)
+                    {
+                        let batch = std::mem::take(&mut pending);
+                        deadline = None;
+                        if stop {
+                            VeilManager::cancel_import_batch(batch);
+                        } else {
+                            let first_target = batch[0].target().to_owned();
+                            let _gate = transaction_gate
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if let Err(error) = manager.commit_import_batch(
+                                batch,
+                                session.password.as_str(),
+                                &stopped,
+                            ) {
+                                stopped.store(true, Ordering::Release);
+                                if !matches!(error, veil_core::error::VeilError::Cancelled) {
+                                    let name = match &error {
+                                        veil_core::error::VeilError::ImportBatchFailed {
+                                            file,
+                                            ..
+                                        } => file.clone(),
+                                        _ => first_target,
+                                    };
+                                    let mut failure =
+                                        failure.lock().unwrap_or_else(|error| error.into_inner());
+                                    if failure.is_none() {
+                                        *failure = Some((name, error));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if disconnected {
+                    break;
+                }
+            }
+        });
+        if let Some(guard) = directory_guard.as_ref() {
+            if let Ok(credentials) = guard.credentials() {
+                for credential in credentials {
+                    let _ = std::fs::remove_dir(
+                        manager.veil_dir.join(".staging").join(credential.lock_id),
+                    );
+                }
+            }
+        }
+        let progress = self.1.snapshot();
+        let completed = progress.completed_files;
+        let skipped = progress.skipped_files;
+        if let Some((name, source)) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            drop(directory_guard);
+            let _ = manager.cleanup(session.password.as_str());
+            return Err(ServiceError::ImportFileFailed {
+                name,
+                completed,
+                skipped,
+                source,
+            });
+        }
+        if progress.cancel_requested && completed < files.len() as u64 {
+            return Err(ServiceError::ImportCancelled { completed, skipped });
         }
         veil_core::progress::finalizing();
         let _ = manager.cleanup(session.password.as_str());
@@ -943,29 +1198,32 @@ impl VeilService {
         ))
     }
 
-    fn preview_file(&self, name: &str) -> Result<Vec<u8>, ServiceError> {
+    fn preview_file(&self, name: &str) -> Result<(Vec<u8>, bool), ServiceError> {
         if file_kind(name).1.is_none() {
             return Err(ServiceError::InvalidInput("暂不支持预览此文件类型"));
         }
         let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-        Ok(manager.read_file_bytes(name, session.password.as_str(), 16 * 1024 * 1024)?)
+        Ok(manager.read_file_bytes_with_status(
+            name,
+            session.password.as_str(),
+            16 * 1024 * 1024,
+        )?)
     }
 
-    fn export_file(&self, name: &str, destination: &str) -> Result<(), ServiceError> {
+    fn export_file(&self, name: &str, destination: &str) -> Result<bool, ServiceError> {
         if destination.is_empty() {
             return Err(ServiceError::InvalidInput("请选择导出位置"));
         }
         let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-        manager.extract_file_without_overwrite(
+        Ok(manager.extract_file_without_overwrite_with_status(
             name,
             Path::new(destination),
             session.password.as_str(),
-        )?;
-        Ok(())
+        )?)
     }
 
     fn remove_path(&self, name: &str) -> Result<ContainerView, ServiceError> {
@@ -980,6 +1238,7 @@ impl VeilService {
     }
 
     fn lock(&self) -> Result<(), ServiceError> {
+        let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = None;
         *session = None;
@@ -1042,6 +1301,528 @@ mod tests {
     use super::*;
 
     #[test]
+    fn import_flushes_on_interval_finishes_last_batch_and_cleans_cancelled_queue() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        for scenario in ["timer", "count", "last", "cancel"] {
+            let root = tempfile::TempDir::new().unwrap();
+            let path = root.path().join("container");
+            let manager = VeilManager::new(path.clone());
+            let metadata = manager.init_veil("test", "password").unwrap();
+            let app = VeilService::default();
+            *app.0.lock().unwrap() = Some(Session {
+                path: path.clone(),
+                veil_id: metadata.veil_id.clone(),
+                password: Zeroizing::new("password".into()),
+            });
+            let count = if scenario == "last" { 1 } else { 24 };
+            let sources = (0..count)
+                .map(|index| {
+                    let source = root.path().join(format!("file-{index}"));
+                    std::fs::write(&source, vec![index as u8; 4096]).unwrap();
+                    source.to_string_lossy().into_owned()
+                })
+                .collect();
+            let worker = app.clone();
+            let container = path.clone();
+            let interval = if scenario == "timer" {
+                std::time::Duration::from_millis(50)
+            } else {
+                std::time::Duration::from_secs(10)
+            };
+            let threshold = if scenario == "count" { 2 } else { 100 };
+            let start = std::time::Instant::now();
+            let task = std::thread::spawn(move || {
+                let _scope = worker.1.begin("import");
+                worker.import_sources_with_interval(
+                    sources,
+                    String::new(),
+                    &container,
+                    interval,
+                    threshold,
+                )
+            });
+            if scenario == "timer" {
+                let limit = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                while app.transfer_progress().completed_files == 0 && !task.is_finished() {
+                    assert!(std::time::Instant::now() < limit);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                assert!(app.transfer_progress().completed_files > 0);
+                assert!(app.transfer_progress().completed_files < count as u64);
+                assert!(!task.is_finished());
+            }
+            if scenario == "count" {
+                let limit = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                while app.transfer_progress().completed_files < 2 && !task.is_finished() {
+                    assert!(std::time::Instant::now() < limit);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                assert!(app.transfer_progress().completed_files >= 2);
+                assert!(app.transfer_progress().completed_files < count as u64);
+                assert!(!task.is_finished());
+                assert!(start.elapsed() < interval);
+            }
+            if scenario == "cancel" {
+                let limit = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                while app.transfer_progress().pending_files == 0 && !task.is_finished() {
+                    assert!(std::time::Instant::now() < limit);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                assert_eq!(app.transfer_progress().completed_files, 0);
+                assert!(manager.read_meta("password").unwrap().files.is_empty());
+                assert!(app.cancel_transfer());
+            }
+            let result = task.join().unwrap();
+            assert_eq!(app.transfer_progress().pending_files, 0);
+            if scenario == "cancel" {
+                assert!(matches!(
+                    result,
+                    Err(ServiceError::ImportCancelled { completed: 0, .. })
+                ));
+                assert!(manager.read_meta("password").unwrap().files.is_empty());
+                assert_eq!(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "enc"))
+                        .count(),
+                    0
+                );
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(app.transfer_progress().completed_files, count as u64);
+                if scenario == "timer" {
+                    assert!(start.elapsed() >= std::time::Duration::from_millis(40));
+                } else if scenario == "last" {
+                    assert!(start.elapsed() < interval);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encrypted_import_records_commit_together_or_roll_back_together() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        for fail in [false, true] {
+            let root = tempfile::TempDir::new().unwrap();
+            let manager = VeilManager::new(root.path().join("container"));
+            manager.init_veil("test", "password").unwrap();
+            let paths = [root.path().join("good"), root.path().join("bad")];
+            for path in &paths {
+                std::fs::write(path, b"content").unwrap();
+            }
+            let gate = Mutex::new(());
+            let owner = crate::execution::ExecutionService::global()
+                .unwrap()
+                .runtime()
+                .current_context()
+                .owner()
+                .clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+            std::thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for path in &paths {
+                    let sender = sender.clone();
+                    let gate = &gate;
+                    let manager = &manager;
+                    let owner = owner.clone();
+                    workers.push(scope.spawn(move || {
+                        let context = crate::veil_ops::ImportBatchContext {
+                            sender,
+                            directory_guard: None,
+                            owner,
+                        };
+                        let spec = crate::veil_ops::AddFileSpec::new(
+                            path,
+                            path.file_name().unwrap().to_str().unwrap(),
+                        )
+                        .without_overwrite();
+                        import_one_file(manager, &spec, "password", None, gate, &context)
+                    }));
+                }
+                let first = receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                let mut second = receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap();
+                for worker in workers {
+                    assert!(worker.join().unwrap().is_ok());
+                }
+                // 加密线程已退出时，待提交租约仍归属于整个导入任务。
+                if !fail {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                }
+                manager.cleanup("password").unwrap();
+                let failed_name = fail.then(|| second.invalidate_key());
+                assert!(manager.read_meta("password").unwrap().files.is_empty());
+                let result = manager.commit_import_batch(
+                    vec![first, second],
+                    "password",
+                    &std::sync::atomic::AtomicBool::new(false),
+                );
+                if let Some(name) = &failed_name {
+                    assert!(
+                        matches!(result, Err(veil_core::error::VeilError::ImportBatchFailed { file, .. }) if &file == name)
+                    );
+                } else {
+                    assert!(result.is_ok());
+                }
+            });
+            assert_eq!(
+                manager.read_meta("password").unwrap().files.len(),
+                if fail { 0 } else { 2 }
+            );
+            if fail {
+                assert_eq!(
+                    std::fs::read_dir(&manager.veil_dir)
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "enc"))
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preview_can_read_during_shared_write_and_export_uses_shared_write() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::tempdir().unwrap();
+        let manager = VeilManager::new(root.path().join("container"));
+        manager.init_veil("test", "password").unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        manager
+            .add_files(
+                &[crate::veil_ops::AddFileSpec::new(&source, "file.txt")],
+                "password",
+            )
+            .unwrap();
+        let db = crate::storage::container::ContainerDb::open(&manager.veil_dir, "password", None)
+            .unwrap();
+        let file = db.resolve("file.txt").unwrap().unwrap().id;
+        let veil_id = db.info().unwrap().0;
+        drop(db);
+        let app = VeilService::default();
+        *app.0.lock().unwrap() = Some(Session {
+            path: manager.veil_dir.clone(),
+            veil_id,
+            password: Zeroizing::new("password".into()),
+        });
+        let guard = crate::storage::locks::LockManager::new(&manager.veil_dir, "password")
+            .acquire(&[file], crate::storage::locks::LockMode::SharedWrite)
+            .unwrap();
+        assert!(
+            matches!(app.execute(ServiceRequest::PreviewSessionFile { name: "file.txt".into() }).unwrap(), ServiceResponse::PreviewUnstable(bytes) if bytes == b"content")
+        );
+        let db = crate::storage::container::ContainerDb::open(&manager.veil_dir, "password", None)
+            .unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM operation_locks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(db);
+        drop(guard);
+        assert!(matches!(
+            app.execute(ServiceRequest::ExportSessionFile {
+                name: "file.txt".into(),
+                destination: root.path().join("out").to_string_lossy().into_owned()
+            })
+            .unwrap(),
+            ServiceResponse::Done
+        ));
+    }
+
+    #[test]
+    fn folder_workers_reuse_the_directory_lease_without_file_leases() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let manager = VeilManager::new(root.path().join("container"));
+        manager.init_veil("test", "password").unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (guard, directories) = manager
+            .lock_import_directories(&["album".into()], "password", cancel)
+            .unwrap();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"content").unwrap();
+        manager
+            .add_files_in_directory(
+                &[crate::veil_ops::AddFileSpec::new(&source, "album/file")],
+                "password",
+                &guard,
+                &directories[0],
+            )
+            .unwrap();
+        assert!(
+            manager
+                .add_files_in_directory(
+                    &[crate::veil_ops::AddFileSpec::new(&source, "other/file")],
+                    "password",
+                    &guard,
+                    &directories[0],
+                )
+                .is_err()
+        );
+        let db = crate::storage::container::ContainerDb::open(&manager.veil_dir, "password", None)
+            .unwrap();
+        let resources: Vec<String> = {
+            let mut query = db
+                .conn
+                .prepare("SELECT resource_id FROM operation_locks")
+                .unwrap();
+            query
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            resources,
+            [guard.credentials().unwrap()[0].resource_id.clone()]
+        );
+        drop(db);
+        drop(guard);
+        assert_eq!(
+            manager
+                .read_file_bytes("album/file", "password", 100)
+                .unwrap(),
+            b"content"
+        );
+    }
+
+    #[test]
+    fn folder_import_uses_one_directory_lease_with_parallel_workers() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let folder = root.path().join("album");
+        std::fs::create_dir(&folder).unwrap();
+        for index in 0..24 {
+            std::fs::write(
+                folder.join(format!("file-{index}")),
+                vec![index as u8; 4096],
+            )
+            .unwrap();
+        }
+        app.execute(ServiceRequest::ImportSessionFiles {
+            sources: vec![folder.to_string_lossy().into_owned()],
+            directory: String::new(),
+        })
+        .unwrap();
+        assert_eq!(app.transfer_progress().completed_files, 24);
+        for index in [0, 11, 23] {
+            assert_eq!(
+                manager
+                    .read_file_bytes(&format!("album/file-{index}"), "password", 4096)
+                    .unwrap(),
+                vec![index as u8; 4096]
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_file_and_multiple_folder_imports_use_their_own_scopes() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let standalone = root.path().join("single.txt");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("a"), b"a").unwrap();
+        std::fs::write(second.join("b"), b"b").unwrap();
+        std::fs::write(&standalone, b"single").unwrap();
+        app.execute(ServiceRequest::ImportSessionFiles {
+            sources: [&first, &second, &standalone]
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            directory: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            manager.read_file_bytes("first/a", "password", 100).unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            manager
+                .read_file_bytes("second/b", "password", 100)
+                .unwrap(),
+            b"b"
+        );
+        assert_eq!(
+            manager
+                .read_file_bytes("single.txt", "password", 100)
+                .unwrap(),
+            b"single"
+        );
+    }
+
+    #[test]
+    fn waiting_for_directory_lock_can_be_cancelled() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        manager.create_directory("input", "password").unwrap();
+        let root_id = crate::storage::container::ContainerDb::open(&path, "password", None)
+            .unwrap()
+            .root()
+            .unwrap()
+            .id;
+        let external = crate::storage::locks::LockManager::new(&path, "password")
+            .acquire_directory(&root_id, crate::storage::locks::LockMode::Write)
+            .unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let folder = root.path().join("input");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("file"), b"test").unwrap();
+        let worker = app.clone();
+        let task = std::thread::spawn(move || {
+            worker.execute(ServiceRequest::ImportSessionFiles {
+                sources: vec![folder.to_string_lossy().into_owned()],
+                directory: String::new(),
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.transfer_progress().phase != "preparing" && !task.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let reader = app.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let refresh = std::thread::spawn(move || {
+            let _ = sender.send(reader.execute(ServiceRequest::RefreshContainer).is_ok());
+        });
+        let refreshed = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        assert!(app.cancel_transfer());
+        assert!(matches!(
+            task.join().unwrap(),
+            Err(ServiceError::ImportCancelled { completed: 0, .. })
+        ));
+        refresh.join().unwrap();
+        assert_eq!(refreshed.ok(), Some(true));
+        assert_eq!(app.transfer_progress().phase, "cancelled");
+        drop(external);
+    }
+
+    #[test]
+    fn shared_directory_lease_can_be_renewed_before_file_commit() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let manager = VeilManager::new(root.path().join("container"));
+        manager.init_veil("test", "password").unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (guard, directories) = manager
+            .lock_import_directories(&[String::new()], "password", cancel)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        let source = root.path().join("file");
+        std::fs::write(&source, b"content").unwrap();
+        manager
+            .add_files_in_directory(
+                &[crate::veil_ops::AddFileSpec::new(&source, "file")],
+                "password",
+                &guard,
+                &directories[0],
+            )
+            .unwrap();
+        drop(guard);
+        assert_eq!(
+            manager.read_file_bytes("file", "password", 100).unwrap(),
+            b"content"
+        );
+    }
+
+    #[test]
+    fn parallel_small_file_import_keeps_every_file_and_reports_progress() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let mut sources = Vec::new();
+        for index in 0..12 {
+            let path = root.path().join(format!("file-{index}.txt"));
+            std::fs::write(&path, vec![index as u8; 4096]).unwrap();
+            sources.push(path.to_string_lossy().into_owned());
+        }
+        app.execute(ServiceRequest::ImportSessionFiles {
+            sources,
+            directory: "nested".into(),
+        })
+        .unwrap();
+        let progress = app.transfer_progress();
+        assert_eq!(
+            (
+                progress.phase,
+                progress.completed_files,
+                progress.total_files
+            ),
+            ("completed", 12, 12)
+        );
+        assert_eq!(
+            (progress.processed_bytes, progress.total_bytes),
+            (12 * 4096, Some(12 * 4096))
+        );
+        assert!((1..=4).contains(&progress.parallel_workers));
+        assert_eq!(manager.read_meta("password").unwrap().files.len(), 12);
+        for index in [0, 5, 11] {
+            assert_eq!(
+                manager
+                    .read_file_bytes(&format!("nested/file-{index}.txt"), "password", 4096)
+                    .unwrap(),
+                vec![index as u8; 4096]
+            );
+        }
+    }
+
+    #[test]
     fn cancelling_import_preserves_committed_files_and_allows_retry() {
         #[cfg(debug_assertions)]
         veil_core::kdf::enable_fast_test_kdf();
@@ -1057,7 +1838,7 @@ mod tests {
             password: Zeroizing::new("password".into()),
         });
         let mut sources = Vec::new();
-        for index in 0..6 {
+        for index in 0..24 {
             let path = root.path().join(format!("file-{index}.txt"));
             std::fs::write(&path, vec![index as u8; 1024 * 1024]).unwrap();
             sources.push(path.to_string_lossy().into_owned());
@@ -1081,7 +1862,7 @@ mod tests {
             Err(ServiceError::ImportCancelled { completed, .. }) => completed,
             _ => panic!("预期中止导入"),
         };
-        assert!(completed > 0 && completed < 6);
+        assert!(completed > 0 && completed < 24);
         assert_eq!(app.transfer_progress().phase, "cancelled");
         assert_eq!(
             manager.read_meta("password").unwrap().files.len(),
@@ -1092,7 +1873,7 @@ mod tests {
             directory: String::new(),
         })
         .unwrap();
-        assert_eq!(manager.read_meta("password").unwrap().files.len(), 6);
+        assert_eq!(manager.read_meta("password").unwrap().files.len(), 24);
         assert_eq!(app.transfer_progress().skipped_files, completed);
     }
 
@@ -1116,6 +1897,12 @@ mod tests {
                 "password",
             )
             .unwrap();
+        assert_eq!(
+            std::fs::read_dir(manager.veil_dir.join(".staging"))
+                .unwrap()
+                .count(),
+            0
+        );
         assert_eq!(progress.snapshot().phase, "processing");
         veil_core::progress::file_done(false);
         veil_core::progress::begin_file("next.txt");
@@ -1229,30 +2016,31 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("预期同名文件冲突"),
         };
-        assert!(matches!(
-            error,
+        let completed = match error {
             ServiceError::ImportFileFailed {
-                completed: 1,
+                completed,
                 skipped: 0,
                 ..
-            }
-        ));
+            } => completed,
+            _ => panic!("预期报告部分完成的导入"),
+        };
         assert_eq!(
-            manager
-                .read_file_bytes("first.txt", "password", 100)
-                .unwrap(),
-            b"first"
+            manager.read_meta("password").unwrap().files.len(),
+            completed as usize + 1
         );
+        for (name, expected) in [
+            ("first.txt", b"first".as_slice()),
+            ("last.txt", b"last".as_slice()),
+        ] {
+            if let Ok(content) = manager.read_file_bytes(name, "password", 100) {
+                assert_eq!(content, expected);
+            }
+        }
         assert_eq!(
             manager
                 .read_file_bytes("conflict.txt", "password", 100)
                 .unwrap(),
             b"original"
-        );
-        assert!(
-            manager
-                .read_file_bytes("last.txt", "password", 100)
-                .is_err()
         );
         std::fs::write(&conflict, b"original").unwrap();
         app.execute(request()).unwrap();
@@ -1264,7 +2052,7 @@ mod tests {
                 progress.skipped_files,
                 progress.total_files
             ),
-            ("completed", 3, 2, 3)
+            ("completed", 3, completed + 1, 3)
         );
         assert_eq!(
             manager

@@ -173,7 +173,7 @@ private struct FileTile: View {
             }.padding(5).contentShape(Rectangle())
                 .background(hovering ? VeilTheme.canvas : .clear, in: RoundedRectangle(cornerRadius: 9))
         }.buttonStyle(VeilPlainButtonStyle()).onHover { hovering = $0 }.help(entry.path)
-            .disabled(store.isBusy).contextMenu { EntryActions(entry: entry) }
+            .disabled(!store.canBrowse).contextMenu { EntryActions(entry: entry).disabled(store.isBusy) }
     }
 }
 
@@ -243,11 +243,11 @@ private struct FileListRow: View {
                 } else { Color.clear.frame(width: 52, height: 32) }
                 Button { store.pendingDelete = entry } label: { Image(systemName: "trash") }
                     .buttonStyle(VeilIconButtonStyle()).help("删除 \(entry.name)")
-            }.frame(width: 84)
+            }.frame(width: 84).disabled(store.isBusy)
         }
         .padding(.horizontal, 8).frame(minHeight: VeilDesign.layout("row-height"))
         .background(hovering ? VeilTheme.canvas : .clear, in: RoundedRectangle(cornerRadius: 6))
-        .onHover { hovering = $0 }.disabled(store.isBusy).contextMenu { EntryActions(entry: entry) }
+        .onHover { hovering = $0 }.disabled(!store.canBrowse).contextMenu { EntryActions(entry: entry).disabled(store.isBusy) }
     }
 }
 
