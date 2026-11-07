@@ -127,7 +127,6 @@ pub enum ServiceRequest<'a> {
     },
     DeleteContainer {
         id: String,
-        password: String,
     },
     UnregisterContainer {
         id: &'a str,
@@ -597,10 +596,9 @@ impl VeilService {
                 crate::spaces::delete_space_record(&id)?;
                 Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
             }
-            ServiceRequest::DeleteContainer { id, password } => {
+            ServiceRequest::DeleteContainer { id } => {
                 self.lock_if_open(&id)?;
-                let password = Zeroizing::new(password);
-                crate::spaces::delete_container(&id, password.as_str())?;
+                crate::spaces::delete_container(&id)?;
                 Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
             }
             ServiceRequest::UnregisterContainer { id } => {

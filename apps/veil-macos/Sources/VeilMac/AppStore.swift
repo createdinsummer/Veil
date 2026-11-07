@@ -23,8 +23,6 @@ final class AppStore: ObservableObject {
     @Published var pendingDelete: BrowserEntry?
     @Published var pendingContainerDelete: ContainerSummary?
     @Published var pendingSpaceDelete: Space?
-    @Published var showDeleteContainerPassword = false
-    @Published private(set) var deleteContainerPasswordTarget: ContainerSummary?
     @Published var preview: PreviewAsset?
     @Published var conflictOperation = "导入"
     @Published var importInspection: ImportInspection?
@@ -371,14 +369,8 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func confirmDeleteContainer(_ item: ContainerSummary) {
-        pendingContainerDelete = nil
-        deleteContainerPasswordTarget = item
-        showDeleteContainerPassword = true
-    }
-
     @discardableResult
-    func deleteContainer(_ item: ContainerSummary, password: String) async -> Bool {
+    func deleteContainer(_ item: ContainerSummary) async -> Bool {
         var deleted = false
         await perform { ticket in
             if self.container?.id == item.id {
@@ -389,7 +381,7 @@ final class AppStore: ObservableObject {
                 guard ticket == self.generation else { return }
             }
             let spaces: [Space] = try await self.client.json(
-                NativeRequest(operation: "delete_container", id: item.id, password: password)
+                NativeRequest(operation: "delete_container", id: item.id)
             )
             guard ticket == self.generation else { return }
             self.unlockedPasswords.removeValue(forKey: item.id)
@@ -399,8 +391,6 @@ final class AppStore: ObservableObject {
             if !spaces.contains(where: { $0.id == self.selectedSpaceID }) {
                 self.selectedSpaceID = spaces.first(where: \.isDefault)?.id ?? spaces.first?.id ?? ""
             }
-            self.deleteContainerPasswordTarget = nil
-            self.showDeleteContainerPassword = false
             self.notice = "容器已删除"
             deleted = true
         }

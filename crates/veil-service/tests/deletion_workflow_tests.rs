@@ -72,7 +72,6 @@ fn deletion_flow_worker() {
     service
         .execute(ServiceRequest::DeleteContainer {
             id: removable.id,
-            password: "password".into(),
         })
         .unwrap();
     assert!(!removable_path.exists());

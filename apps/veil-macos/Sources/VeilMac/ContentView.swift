@@ -60,11 +60,6 @@ struct ContentView: View {
         .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
         .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
         .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
-        .sheet(isPresented: $store.showDeleteContainerPassword) {
-            if let item = store.deleteContainerPasswordTarget {
-                DeleteContainerPasswordView(item: item).environmentObject(store)
-            }
-        }
         .alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingDelete != nil }, set: { if !$0 { store.pendingDelete = nil } }
         ), presenting: store.pendingDelete) { target in
@@ -91,10 +86,10 @@ struct ContentView: View {
         .alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
         ), presenting: store.pendingContainerDelete) { item in
-            Button("继续", role: .destructive) { store.confirmDeleteContainer(item) }
+            Button("永久删除", role: .destructive) { Task { await store.deleteContainer(item) } }
             Button("取消", role: .cancel) { store.pendingContainerDelete = nil }
         } message: { _ in
-            Text("加密容器目录及其中的文件将被永久删除。需要验证容器密码，无法撤销。")
+            Text("加密容器目录及其中的文件将被永久删除。此操作不需要容器密码，无法撤销。")
         }
     }
 

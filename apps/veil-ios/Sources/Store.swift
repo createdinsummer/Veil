@@ -84,11 +84,11 @@ import ImageIO
         let items: [Space] = try await self.client.json(NativeRequest(operation: "create_space", name: name))
         guard ticket == self.generation else { return }; self.spaces = items; self.selectedSpace = items.first(where: { $0.name == name })?.id ?? self.selectedSpace
     } }
-    func deleteContainer(_ item: ContainerSummary, password: String) async -> Bool {
+    func deleteContainer(_ item: ContainerSummary) async -> Bool {
         var deleted = false
         await run { ticket in
             let items: [Space] = try await self.client.json(
-                NativeRequest(operation: "delete_container", id: item.id, password: password)
+                NativeRequest(operation: "delete_container", id: item.id)
             )
             guard ticket == self.generation else { return }
             if self.container?.id == item.id {

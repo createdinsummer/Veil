@@ -116,7 +116,6 @@ struct ContainerFormView: View {
         Task { await store.submit(form, name: name, password: secret, confirmation: repeated) }
     }
 }
-
 struct NewSpaceView: View {
     @EnvironmentObject private var store: AppStore
     @State private var name = ""
@@ -181,55 +180,5 @@ struct NewSpaceView: View {
         panel.canCreateDirectories = true
         panel.directoryURL = directory
         if panel.runModal() == .OK { directory = panel.url }
-    }
-}
-
-struct DeleteContainerPasswordView: View {
-    @EnvironmentObject private var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    let item: ContainerSummary
-    @State private var password = ""
-    @FocusState private var passwordFocused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("验证容器密码").font(.system(size: 18, weight: .semibold))
-                Text("输入「\(item.name)」的密码以永久删除容器。")
-                    .font(.system(size: 12)).foregroundStyle(VeilTheme.secondary)
-                Text("加密文件无法恢复。")
-                    .font(.system(size: 11)).foregroundStyle(.red)
-            }
-            if let error = store.error {
-                Text(error).font(.system(size: 11)).foregroundStyle(.red)
-            }
-            SecureField("容器密码", text: $password)
-                .textFieldStyle(.roundedBorder)
-                .focused($passwordFocused)
-                .onSubmit { submit() }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .buttonStyle(VeilButtonStyle())
-                Button("永久删除", role: .destructive) { submit() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(VeilButtonStyle(variant: .primary))
-                    .disabled(password.isEmpty || store.isBusy)
-            }
-        }
-        .padding(24)
-        .frame(width: 390)
-        .foregroundStyle(VeilTheme.text)
-        .background(VeilTheme.card)
-        .interactiveDismissDisabled(store.isBusy)
-        .onAppear { passwordFocused = true }
-    }
-
-    private func submit() {
-        guard !password.isEmpty, !store.isBusy else { return }
-        Task {
-            if await store.deleteContainer(item, password: password) { dismiss() }
-        }
     }
 }

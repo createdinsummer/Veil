@@ -2,11 +2,7 @@
 use crate::{
     config::AppConfig,
     error::VeilError,
-    storage::{
-        app::AppStore,
-        container::ContainerDb,
-        locks::{LockManager, LockMode, LockOptions},
-    },
+    storage::app::AppStore,
     workflow::{self, CreateOptions, CreatedContainer, WorkflowError},
 };
 use rusqlite::{OptionalExtension, TransactionBehavior};
@@ -238,7 +234,7 @@ fn delete_space_inner(identity: &str, delete_files: bool) -> Result<(), VeilErro
 }
 
 /// 删除已登记容器的加密目录，并清除本机登记和最近记录。
-pub fn delete_container(identity: &str, password: &str) -> Result<(), VeilError> {
+pub fn delete_container(identity: &str) -> Result<(), VeilError> {
     crate::work::validate_veil_id(identity)?;
     let mut store = AppStore::global()?;
     let registration = store
@@ -269,19 +265,7 @@ pub fn delete_container(identity: &str, password: &str) -> Result<(), VeilError>
         return Err(VeilError::WorkError("容器目录超出空间范围".into()));
     }
 
-    // 先验证密码和容器身份，再取得容器排他锁，避免删除正在使用的容器。
-    drop(ContainerDb::open(
-        &container_path,
-        password,
-        Some(identity),
-    )?);
-    let lock = LockManager::new(&container_path, password)
-        .with_options(LockOptions {
-            timeout: Some(Duration::from_millis(100)),
-            cancellation: None,
-        })
-        .acquire_container(LockMode::Write)?;
-
+    // 删除容器只依据空间登记和目录路径，不读取加密库，也不验证容器版本或密码。
     let tombstone = root.join(format!(
         ".veil-deleting-{}-{}",
         identity,
@@ -321,7 +305,6 @@ pub fn delete_container(identity: &str, password: &str) -> Result<(), VeilError>
         return Err(error.into());
     }
 
-    drop(lock);
     std::fs::remove_dir_all(&tombstone).map_err(|error| {
         VeilError::WorkError(format!(
             "容器已从空间移除，但临时数据清理失败（{}）：{error}",

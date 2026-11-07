@@ -416,8 +416,6 @@ struct DeleteContainerView: View {
     @EnvironmentObject private var store: Store
     @Environment(\.dismiss) private var dismiss
     let item: ContainerSummary
-    @State private var password = ""
-    @FocusState private var passwordFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -427,16 +425,6 @@ struct DeleteContainerView: View {
                     Text("加密容器目录及其中的文件将被永久删除，无法恢复。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-                Section("验证密码") {
-                    if let error = store.error {
-                        Text(error).font(.footnote).foregroundStyle(.red)
-                    }
-                    SecureField("容器密码", text: $password)
-                        .focused($passwordFocused)
-                        .textContentType(.password)
-                        .submitLabel(.done)
-                        .onSubmit { submit() }
-                }
             }
             .navigationTitle("删除容器")
             .navigationBarTitleDisplayMode(.inline)
@@ -444,18 +432,17 @@ struct DeleteContainerView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("永久删除", role: .destructive) { submit() }
-                        .disabled(password.isEmpty || store.busy)
+                        .disabled(store.busy)
                 }
             }
             .tint(.red)
-            .onAppear { passwordFocused = true }
         }
     }
 
     private func submit() {
-        guard !password.isEmpty, !store.busy else { return }
+        guard !store.busy else { return }
         Task {
-            if await store.deleteContainer(item, password: password) { dismiss() }
+            if await store.deleteContainer(item) { dismiss() }
         }
     }
 }
