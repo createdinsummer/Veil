@@ -8,7 +8,7 @@ use crate::{
     },
     veil_ops::{LockedDirectory, VeilManager},
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::OptionalExtension;
 use std::{
     fs::{self, File, Metadata},
     io::{Cursor, Read},
@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 
 /// 路径冲突由调用方判断；此处的容器路径仅用于定位已有密文。
 pub enum FileInput<'a> {
-    /// 调用方在事务内读取的容器文件元数据；缺失哈希时需通过容器输入补算。
+    /// 调用方在事务内读取的容器文件元数据；没有已登记哈希时应改用密文输入。
     ContainerMetadata {
         version: &'a VersionSnapshot,
         hash: Option<&'a str>,
@@ -347,18 +347,16 @@ impl<'a> Prepared<'a> {
             return Ok((*hash).to_owned());
         }
         if let Self::Ciphertext(item) = self {
-            if let Some(value) = item
+            let value: Option<String> = item
                 .db
                 .conn
                 .query_row(
                     "SELECT blake3 FROM file_hash WHERE file_id=?1",
                     [&item.node.id],
-                    |row| row.get::<_, String>(0),
+                    |row| row.get(0),
                 )
-                .optional()?
-            {
-                return Ok(value);
-            }
+                .optional()?;
+            return value.ok_or_else(|| invalid("容器文件哈希缺失"));
         }
         let digest = {
             let mut reader = self.reader()?;
@@ -375,22 +373,6 @@ impl<'a> Prepared<'a> {
             hasher.finalize().to_hex().to_string()
         };
         self.verify()?;
-        if let Self::Ciphertext(item) = self {
-            // 在保护读取的租约仍有效时补登记；版本变化则拒绝写入旧哈希。
-            let credentials = item.guard.credentials()?;
-            let tx = item
-                .db
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            for credential in credentials {
-                locks::validate(&tx, &credential, Some(item.mode))?;
-            }
-            if crate::storage::container::node(&tx, &item.node.id)?.as_ref() != Some(&item.node) {
-                return Err(VeilError::VersionConflict("登记哈希时文件发生变化".into()));
-            }
-            tx.execute("INSERT INTO file_hash(file_id,blake3) VALUES(?1,?2) ON CONFLICT(file_id) DO NOTHING", params![item.node.id, digest])?;
-            tx.commit()?;
-        }
         Ok(digest)
     }
 }

@@ -1596,7 +1596,7 @@ mod tests {
         assert_eq!(p.phase, "completed");
     }
     #[test]
-    fn stream_export_waits_for_choices_reuses_directory_lock_and_backfills_missing_hash() {
+    fn stream_export_waits_for_choices_and_reuses_directory_lock() {
         for action in [SessionImportAction::Skip, SessionImportAction::Overwrite] {
             let (root, manager, app, source) = stream_import_fixture();
             manager
@@ -1607,12 +1607,6 @@ mod tests {
                     ],
                     "password",
                 )
-                .unwrap();
-            manager
-                .open_db("password")
-                .unwrap()
-                .conn
-                .execute("DELETE FROM file_hash", [])
                 .unwrap();
             let output = root.path().join("output");
             std::fs::create_dir_all(output.join("album")).unwrap();
@@ -1641,7 +1635,7 @@ mod tests {
                 .conn
                 .query_row("SELECT count(*) FROM file_hash", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(cached, 1);
+            assert_eq!(cached, 2);
             drop(db);
             app.execute(ServiceRequest::ResolveSessionExportConflicts {
                 id: batch.id,
@@ -2491,13 +2485,7 @@ mod tests {
                 vec![index as u8; 4096]
             );
         }
-        // 缺失哈希时，目录租约内补算并缓存；再次导入只跳过相同文件。
-        manager
-            .open_db("password")
-            .unwrap()
-            .conn
-            .execute("DELETE FROM file_hash", [])
-            .unwrap();
+        // 已登记哈希用于重复内容比较；再次导入应跳过相同文件。
         app.execute(ServiceRequest::ImportSessionFiles {
             sources: vec![folder.to_string_lossy().into_owned()],
             directory: String::new(),

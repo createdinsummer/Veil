@@ -7,7 +7,7 @@ use veil_service::{
 };
 
 #[test]
-fn container_v1_migrates_and_new_file_hashes_follow_content() {
+fn current_container_schema_is_version_one_and_future_versions_are_rejected() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("veil");
     let manager = VeilManager::new(path.clone());
@@ -22,45 +22,29 @@ fn container_v1_migrates_and_new_file_hashes_follow_content() {
         .query_row("SELECT blake3 FROM file_hash", [], |row| row.get(0))
         .unwrap();
     assert_eq!(hash, blake3::hash(b"first").to_hex().to_string());
-    db.execute_batch("DROP TABLE file_hash; PRAGMA user_version=1;")
-        .unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    db.execute_batch("PRAGMA user_version=99").unwrap();
     drop(db);
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-    let workers = (0..3)
-        .map(|_| {
-            let barrier = barrier.clone();
-            let manager = manager.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                manager.read_file_bytes("file", "password", 100)
-            })
-        })
-        .collect::<Vec<_>>();
-    for worker in workers {
-        assert_eq!(worker.join().unwrap().unwrap(), b"first");
-    }
+    assert!(manager.read_file_bytes("file", "password", 100).is_err());
     let db = veil_core::database::open(&path.join(CONTAINER_DB), Some("password"), false).unwrap();
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        99
     );
     assert_eq!(
-        db.query_row("SELECT count(*) FROM file_hash", [], |row| row
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='file_hash'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
     );
-    drop(db);
-    std::fs::write(&source, b"second").unwrap();
-    manager
-        .add_files(&[AddFileSpec::new(&source, "file")], "password")
-        .unwrap();
-    let db = veil_core::database::open(&path.join(CONTAINER_DB), Some("password"), false).unwrap();
-    let hash: String = db
-        .query_row("SELECT blake3 FROM file_hash", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(hash, blake3::hash(b"second").to_hex().to_string());
 }
 
 #[test]

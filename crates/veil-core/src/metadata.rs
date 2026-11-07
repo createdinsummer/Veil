@@ -240,12 +240,12 @@ pub struct FileEntry {
     /// RFC 3339 格式的加密时间。
     pub encrypted_at: String,
 
-    /// 可选的明文 BLAKE3 哈希；旧文件在首次按哈希比较后补登记。
+    /// 可选的明文 BLAKE3 哈希；容器列表读取时由数据库填充。
     pub hash: Option<String>,
 }
 
 impl FileEntry {
-    /// 创建文件条目并写入当前 UTC 时间，哈希字段默认留空。
+    /// 创建基础文件条目并写入当前 UTC 时间；存储层随后填充内容哈希。
     pub fn new(encrypted_name: String, original_name: String, size: u64, nonce: [u8; 12]) -> Self {
         Self::with_file_id(
             generate_file_id(),

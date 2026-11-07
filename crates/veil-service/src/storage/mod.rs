@@ -1,6 +1,7 @@
 //! service 独占业务表访问；连接与磁盘加密格式由 core 统一提供。
 pub mod app;
 pub mod container;
+mod container_upgrade;
 pub mod locks;
 use crate::error::{Result, VeilError};
 use rusqlite::{Connection, TransactionBehavior};
@@ -27,16 +28,17 @@ pub(crate) fn invalid(message: &str) -> VeilError {
     VeilError::InvalidFormat(message.into())
 }
 
-/// 版本检查与建表只允许在本入口的事务内进行，不为业务模块零散补表。
-pub(crate) fn migrate(
+/// 只创建当前结构或验证当前结构，不自动迁移旧版数据库。
+pub(crate) fn ensure_schema(
     conn: &mut Connection,
     application_id: i64,
     schema: &str,
+    target_version: i64,
     create: bool,
 ) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let actual: i64 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-    if version == 1 && actual == application_id {
+    if version == target_version && actual == application_id {
         verify_schema(conn, application_id, schema)?;
         return Ok(());
     }
@@ -54,8 +56,8 @@ pub(crate) fn migrate(
         }
         tx.execute_batch(schema)?;
         tx.pragma_update(None, "application_id", application_id)?;
-        tx.pragma_update(None, "user_version", 1)?;
-    } else if version != 1 || actual != application_id {
+        tx.pragma_update(None, "user_version", target_version)?;
+    } else if version != target_version || actual != application_id {
         return Err(invalid("数据库结构版本或应用标识不受支持"));
     }
     tx.commit()?;
@@ -67,7 +69,6 @@ fn verify_schema(conn: &Connection, application_id: i64, schema: &str) -> Result
     use std::sync::OnceLock;
     static APP: OnceLock<String> = OnceLock::new();
     static CONTAINER: OnceLock<String> = OnceLock::new();
-    static CONTAINER_V2: OnceLock<String> = OnceLock::new();
     fn fingerprint(conn: &Connection) -> Result<String> {
         let mut query = conn.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' OR type='trigger' ORDER BY type,name")?;
         let definitions = query
@@ -87,7 +88,6 @@ fn verify_schema(conn: &Connection, application_id: i64, schema: &str) -> Result
     }
     let cached = match application_id {
         0x56415050 => &APP,
-        0x56444956 if schema.contains("CREATE TABLE file_hash") => &CONTAINER_V2,
         0x56444956 => &CONTAINER,
         _ => return Err(invalid("未知数据库类型")),
     };

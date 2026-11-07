@@ -1,5 +1,5 @@
 //! 本机索引、设置与缓存，不允许写入容器密码或文件密钥。
-use super::{id, invalid, json, migrate, now, parse};
+use super::{ensure_schema, id, invalid, json, now, parse};
 use crate::error::Result;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -9,7 +9,7 @@ use std::{
 };
 
 pub const UNLOCK_CACHE_SETTING: &str = "unlock_cache_seconds";
-/// 解锁成功后密码在本机内存中的保留时长；新库与缺少该配置的旧库都使用 1 小时。
+/// 未单独设置时，解锁成功后密码默认在本机内存中保留 1 小时。
 pub const DEFAULT_UNLOCK_CACHE_SECONDS: u64 = 3600;
 pub const MAX_UNLOCK_CACHE_SECONDS: u64 = 86_400;
 /// 导入任务合并文件记录时的最长等待时间，单位为秒。
@@ -144,12 +144,12 @@ impl AppStore {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        migrate(&mut conn, 0x56415050, include_str!("app.sql"), create)?;
+        ensure_schema(&mut conn, 0x56415050, include_str!("app.sql"), 1, create)?;
         if create {
             // 首次写入可能改变文件标识，重新打开后校验数据库结构。
             drop(conn);
             conn = veil_core::database::open(&path, None, false)?;
-            migrate(&mut conn, 0x56415050, include_str!("app.sql"), false)?;
+            ensure_schema(&mut conn, 0x56415050, include_str!("app.sql"), 1, false)?;
         }
         let mut store = Self {
             conn,
@@ -176,53 +176,6 @@ impl AppStore {
                 params![json(&id())?, now()],
             )?;
         }
-        // 旧库可能没有免密时长配置；缺失或损坏时补齐为 1 小时，已有合法值保持不动。
-        let unlock_cache: Option<String> = tx
-            .query_row(
-                "SELECT value_json FROM user_setting WHERE key=?1",
-                [UNLOCK_CACHE_SETTING],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let valid = unlock_cache
-            .as_deref()
-            .and_then(|text| parse::<serde_json::Value>(text).ok())
-            .is_some_and(|value| validate_setting(UNLOCK_CACHE_SETTING, &value).is_ok());
-        if !valid {
-            tx.execute(
-                "INSERT INTO user_setting VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
-                params![
-                    UNLOCK_CACHE_SETTING,
-                    json(&DEFAULT_UNLOCK_CACHE_SECONDS)?,
-                    now()
-                ],
-            )?;
-        }
-        let import_interval: Option<String> = tx
-            .query_row(
-                "SELECT value_json FROM user_setting WHERE key=?1",
-                [IMPORT_COMMIT_INTERVAL_SETTING],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if import_interval.is_none() {
-            tx.execute(
-                "INSERT INTO user_setting VALUES (?1,?2,?3)",
-                params![
-                    IMPORT_COMMIT_INTERVAL_SETTING,
-                    json(&DEFAULT_IMPORT_COMMIT_INTERVAL_SECONDS)?,
-                    now()
-                ],
-            )?;
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO user_setting VALUES (?1,?2,?3)",
-            params![
-                IMPORT_COMMIT_COUNT_SETTING,
-                json(&DEFAULT_IMPORT_COMMIT_COUNT)?,
-                now()
-            ],
-        )?;
         tx.commit()?;
         #[cfg(target_os = "ios")]
         store.rebind_ios_sandbox_spaces()?;
@@ -767,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn unlock_cache_setting_defaults_backfills_and_validates() {
+    fn unlock_cache_setting_defaults_and_validates() {
         let root = tempfile::TempDir::new().unwrap();
         let store = AppStore::open(root.path()).unwrap();
         assert_eq!(
@@ -775,7 +728,7 @@ mod tests {
             DEFAULT_UNLOCK_CACHE_SECONDS
         );
 
-        // 模拟旧库：没有免密时长配置，重新打开时应补齐为 1 小时。
+        // 未设置时使用默认值，不把默认值写回设置表。
         store
             .conn
             .execute(
@@ -795,7 +748,7 @@ mod tests {
             )
             .optional()
             .unwrap();
-        assert_eq!(stored.as_deref(), Some("3600"));
+        assert_eq!(stored, None);
 
         assert!(
             store

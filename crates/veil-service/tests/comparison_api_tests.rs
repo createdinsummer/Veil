@@ -111,7 +111,7 @@ fn all_input_combinations_support_selected_checks_and_missing_versions() {
 }
 
 #[test]
-fn missing_legacy_plaintext_hash_is_computed_and_registered() {
+fn missing_container_file_hash_is_rejected() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("veil"));
     manager.init_veil("test", "password").unwrap();
@@ -129,7 +129,7 @@ fn missing_legacy_plaintext_hash_is_computed_and_registered() {
     db.execute("DELETE FROM file_hash", []).unwrap();
     drop(db);
     assert!(manager.list_files("password").unwrap()[0].hash.is_none());
-    let report = compare_files(
+    let result = compare_files(
         FileInput::ContainerCiphertext {
             manager: &manager,
             password: "password",
@@ -143,22 +143,9 @@ fn missing_legacy_plaintext_hash_is_computed_and_registered() {
             hash: true,
             ..Default::default()
         },
-    )
-    .unwrap();
-    assert_eq!(report.outcome, ConflictOutcome::NoConflict);
-    assert_eq!(
-        manager.list_files("password").unwrap()[0].hash.as_deref(),
-        Some(blake3::hash(b"plain content").to_hex().as_str())
     );
-    manager
-        .change_password_full("password", "new-password")
-        .unwrap();
-    assert_eq!(
-        manager.list_files("new-password").unwrap()[0]
-            .hash
-            .as_deref(),
-        Some(blake3::hash(b"plain content").to_hex().as_str())
-    );
+    assert!(result.is_err());
+    assert!(manager.list_files("password").unwrap()[0].hash.is_none());
 }
 
 #[test]
