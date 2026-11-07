@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     @State private var sidebarVisible = true
 
     var body: some View {
@@ -24,12 +25,6 @@ struct ContentView: View {
         }
         .foregroundStyle(VeilTheme.text)
         .ignoresSafeArea(.container, edges: .top)
-        .overlay(alignment: .bottom) {
-            if let title = store.transferTitle {
-                TransferProgressView(title: title, progress: store.transferProgress)
-                    .padding(.bottom, 20)
-            }
-        }
         .overlay(alignment: .bottomTrailing) {
             if let notice = store.notice {
                 FeedbackBanner(message: notice, isError: false) { store.notice = nil }
@@ -124,6 +119,14 @@ struct ContentView: View {
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).pointerCursor().help("容器操作")
             }
+            if let title = store.transferTitle {
+                Button { openWindow(id: VeilWindowID.taskCenter) } label: {
+                    Label(store.transferProgress?.percentageText ?? "任务", systemImage: "checklist")
+                }
+                .buttonStyle(VeilPlainButtonStyle())
+                .help("查看任务进度：\(title)")
+                .accessibilityLabel("查看任务进度")
+            }
         }.font(.system(size: 12))
             .padding(.horizontal, store.container == nil ? 32 : 24)
             .padding(.leading, sidebarVisible ? 0 : 76)
@@ -188,7 +191,7 @@ struct TransferProgressView: View {
                 }
             }
             if let progress, ["import", "export"].contains(progress.operation), ["preparing", "processing", "verifying"].contains(progress.phase) {
-                Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelImport() }
+                Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelTransfer() }
                     .buttonStyle(VeilButtonStyle()).disabled(progress.cancelRequested)
             }
         }
@@ -202,6 +205,7 @@ struct TransferProgressView: View {
 
 private struct SidebarView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.openWindow) private var openWindow
     @State private var collapsed: Set<String> = []
 
     var body: some View {
@@ -263,8 +267,30 @@ private struct SidebarView: View {
                     }.buttonStyle(VeilPlainButtonStyle()).padding(.top, 2)
                 }.padding(.horizontal, 13).disabled(store.isBusy)
             }.scrollIndicators(.hidden)
-            VStack(alignment: .leading, spacing: 15) {
-                Rectangle().fill(VeilTheme.border).frame(height: 1)
+            VStack(alignment: .leading, spacing: 8) {
+                Rectangle().fill(VeilTheme.border).frame(height: 1).padding(.bottom, 4)
+                Button { openWindow(id: VeilWindowID.taskCenter) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checklist").font(.system(size: 13)).frame(width: 16)
+                        Text("任务中心").font(.system(size: 12))
+                        Spacer(minLength: 4)
+                        if store.transferTitle != nil {
+                            HStack(spacing: 4) {
+                                Text("1")
+                                if let percentage = store.transferProgress?.percentageText { Text(percentage) }
+                            }
+                            .font(.system(size: 10, weight: .medium)).monospacedDigit()
+                            .foregroundStyle(VeilTheme.secondary)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(VeilTheme.thumbnail, in: Capsule())
+                        }
+                    }
+                    .foregroundStyle(VeilTheme.secondary)
+                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .background(store.transferTitle != nil ? VeilTheme.selected : .clear, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(VeilPlainButtonStyle())
                 Label("本机", systemImage: "lock").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
             }.padding(.horizontal, 23).padding(.bottom, 20).padding(.top, 12)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(VeilTheme.sidebar)

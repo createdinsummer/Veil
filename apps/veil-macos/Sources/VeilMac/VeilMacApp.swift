@@ -91,6 +91,13 @@ struct VeilMacApp: App {
                 }.disabled(store.isBusy)
             }
         }
+        Window("任务中心", id: VeilWindowID.taskCenter) {
+            TaskCenterView()
+                .environmentObject(store)
+                .tint(VeilTheme.accent)
+        }
+        .defaultSize(width: 560, height: 360)
+        .windowResizability(.contentSize)
     }
 }
 

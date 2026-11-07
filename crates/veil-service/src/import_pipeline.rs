@@ -13,6 +13,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use veil_core::{
     progress,
@@ -29,6 +30,36 @@ const EXECUTE_LIMIT: usize = 32;
 const PROCESS_BATCH: usize = 8;
 const WAIT_LIMIT: usize = 128;
 const COMPLETED_LIMIT: usize = 8;
+const DATABASE_BUSY_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+];
+
+fn is_database_busy(error: &VeilError) -> bool {
+    matches!(
+        error,
+        VeilError::Database(error)
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+    )
+}
+
+fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut attempt = 0;
+    loop {
+        match operation() {
+            Err(error) if is_database_busy(&error) && attempt < DATABASE_BUSY_RETRY_DELAYS.len() => {
+                std::thread::sleep(DATABASE_BUSY_RETRY_DELAYS[attempt]);
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
 
 struct ImportDirectoryLocks {
     guard: Option<Arc<crate::storage::locks::LeaseGuard>>,
@@ -254,8 +285,11 @@ fn check(
     directory_locks: &ImportDirectoryLocks,
     policy: BatchPolicy,
 ) -> Result<()> {
-    let db = manager.open_db(password)?;
-    let identity = db.info()?.0;
+    let (db, identity) = retry_database_busy(|| {
+        let db = manager.open_db(password)?;
+        let identity = db.info()?.0;
+        Ok((db, identity))
+    })?;
     scan.listen_batches(
         policy,
         |_| 1,
@@ -278,10 +312,19 @@ fn check(
                 .iter()
                 .map(|w| w.spec.target.clone())
                 .collect::<Vec<_>>();
-            db.conn.execute_batch("BEGIN DEFERRED")?;
-            let nodes = container::resolve_batch(&db.conn, &paths);
-            db.conn.execute_batch("ROLLBACK")?;
-            let mut nodes = nodes?;
+            let mut nodes = retry_database_busy(|| {
+                db.conn.execute_batch("BEGIN DEFERRED")?;
+                match container::resolve_batch(&db.conn, &paths) {
+                    Ok(nodes) => {
+                        db.conn.execute_batch("ROLLBACK")?;
+                        Ok(nodes)
+                    }
+                    Err(error) => {
+                        let _ = db.conn.execute_batch("ROLLBACK");
+                        Err(error)
+                    }
+                }
+            })?;
             for mut work in batch {
                 if !shared.active() {
                     return Err(VeilError::Cancelled);

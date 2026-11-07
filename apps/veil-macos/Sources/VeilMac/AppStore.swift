@@ -11,6 +11,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var pendingOperations = 0
     @Published private(set) var transferProgress: TransferProgress?
     @Published private(set) var transferTitle: String?
+    @Published private(set) var lastTransferError: String?
+    @Published private(set) var lastTransferFailure: TransferDiagnosticRecord?
     @Published var selectedSpaceID = ""
     @Published var directory = ""
     @Published var categories: Set<FileCategory> = []
@@ -116,6 +118,7 @@ final class AppStore: ObservableObject {
 
     func load() async {
         guard !loaded else { return }
+        lastTransferFailure = TransferDiagnostics.latestRecord()
         await perform { _ in
             try await self.reloadCatalog()
             let layout: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "layout"))
@@ -145,17 +148,27 @@ final class AppStore: ObservableObject {
     private func withTransferProgress<T>(_ title: String, operation: String, work: () async throws -> T) async throws -> T {
         transferTitle = title
         transferProgress = nil
+        lastTransferError = nil
+        lastTransferFailure = nil
         let poll = Task { @MainActor in
-            var lastCompleted: UInt64 = 0
+            var lastRefreshedCompleted: UInt64 = 0
+            var lastContainerRefresh = Date.distantPast
             while !Task.isCancelled {
                 if let progress = client.transferProgress(), progress.operation == operation,
                    ["preparing", "processing", "verifying", "snapshot", "packing", "unpacking", "finalizing"].contains(progress.phase) {
                     transferProgress = progress
-                    if operation == "import", progress.completedFiles > lastCompleted {
-                        lastCompleted = progress.completedFiles
+                    let now = Date()
+                    let enoughProgress = progress.completedFiles > lastRefreshedCompleted
+                        && progress.completedFiles - lastRefreshedCompleted >= 512
+                    let maximumDelayReached = now.timeIntervalSince(lastContainerRefresh) >= 10
+                    let minimumDelayElapsed = now.timeIntervalSince(lastContainerRefresh) >= 2
+                    if operation == "import", progress.completedFiles > lastRefreshedCompleted,
+                       minimumDelayElapsed, (enoughProgress || maximumDelayReached) {
+                        lastContainerRefresh = now
                         let ticket = generation
                         if let view: ContainerSnapshot = try? await client.json(NativeRequest(operation: "refresh")), ticket == generation {
                             container = view
+                            lastRefreshedCompleted = progress.completedFiles
                         }
                     }
                 }
@@ -163,10 +176,39 @@ final class AppStore: ObservableObject {
             }
         }
         defer { poll.cancel(); transferTitle = nil; transferProgress = nil }
-        return try await work()
+        do { return try await work() }
+        catch {
+            lastTransferError = error.localizedDescription
+            let failureProgress = client.transferProgress() ?? transferProgress
+            if failureProgress?.cancelRequested != true,
+               !error.localizedDescription.localizedCaseInsensitiveContains("已中止") {
+                let record = TransferDiagnostics.makeRecord(error: error, operation: operation, progress: failureProgress)
+                lastTransferFailure = record
+                TransferDiagnostics.append(record)
+            }
+            throw error
+        }
     }
 
-    func cancelImport() {
+    var transferDiagnosticFilename: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "Veil-诊断日志-\(formatter.string(from: Date())).json"
+    }
+
+    func exportTransferDiagnostic(to url: URL) {
+        guard let lastTransferFailure else { return }
+        do {
+            try TransferDiagnostics.export(lastTransferFailure, to: url)
+            notice = "诊断日志已导出，可附在反馈中。"
+        } catch {
+            self.error = "无法导出诊断日志：\(error.localizedDescription)"
+        }
+    }
+
+    func cancelTransfer() {
         guard client.cancelTransfer() else { return }
         transferProgress = client.transferProgress()
     }
