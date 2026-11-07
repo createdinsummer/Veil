@@ -126,7 +126,9 @@ fn package_worker() {
             })
             .unwrap()
         {
-            ServiceResponse::Preview(bytes) => assert_eq!(bytes, content),
+            ServiceResponse::Preview(bytes) | ServiceResponse::PreviewUnstable(bytes) => {
+                assert_eq!(bytes, content)
+            }
             _ => panic!("预期文件内容"),
         }
         // 相同身份的容器不能重复导入，也不应破坏已打开的容器。

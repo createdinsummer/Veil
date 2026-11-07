@@ -46,6 +46,11 @@ struct ContentView: View {
             do { try await Task.sleep(for: .seconds(3)) } catch { return }
             if store.notice == notice { store.notice = nil }
         }
+        .sheet(item: $store.importInspection) { inspection in
+            ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
+                .interactiveDismissDisabled()
+                .onDisappear { store.completeImportReview(nil, id: inspection.id) }
+        }
         .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
         .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
         .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
@@ -123,19 +128,26 @@ struct TransferProgressView: View {
             HStack {
                 Text(title).fontWeight(.semibold)
                 Spacer()
-                if let progress, ["processing", "verifying", "snapshot", "packing", "unpacking"].contains(progress.phase), let total = progress.totalBytes, total > 0 {
+                if let progress, ["import", "export"].contains(progress.operation), progress.totalFiles > 0 {
+                    Text("\(Int(min(1, Double(progress.completedFiles) / Double(progress.totalFiles)) * 100))%")
+                        .monospacedDigit().foregroundStyle(VeilTheme.secondary)
+                } else if let progress, let total = progress.totalBytes, total > 0 {
                     Text("\(Int(min(1, Double(progress.processedBytes) / Double(total)) * 100))%")
                         .monospacedDigit().foregroundStyle(VeilTheme.secondary)
                 }
             }
-            if let progress, ["processing", "verifying", "snapshot", "packing", "unpacking"].contains(progress.phase), let total = progress.totalBytes, total > 0 {
+            if let progress, ["import", "export"].contains(progress.operation), progress.totalFiles > 0 {
+                ProgressView(value: min(1, Double(progress.completedFiles) / Double(progress.totalFiles)))
+                Text(progress.scanComplete ? "文件遍历完成" : "正在发现文件，总数持续增加")
+                    .foregroundStyle(VeilTheme.secondary)
+                if progress.waitingFiles > 0 { Text("待选择：\(progress.waitingFiles) 个文件").foregroundStyle(VeilTheme.secondary) }
+            } else if let progress, let total = progress.totalBytes, total > 0 {
                 ProgressView(value: min(1, Double(progress.processedBytes) / Double(total)))
                 Text("\(stage) · \(ByteCountFormatter.string(fromByteCount: Int64(clamping: progress.processedBytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(clamping: total), countStyle: .file))")
                     .foregroundStyle(VeilTheme.secondary)
             } else {
                 ProgressView().controlSize(.small)
-                Text("\(stage)…")
-                    .foregroundStyle(VeilTheme.secondary)
+                Text(["import", "export"].contains(progress?.operation ?? "") ? "正在发现文件…" : "\(stage)…").foregroundStyle(VeilTheme.secondary)
             }
             if let progress, progress.totalFiles > 0 {
                 Text("已完成 \(progress.completedFiles) / \(progress.totalFiles) 个文件" + (progress.phase == "verifying" ? " · 正在核对" : ""))
@@ -149,7 +161,7 @@ struct TransferProgressView: View {
                     Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(VeilTheme.secondary)
                 }
             }
-            if let progress, progress.operation == "import", ["preparing", "processing", "verifying"].contains(progress.phase) {
+            if let progress, ["import", "export"].contains(progress.operation), ["preparing", "processing", "verifying"].contains(progress.phase) {
                 Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelImport() }
                     .buttonStyle(VeilButtonStyle()).disabled(progress.cancelRequested)
             }

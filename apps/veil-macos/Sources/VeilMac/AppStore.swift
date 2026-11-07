@@ -22,6 +22,9 @@ final class AppStore: ObservableObject {
     @Published var showImportPackage = false
     @Published var pendingDelete: BrowserEntry?
     @Published var preview: PreviewAsset?
+    @Published var conflictOperation = "导入"
+    @Published var importInspection: ImportInspection?
+    private var importReview: CheckedContinuation<[ImportResolution]?, Never>?
     @Published var error: String?
     @Published var notice: String?
     @Published private(set) var thumbnails: [String: Data] = [:]
@@ -188,6 +191,8 @@ final class AppStore: ObservableObject {
     @discardableResult
     func lock(forgetPassword: Bool = false) async -> Bool {
         generation &+= 1
+        _ = client.cancelTransfer()
+        completeImportReview(nil)
         container = nil
         form = nil
         resetBrowser()
@@ -394,27 +399,77 @@ final class AppStore: ObservableObject {
         await importFiles(panel.urls)
     }
 
+    var importProgressDescription: String? {
+        guard let progress = transferProgress, progress.totalFiles > 0 else { return nil }
+        return "已完成 \(progress.completedFiles) / \(progress.totalFiles) · \(Int(min(1, Double(progress.completedFiles) / Double(progress.totalFiles))*100))%" + (progress.scanComplete ? " · 遍历完成" : " · 总数持续增加")
+    }
+
+    func completeImportReview(_ resolutions: [ImportResolution]?, id: String? = nil) {
+        if let id, importInspection?.id != id { return }
+        let continuation = importReview
+        importReview = nil
+        importInspection = nil
+        continuation?.resume(returning: resolutions)
+    }
+
+    private func reviewImport(_ inspection: ImportInspection) async -> [ImportResolution]? {
+        if inspection.conflicts.isEmpty { return [] }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                importReview = continuation
+                importInspection = inspection
+            }
+        } onCancel: {
+            Task { @MainActor in self.completeImportReview(nil, id: inspection.id) }
+        }
+    }
+
+    private func pollImportConflicts(ticket: UInt64, exporting: Bool = false) async {
+        while !Task.isCancelled, ticket == generation {
+            do {
+                let batch: ImportInspection? = try await client.json(NativeRequest(operation: exporting ? "poll_export_conflicts" : "poll_import_conflicts"))
+                if let batch {
+                    guard ticket == generation, !Task.isCancelled else { return }
+                    self.conflictOperation = exporting ? "导出" : "导入"
+                    guard let resolutions = await reviewImport(batch), ticket == generation, !Task.isCancelled else {
+                        _ = client.cancelTransfer()
+                        return
+                    }
+                    try await client.execute(NativeRequest(operation: exporting ? "resolve_export_conflicts" : "resolve_import_conflicts", id: batch.id, resolutions: resolutions))
+                }
+            } catch {
+                if ticket == generation, !Task.isCancelled {
+                    self.error = error.localizedDescription
+                    _ = client.cancelTransfer()
+                }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
     func importFiles(_ urls: [URL]) async {
         guard !urls.isEmpty, container != nil else { return }
         let destination = browseMode == .path ? directory : ""
         let scoped = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { scoped.forEach { $0.stopAccessingSecurityScopedResource() } }
         await perform { ticket in
-            try await self.withTransferProgress("正在添加文件", operation: "import") {
+            let conflicts = Task { @MainActor in await self.pollImportConflicts(ticket: ticket) }
+            defer { conflicts.cancel(); self.completeImportReview(nil) }
+            try await self.withTransferProgress("正在导入文件", operation: "import") {
                 do {
-                    let view: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "import_files", sources: urls.map(\.path), directory: destination))
+                    let view: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "stream_import_files", sources: urls.map(\.path), directory: destination))
                     guard ticket == self.generation else { return }
                     self.container = view
-                    if let progress = self.client.transferProgress(), progress.operation == "import" {
-                        self.notice = "已完成 \(progress.completedFiles) 个文件，跳过 \(progress.skippedFiles) 个已存在的相同文件"
-                    } else { self.notice = "文件已添加" }
+                    if let progress = self.client.transferProgress() {
+                        self.notice = "已完成 \(progress.completedFiles) 个文件，跳过 \(progress.skippedFiles) 个文件"
+                    }
                 } catch {
                     let progress = self.client.transferProgress()
                     if ticket == self.generation,
-                       let refreshed: ContainerSnapshot = try? await self.client.json(NativeRequest(operation: "refresh")),
-                       ticket == self.generation { self.container = refreshed }
-                    if ticket == self.generation, let progress, progress.operation == "import", progress.phase == "cancelled" {
-                        self.notice = "导入已中止，已完成 \(progress.completedFiles) 个文件"
+                       let refreshed: ContainerSnapshot = try? await self.client.json(NativeRequest(operation: "refresh")), ticket == self.generation { self.container = refreshed }
+                    if ticket == self.generation, let progress, progress.phase == "cancelled" {
+                        self.notice = "导入已中止，已完成 \(progress.completedFiles) 个文件（其中跳过 \(progress.skippedFiles) 个）"
                         return
                     }
                     throw error
@@ -457,10 +512,39 @@ final class AppStore: ObservableObject {
         panel.nameFieldStringValue = file.leafName
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        await exportPaths([file.name], to: url)
+    }
+
+    func exportFolder(_ path: String) async {
+        guard !isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择导出位置"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        await exportPaths([path], to: url)
+    }
+
+    func exportPaths(_ names: [String], to url: URL) async {
         await perform { ticket in
-            try await self.withTransferProgress("正在导出文件", operation: "export") {
-                let unstable = try await self.client.exportWithStatus(name: file.name, destination: url.path)
-                if ticket == self.generation { self.notice = unstable ? "文件已导出；内容正在写入，结果可能发生变化" : "文件已导出" }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            let conflicts = Task { @MainActor in await self.pollImportConflicts(ticket: ticket, exporting: true) }
+            defer { conflicts.cancel(); self.completeImportReview(nil) }
+            do {
+                try await self.withTransferProgress("正在导出文件", operation: "export") {
+                    try await self.client.execute(NativeRequest(operation: "stream_export_files", names: names, destination: url.path))
+                }
+            } catch {
+                if ticket == self.generation, self.client.transferProgress()?.phase == "cancelled" {
+                    self.notice = "导出已中止，已导出的文件已保留"
+                    return
+                }
+                throw error
+            }
+            if ticket == self.generation, let progress = self.client.transferProgress() {
+                self.notice = "导出完成 \(progress.completedFiles - progress.skippedFiles) 个文件，跳过 \(progress.skippedFiles) 个文件"
             }
         }
     }

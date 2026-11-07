@@ -15,9 +15,11 @@ pub mod locking;
 pub mod metadata;
 pub mod mime;
 pub mod progress;
+pub mod queue;
 pub mod temp;
 pub mod veil_package;
 pub mod version;
 pub mod volume;
 
 pub mod database;
+mod database_pool;

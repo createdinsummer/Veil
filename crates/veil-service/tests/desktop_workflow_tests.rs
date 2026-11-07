@@ -115,7 +115,9 @@ fn desktop_flow_worker() {
         })
         .unwrap()
     {
-        ServiceResponse::Preview(bytes) => assert_eq!(bytes, b"hello"),
+        ServiceResponse::Preview(bytes) | ServiceResponse::PreviewUnstable(bytes) => {
+            assert_eq!(bytes, b"hello")
+        }
         _ => panic!("预期返回文件内容"),
     }
     let output = root.join("output.txt");

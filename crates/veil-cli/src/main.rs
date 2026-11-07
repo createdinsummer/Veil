@@ -144,7 +144,9 @@ enum Commands {
         password: Option<String>,
     },
 
-    /// 从容器解密导出文件。
+    /// 从容器解密导出文件或文件夹。
+    ///
+    /// 导出文件夹时，输出路径为目标目录，并保留原文件夹名。
     Ex {
         // 位置参数形式的容器名称、ID 或链接目标。
         #[arg(value_name = "容器名称")]
@@ -167,6 +169,9 @@ enum Commands {
         // 选项形式的密码。
         #[arg(short, long, conflicts_with = "password_pos", value_name = "密码")]
         password: Option<String>,
+        /// 同名目标的处理策略，默认交互选择（相同内容也询问）。
+        #[arg(long, value_enum, default_value = "ask")]
+        on_conflict: commands::add::ConflictPolicy,
     },
 
     /// 显示容器身份和内容统计。
@@ -1002,6 +1007,7 @@ fn main() {
             input,
             output,
             password,
+            on_conflict,
         } => {
             let veil = require_veil(veil, "ex");
             let inp = input_pos.or(input);
@@ -1009,7 +1015,7 @@ fn main() {
             let pwd = password_pos.or(password);
 
             if let Some(out) = out {
-                commands::ex::run(&veil, inp.as_deref(), &out, pwd)
+                commands::ex::run(&veil, inp.as_deref(), &out, pwd, on_conflict)
             } else {
                 exit_with_help(crate::error::ErrorCode::MissingOutputPath, "ex");
             }

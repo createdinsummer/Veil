@@ -561,10 +561,10 @@ impl LockManager {
         Ok(replacement)
     }
 }
-pub(crate) fn validate(conn: &Connection, c: &Credential, mode: Option<LockMode>) -> Result<()> {
+fn validate_local(c: &Credential, mode: Option<LockMode>) -> Result<bool> {
     if c.is_read_only() {
         return if mode.is_none() || mode == Some(LockMode::ReadOnly) {
-            Ok(())
+            Ok(true)
         } else {
             Err(invalid("锁类型不匹配"))
         };
@@ -580,12 +580,90 @@ pub(crate) fn validate(conn: &Connection, c: &Credential, mode: Option<LockMode>
     if !c.local_valid() {
         return Err(invalid("文件锁租约已失效，请重新申请"));
     }
+    Ok(false)
+}
+pub(crate) fn validate(conn: &Connection, c: &Credential, mode: Option<LockMode>) -> Result<()> {
+    if validate_local(c, mode)? {
+        return Ok(());
+    }
     let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM operation_locks WHERE lock_id=?1 AND resource_id=?2 AND owner_token=?3 AND owner_identity=?4 AND expires_at>?5 AND (?6 IS NULL OR mode=?6))",params![c.lock_id,c.resource_id,c.token,json(&c.owner)?,now(),mode.map(LockMode::as_str)],|r|r.get(0))?;
     if !valid {
         return Err(invalid("文件锁凭证已失效"));
     }
     Ok(())
 }
+/// 在同一事务快照内批量验证凭证，避免每个文件单独查询租约表。
+pub(crate) fn validate_many(
+    conn: &Connection,
+    requested: &[(&Credential, Option<LockMode>)],
+) -> Result<()> {
+    use rusqlite::types::Value;
+    let mut writable = Vec::new();
+    for &(credential, mode) in requested {
+        if !validate_local(credential, mode)? {
+            writable.push((credential, mode));
+        }
+    }
+    for batch in writable.chunks(128) {
+        let rows = vec!["(?,?,?,?,?)"; batch.len()].join(",");
+        let mut values = Vec::new();
+        for (credential, mode) in batch {
+            values.extend([
+                Value::Text(credential.lock_id.clone()),
+                Value::Text(credential.resource_id.clone()),
+                Value::Text(credential.token.clone()),
+                Value::Text(json(&credential.owner)?),
+                mode.map(|mode| Value::Text(mode.as_str().to_owned()))
+                    .unwrap_or(Value::Null),
+            ]);
+        }
+        values.push(Value::Integer(now()));
+        let sql = format!(
+            "WITH expected(lock_id,resource_id,token,owner,mode) AS (VALUES {rows})
+            SELECT EXISTS(SELECT 1 FROM expected e LEFT JOIN operation_locks l
+              ON l.lock_id=e.lock_id AND l.resource_id=e.resource_id AND l.owner_token=e.token
+              AND l.owner_identity=e.owner AND (e.mode IS NULL OR l.mode=e.mode)
+              WHERE l.lock_id IS NULL OR l.expires_at<=?)"
+        );
+        let invalid_credential: bool =
+            conn.query_row(&sql, rusqlite::params_from_iter(values), |row| row.get(0))?;
+        if invalid_credential {
+            return Err(invalid("文件锁凭证已失效"));
+        }
+    }
+    Ok(())
+}
+
+/// 调用方必须在同一写事务内先 validate_many，再批量释放已验证的凭证。
+pub(crate) fn release_validated_many(conn: &Connection, credentials: &[&Credential]) -> Result<()> {
+    use rusqlite::types::Value;
+    let mut unique = std::collections::HashSet::new();
+    let credentials = credentials
+        .iter()
+        .filter(|credential| {
+            !credential.is_read_only() && unique.insert(credential.lock_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    for batch in credentials.chunks(128) {
+        let rows = vec!["(?,?)"; batch.len()].join(",");
+        let mut values = Vec::new();
+        for credential in batch {
+            values.extend([
+                Value::Text(credential.lock_id.clone()),
+                Value::Text(credential.token.clone()),
+            ]);
+        }
+        let deleted = conn.execute(
+            &format!("DELETE FROM operation_locks WHERE (lock_id,owner_token) IN (VALUES {rows})"),
+            rusqlite::params_from_iter(values),
+        )?;
+        if deleted != batch.len() {
+            return Err(invalid("文件锁释放期间凭证发生变化"));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn release_in(conn: &Connection, c: &Credential) -> Result<()> {
     validate(conn, c, None)?;
     conn.execute(

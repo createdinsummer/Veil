@@ -203,6 +203,98 @@ final class NativeClientTests: XCTestCase {
         XCTAssertNil(asset.data)
     }
 
+    func testExportReviewAndCancellationPreserveExistingFiles() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("导出集成测试需要独立的测试目录")
+        }
+        let store = AppStore()
+        await store.load()
+        let space = try XCTUnwrap(store.activeSpace)
+        await store.submit(.create(space: space.id), name: "导出测试 " + UUID().uuidString,
+                           password: "export-password", confirmation: "export-password")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.txt")
+        try Data("original".utf8).write(to: source)
+        await store.importFiles([source])
+        let output = root.appendingPathComponent("output.txt")
+        await store.exportPaths(["source.txt"], to: output)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
+        func awaitReview() async throws -> ImportInspection {
+            let deadline = Date().addingTimeInterval(15)
+            while store.importInspection == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            return try XCTUnwrap(store.importInspection, store.error ?? "未出现导出冲突")
+        }
+        try Data("keep".utf8).write(to: output)
+        let overwrite = Task { await store.exportPaths(["source.txt"], to: output) }
+        let batch = try await awaitReview()
+        XCTAssertEqual(store.conflictOperation, "导出")
+        XCTAssertFalse(try XCTUnwrap(batch.conflicts.first).sameContent)
+        store.completeImportReview([ImportResolution(target: try XCTUnwrap(batch.conflicts.first).target, action: .overwrite)], id: batch.id)
+        await overwrite.value
+        XCTAssertNil(store.error)
+        XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
+        let cancelling = Task { await store.exportPaths(["source.txt"], to: output) }
+        _ = try await awaitReview()
+        await store.lock()
+        await cancelling.value
+        XCTAssertNil(store.importInspection)
+        XCTAssertNil(store.container)
+        XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
+    }
+
+    func testImportReviewRequiresChoicesAndLockCancelsPendingReview() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("冲突集成测试需要独立测试目录")
+        }
+        let store = AppStore()
+        await store.load()
+        let space = try XCTUnwrap(store.activeSpace)
+        await store.submit(.create(space: space.id), name: "冲突测试 " + UUID().uuidString,
+                           password: "review-password", confirmation: "review-password")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("同名.txt")
+        try Data("original".utf8).write(to: file)
+        await store.importFiles([file])
+        XCTAssertNil(store.error)
+        func awaitReview() async throws -> ImportInspection {
+            let deadline = Date().addingTimeInterval(15)
+            while store.importInspection == nil && Date() < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            return try XCTUnwrap(store.importInspection, store.error ?? "未出现冲突选择")
+        }
+        let skipping = Task { await store.importFiles([file]) }
+        let same = try await awaitReview()
+        XCTAssertTrue(try XCTUnwrap(same.conflicts.first).sameContent)
+        XCTAssertEqual(store.container?.files.first?.version, 1)
+        store.completeImportReview([ImportResolution(target: "同名.txt", action: .skip)])
+        await skipping.value
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.container?.files.first?.version, 1)
+        try Data("changed".utf8).write(to: file)
+        let overwriting = Task { await store.importFiles([file]) }
+        let different = try await awaitReview()
+        XCTAssertFalse(try XCTUnwrap(different.conflicts.first).sameContent)
+        store.completeImportReview([ImportResolution(target: "同名.txt", action: .overwrite)])
+        await overwriting.value
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.container?.files.first?.version, 2)
+        let cancelling = Task { await store.importFiles([file]) }
+        _ = try await awaitReview()
+        await store.lock()
+        await cancelling.value
+        XCTAssertNil(store.importInspection)
+        XCTAssertNil(store.container)
+        XCTAssertFalse(store.isBusy)
+    }
+
     func testSwiftCallsRealRustService() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {

@@ -195,7 +195,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
 // 显式列顺序让 JOIN / 递归查询共用同一映射；保留第 11 列用于路径。
 const COLUMNS: &str = "id,parent_id,name,kind,created_at,updated_at,cipher_name,size,key_id,nonce,encrypted_at,NULL,version_history";
 pub struct ContainerDb {
-    pub(crate) conn: Connection,
+    pub(crate) conn: veil_core::database::Connection,
     pub directory: PathBuf,
 }
 impl ContainerDb {
@@ -314,6 +314,20 @@ impl ContainerDb {
             .query_map(params![parent, limit, offset], row)?
             .collect::<rusqlite::Result<_>>()?)
     }
+    /// 目录读锁保持期间按名称分页，避免一次载入整个目录或反复扫描 OFFSET。
+    pub(crate) fn children_after(
+        &self,
+        parent: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM file_info WHERE parent_id=?1 AND (?2 IS NULL OR name>?2) ORDER BY name LIMIT ?3"
+        ))?;
+        Ok(stmt
+            .query_map(params![parent, after, limit], row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
     pub fn subtree(&self, identity: &str) -> Result<Vec<Node>> {
         subtree(&self.conn, identity)
     }
@@ -393,6 +407,27 @@ pub(crate) fn node(conn: &Connection, identity: &str) -> Result<Option<Node>> {
     }
     Ok(n)
 }
+/// 在调用方事务内按身份批量读取节点，限制单条语句的参数数量。
+pub(crate) fn nodes_batch(
+    conn: &Connection,
+    identities: &[String],
+) -> Result<std::collections::HashMap<String, Node>> {
+    let mut nodes = std::collections::HashMap::new();
+    for batch in identities.chunks(128) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let mut query = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM file_info WHERE id IN ({placeholders})"
+        ))?;
+        let rows = query.query_map(rusqlite::params_from_iter(batch), row)?;
+        for node in rows {
+            let node = node?;
+            validate_node(&node)?;
+            nodes.insert(node.id.clone(), node);
+        }
+    }
+    Ok(nodes)
+}
+
 pub(crate) fn resolve(conn: &Connection, path: &str) -> Result<Option<Node>> {
     let mut current: Node = conn.query_row(
         &format!("SELECT {COLUMNS} FROM file_info WHERE parent_id IS NULL"),
@@ -419,6 +454,66 @@ pub(crate) fn resolve(conn: &Connection, path: &str) -> Result<Option<Node>> {
     validate_node(&current)?;
     Ok(Some(current))
 }
+pub(crate) fn resolve_batch(
+    conn: &Connection,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, (Node, Option<String>, bool)>> {
+    if paths.len() > 128 {
+        let mut nodes = std::collections::HashMap::new();
+        for batch in paths.chunks(128) {
+            nodes.extend(resolve_batch(conn, batch)?);
+        }
+        return Ok(nodes);
+    }
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let values = (0..paths.len())
+        .map(|_| "(?)")
+        .collect::<Vec<_>>()
+        .join(",");
+    let columns = COLUMNS
+        .split(',')
+        .map(|column| {
+            if column == "NULL" {
+                "NULL".to_owned()
+            } else {
+                format!("n.{column}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("WITH RECURSIVE requested(path) AS (VALUES {values}),
+        walk(path,rest,id) AS (
+          SELECT path,path||'/',id FROM requested CROSS JOIN file_info WHERE parent_id IS NULL
+          UNION ALL
+          SELECT w.path,substr(w.rest,instr(w.rest,'/')+1),n.id FROM walk w
+          JOIN file_info n ON n.parent_id=w.id AND n.name=substr(w.rest,1,instr(w.rest,'/')-1)
+          WHERE w.rest<>''
+        )
+        SELECT {columns},w.path,h.blake3,w.rest='' FROM walk w JOIN file_info n ON n.id=w.id
+        LEFT JOIN file_hash h ON h.file_id=n.id
+        WHERE w.rest='' OR NOT EXISTS (SELECT 1 FROM file_info c WHERE c.parent_id=w.id AND c.name=substr(w.rest,1,instr(w.rest,'/')-1))");
+    let mut query = conn.prepare(&sql)?;
+    let rows = query.query_map(rusqlite::params_from_iter(paths), |r| {
+        Ok((
+            r.get::<_, String>(13)?,
+            (
+                row(r)?,
+                r.get::<_, Option<String>>(14)?,
+                r.get::<_, bool>(15)?,
+            ),
+        ))
+    })?;
+    let mut result = std::collections::HashMap::new();
+    for row in rows {
+        let (path, (node, hash, exact)) = row?;
+        validate_node(&node)?;
+        result.insert(path, (node, hash, exact));
+    }
+    Ok(result)
+}
+
 pub(crate) fn ensure_directory(conn: &Connection, path: &str) -> Result<Node> {
     let mut current = resolve(conn, "")?.ok_or_else(|| invalid("根目录缺失"))?;
     if path.is_empty() {
@@ -441,6 +536,44 @@ pub(crate) fn ensure_directory(conn: &Connection, path: &str) -> Result<Node> {
         }
     }
     Ok(current)
+}
+/// 已提交缓存与当前事务新增目录分开保存，回滚不能污染共享缓存。
+pub(crate) fn ensure_directory_cached(
+    conn: &Connection,
+    path: &str,
+    known: &std::collections::HashMap<String, Node>,
+    pending: &mut std::collections::HashMap<String, Node>,
+) -> Result<Node> {
+    if let Some(node) = pending.get(path).or_else(|| known.get(path)) {
+        return Ok(node.clone());
+    }
+    let node = if path.is_empty() {
+        resolve(conn, "")?.ok_or_else(|| invalid("根目录缺失"))?
+    } else {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent = ensure_directory_cached(conn, parent, known, pending)?;
+        match conn
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM file_info WHERE parent_id=?1 AND name=?2"),
+                params![parent.id, name],
+                row,
+            )
+            .optional()?
+        {
+            Some(node) if node.kind == "directory" => {
+                validate_node(&node)?;
+                node
+            }
+            Some(_) => return Err(invalid("父路径是文件")),
+            None => {
+                let identity = id();
+                conn.execute("INSERT INTO file_info(id,parent_id,name,kind,created_at,updated_at) VALUES(?1,?2,?3,'directory',?4,?4)",params![identity,parent.id,name,now()])?;
+                node(conn, &identity)?.ok_or_else(|| invalid("新建目录缺失"))?
+            }
+        }
+    };
+    pending.insert(path.to_owned(), node.clone());
+    Ok(node)
 }
 pub(crate) fn subtree(conn: &Connection, identity: &str) -> Result<Vec<Node>> {
     let mut stmt=conn.prepare(&format!("WITH RECURSIVE tree(x) AS (SELECT id FROM file_info WHERE id=?1 UNION SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.x) SELECT {COLUMNS} FROM file_info WHERE id IN (SELECT x FROM tree) ORDER BY id"))?;

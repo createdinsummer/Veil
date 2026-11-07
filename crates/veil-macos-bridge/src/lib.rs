@@ -62,12 +62,30 @@ enum Request {
         sources: Vec<String>,
         directory: String,
     },
+    StreamImportFiles {
+        sources: Vec<String>,
+        directory: String,
+    },
+    PollImportConflicts,
+    ResolveImportConflicts {
+        id: String,
+        resolutions: Vec<veil_service::session::SessionImportResolution>,
+    },
     PreviewFile {
         name: String,
     },
     ExportFile {
         name: String,
         destination: String,
+    },
+    StreamExportFiles {
+        names: Vec<String>,
+        destination: String,
+    },
+    PollExportConflicts,
+    ResolveExportConflicts {
+        id: String,
+        resolutions: Vec<veil_service::session::SessionImportResolution>,
     },
     ExportPackage {
         destination: String,
@@ -125,9 +143,23 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::ImportFiles { sources, directory } => {
             ServiceRequest::ImportSessionFiles { sources, directory }
         }
+        Request::StreamImportFiles { sources, directory } => {
+            ServiceRequest::StreamSessionImport { sources, directory }
+        }
+        Request::PollImportConflicts => ServiceRequest::PollSessionImportConflicts,
+        Request::ResolveImportConflicts { id, resolutions } => {
+            ServiceRequest::ResolveSessionImportConflicts { id, resolutions }
+        }
         Request::PreviewFile { name } => ServiceRequest::PreviewSessionFile { name },
         Request::ExportFile { name, destination } => {
             ServiceRequest::ExportSessionFile { name, destination }
+        }
+        Request::StreamExportFiles { names, destination } => {
+            ServiceRequest::StreamSessionExport { names, destination }
+        }
+        Request::PollExportConflicts => ServiceRequest::PollSessionExportConflicts,
+        Request::ResolveExportConflicts { id, resolutions } => {
+            ServiceRequest::ResolveSessionExportConflicts { id, resolutions }
         }
         Request::ExportPackage { destination } => {
             ServiceRequest::ExportSessionPackage { destination }
@@ -173,6 +205,7 @@ fn serialize(
     let response = result.map_err(|error| error.to_string())?;
     let data = match response {
         ServiceResponse::Container(value) => serde_json::to_vec(&value),
+        ServiceResponse::ImportConflicts(value) => serde_json::to_vec(&value),
         ServiceResponse::Spaces(value) => serde_json::to_vec(&value),
         ServiceResponse::Recents(value) => serde_json::to_vec(&value),
         ServiceResponse::Setting(value) => serde_json::to_vec(&value),
@@ -361,13 +394,51 @@ mod tests {
             )
         };
         assert_eq!(kind, 0);
+        let service = unsafe { &*client }.clone();
+        let worker_source = source.to_string_lossy().into_owned();
+        let importing = std::thread::spawn(move || {
+            service.execute(ServiceRequest::StreamSessionImport {
+                sources: vec![worker_source],
+                directory: String::new(),
+            })
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let inspection: serde_json::Value = loop {
+            let (kind, bytes) = unsafe {
+                call(
+                    client,
+                    serde_json::json!({"operation":"poll_import_conflicts"}),
+                )
+            };
+            assert_eq!(kind, 0);
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if !value.is_null() {
+                break value;
+            }
+            if std::time::Instant::now() > deadline {
+                unsafe {
+                    veil_client_cancel_transfer(client);
+                }
+                panic!("未收到冲突批次");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(inspection["conflicts"][0]["sameContent"], true);
+        let (kind, bytes) = unsafe {
+            call(
+                client,
+                serde_json::json!({"operation":"resolve_import_conflicts","id":inspection["id"],"resolutions":[{"target":"说明.txt","action":"skip"}]}),
+            )
+        };
+        assert_eq!(kind, 0, "{}", String::from_utf8_lossy(&bytes));
+        assert!(importing.join().unwrap().is_ok());
         let (kind, bytes) = unsafe {
             call(
                 client,
                 serde_json::json!({"operation":"preview_file","name":"说明.txt"}),
             )
         };
-        assert_eq!(kind, 2);
+        assert!(matches!(kind, 2 | 3));
         assert_eq!(bytes, std::fs::read(&source).unwrap());
         let exported = Path::new(&root).join("导出.txt");
         assert_eq!(unsafe { call(client, serde_json::json!({"operation":"export_file","name":"说明.txt","destination":exported})) }.0, 0);

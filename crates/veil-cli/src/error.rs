@@ -440,7 +440,9 @@ impl From<veil_core::error::VeilError> for CommandError {
             ),
             VeilError::Format(error) => (ErrorCode::Format, error),
             VeilError::WorkError(error) => (ErrorCode::Work, error),
-            VeilError::ConfigError(error) => (ErrorCode::Config, error),
+            VeilError::ConfigError(error) | VeilError::DatabasePool(error) => {
+                (ErrorCode::Config, error)
+            }
             VeilError::VeilNotFound(error) => (ErrorCode::VeilNotFound, error),
             VeilError::InvalidFormat(error) => (ErrorCode::InvalidFormat, error),
             VeilError::SerializationError(error) => (ErrorCode::Serialization, error),

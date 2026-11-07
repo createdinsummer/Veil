@@ -99,3 +99,30 @@ fn shell_reports_unknown_commands_without_exiting() {
         .stdout(predicate::str::contains("未知命令"))
         .stdout(predicate::str::contains("再见"));
 }
+
+#[test]
+fn shell_exports_a_folder_through_the_shared_pipeline() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("shell-folder-export");
+    env.write_file("tree/nested/one.txt", "one");
+    env.write_file("tree/two.txt", "two");
+    let source = env.work.path().join("tree");
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+    let output = env.work.path().join("out");
+    env.command()
+        .args(["shell", &env.path(&link)])
+        .write_stdin(format!("ex tree {}\nexit\n", output.display()))
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(output.join("tree/nested/one.txt")).unwrap(),
+        "one"
+    );
+    assert_eq!(
+        std::fs::read_to_string(output.join("tree/two.txt")).unwrap(),
+        "two"
+    );
+}

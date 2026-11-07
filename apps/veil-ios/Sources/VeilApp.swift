@@ -75,7 +75,23 @@ struct RootView: View {
                         } } label: { Image(systemName: "ellipsis.circle") }.disabled(store.busy)
                     }
                 }
-                .overlay { if store.busy { ProgressView().padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14)) } }
+                .overlay {
+                    if store.busy {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            if let status = store.importStatus {
+                                Text(status).font(.subheadline)
+                                if let progress = store.importProgress, progress.total_files > 0 {
+                                    ProgressView(value: min(1, Double(progress.completed_files) / Double(progress.total_files))).frame(width: 220)
+                                    Text("\(Int(min(1, Double(progress.completed_files) / Double(progress.total_files))*100))% · 已完成 \(progress.completed_files) / \(progress.total_files)").font(.caption).monospacedDigit()
+                                    Text(progress.scan_complete ? "文件遍历完成" : "正在发现文件，总数持续增加").font(.caption)
+                                    if progress.waiting_files > 0 { Text("待选择：\(progress.waiting_files) 个文件").font(.caption) }
+                                }
+                                Button("取消") { store.cancelImport() }
+                            }
+                        }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                }
         }
         .overlay {
             if showIntro {
@@ -88,11 +104,21 @@ struct RootView: View {
         }
         .privacySensitive()
         .overlay { if phase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
-        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; importing = false; importingPackage = false } }
+        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; importing = false; importingPackage = false; store.exportSelection = nil } }
         .tint(ink)
         .sheet(item: $form, onDismiss: { if let url = pendingPackage { url.stopAccessingSecurityScopedResource(); pendingPackage = nil } }) { ContainerFormView(form: $0) { form = nil } }
+        .fileImporter(isPresented: Binding(get: { store.exportSelection != nil }, set: { _ in }), allowedContentTypes: [.folder]) { result in
+            let entry = store.exportSelection
+            store.exportSelection = nil
+            if case .success(let url) = result, let entry { Task { await store.exportToDirectory(entry, destination: url) } }
+        }
         .fileExporter(isPresented: Binding(get: { store.export != nil }, set: { if !$0 { store.export = nil } }), document: store.export?.document, contentType: .data, defaultFilename: store.export?.name ?? "Veil") { result in
             if case .failure(let error) = result { store.error = error.localizedDescription }; store.export = nil
+        }
+        .sheet(item: $store.importInspection) { inspection in
+            ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
+                .interactiveDismissDisabled()
+                .onDisappear { store.completeImportReview(nil, id: inspection.id) }
         }
         .sheet(item: $store.preview) { PreviewView(item: $0) }
         .sheet(isPresented: $newSpace) { NewSpaceView() }
@@ -257,7 +283,8 @@ struct RootView: View {
         switch entry { case .folder: return "文件夹"; case .file(let file): return store.mode == .type ? file.parentName : file.sizeLabel }
     }
     @ViewBuilder func entryActions(_ entry: BrowserEntry) -> some View {
-        if case .file(let file) = entry { Button("导出", systemImage: "square.and.arrow.up") { Task { await store.prepareExport(file) } } }
+        Button("导出到文件夹…", systemImage: "square.and.arrow.up") { store.exportSelection = entry }
+        if case .file(let file) = entry { Button("分享文件…", systemImage: "square.and.arrow.up.on.square") { Task { await store.prepareExport(file) } } }
         Button("删除", systemImage: "trash", role: .destructive) { deleting = entry }
     }
 

@@ -29,6 +29,7 @@ impl VeilUnpacker {
     }
     pub fn read_metadata(&self, password: &str) -> Result<(MetaData, Vec<u8>)> {
         let temp = tempfile::TempDir::new()?;
+        let _connections = veil_core::database::PoolScope::new(temp.path().join(CONTAINER_DB));
         let bytes = self.read_encrypted_metadata()?;
         std::fs::write(temp.path().join(CONTAINER_DB), &bytes)?;
         let db = ContainerDb::open(temp.path(), password, None)?;
@@ -103,12 +104,14 @@ pub(crate) fn unpack_registered(
     }
     config.ensure_veil_id_available(expected_id)?;
     let staging = tempfile::TempDir::new_in(work_root)?;
+    let connections = veil_core::database::PoolScope::new(staging.path().join(CONTAINER_DB));
     let metadata = VeilUnpacker::new(package_path).unpack_verified(staging.path(), password)?;
     if metadata.veil_id != expected_id {
         return Err(invalid("容器身份不一致"));
     }
     VeilManager::new(staging.path().into()).rename_container(name, password)?;
     // 原子发布目录，之后登记失败时保留经过验证的数据，便于重新登记。
+    drop(connections);
     crate::fsutil::rename_no_replace(staging.path(), veil_dir)?;
     crate::fsutil::sync_directory(work_root)?;
     config.register_directory(veil_dir, expected_id, name, &metadata.created_at)?;
@@ -139,6 +142,7 @@ impl VeilPacker {
     }
     pub fn pack_container(&self, manager: &VeilManager, password: &str) -> Result<usize> {
         let temporary = tempfile::TempDir::new()?;
+        let _connections = veil_core::database::PoolScope::new(temporary.path().join(CONTAINER_DB));
         let manager =
             VeilManager::new(manager.veil_dir.clone()).with_lock_options(self.options.clone());
         let count = manager.snapshot_to(temporary.path(), password)?;

@@ -143,6 +143,11 @@ impl VeilPackageWriter {
 pub struct VeilPasswordVerifier {
     database: tempfile::NamedTempFile,
 }
+impl Drop for VeilPasswordVerifier {
+    fn drop(&mut self) {
+        database::invalidate(self.database.path());
+    }
+}
 impl VeilPasswordVerifier {
     pub fn matches_password(&self, password: &str) -> bool {
         database::open(self.database.path(), Some(password), false).is_ok()

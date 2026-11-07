@@ -1,7 +1,7 @@
 //! 面向调用方的容器会话请求入口。
 
 use crate::veil_ops::VeilManager;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::{
     collections::HashSet,
@@ -17,7 +17,46 @@ pub struct VeilService(
     veil_core::progress::Progress,
     Arc<Mutex<()>>,
     Arc<RwLock<Option<PathBuf>>>,
+    Arc<Mutex<Option<Arc<crate::import_pipeline::ImportConflictQueue>>>>,
+    Arc<Mutex<Option<Arc<crate::transfer_conflicts::ConflictQueue<crate::export_pipeline::Work>>>>>,
 );
+
+impl Drop for VeilService {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.0) == 1 {
+            if let Ok(session) = self.0.lock() {
+                if let Some(session) = session.as_ref() {
+                    veil_core::database::invalidate(
+                        &session.path.join(veil_core::database::CONTAINER_DB),
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct StreamingImportRegistration<'a>(
+    &'a Mutex<Option<Arc<crate::import_pipeline::ImportConflictQueue>>>,
+);
+impl Drop for StreamingImportRegistration<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionImportAction {
+    Skip,
+    Overwrite,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionImportResolution {
+    pub target: String,
+    pub action: SessionImportAction,
+}
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct ImportKey {
@@ -100,12 +139,30 @@ pub enum ServiceRequest<'a> {
         sources: Vec<String>,
         directory: String,
     },
+    StreamSessionImport {
+        sources: Vec<String>,
+        directory: String,
+    },
+    PollSessionImportConflicts,
+    ResolveSessionImportConflicts {
+        id: String,
+        resolutions: Vec<SessionImportResolution>,
+    },
     PreviewSessionFile {
         name: String,
     },
     ExportSessionFile {
         name: String,
         destination: String,
+    },
+    StreamSessionExport {
+        names: Vec<String>,
+        destination: String,
+    },
+    PollSessionExportConflicts,
+    ResolveSessionExportConflicts {
+        id: String,
+        resolutions: Vec<SessionImportResolution>,
     },
     ExportSessionPackage {
         destination: String,
@@ -235,6 +292,7 @@ pub enum ServiceResponse {
     LinkPrepared(crate::link::LinkPlan),
     LinkCreated(PathBuf),
     ImportFiles(Vec<crate::veil_ops::AddFileSpec>),
+    ImportConflicts(Option<crate::import_pipeline::ConflictBatch>),
     PackPrepared(PathBuf),
     PasswordValid,
 }
@@ -435,20 +493,29 @@ impl VeilService {
     /// 接收容器会话请求，执行对应的参数校验和业务流程。
     pub fn execute(&self, request: ServiceRequest<'_>) -> Result<ServiceResponse, ServiceError> {
         let _import = match &request {
-            ServiceRequest::ImportSessionFiles { sources, directory } => {
+            ServiceRequest::ImportSessionFiles { sources, directory }
+            | ServiceRequest::StreamSessionImport { sources, directory } => {
                 Some(self.register_import(sources, directory)?)
             }
             _ => None,
         };
-        // 不同导入任务沿用原有串行执行方式；重复任务在等待之前已经拒绝。
-        let _import_serial = if _import.is_some() {
+        // 文件传输任务串行启动进度，避免后台导出请求重置正在运行的传输进度。
+        let _import_serial = if _import.is_some()
+            || matches!(
+                &request,
+                ServiceRequest::StreamSessionExport { .. }
+                    | ServiceRequest::ExportSessionFile { .. }
+                    | ServiceRequest::ExportSessionPackage { .. }
+            ) {
             Some(self.2.lock().map_err(|_| ServiceError::StateUnavailable)?)
         } else {
             None
         };
         let operation = match &request {
-            ServiceRequest::ImportSessionFiles { .. } => Some("import"),
-            ServiceRequest::ExportSessionFile { .. } => Some("export"),
+            ServiceRequest::ImportSessionFiles { .. }
+            | ServiceRequest::StreamSessionImport { .. } => Some("import"),
+            ServiceRequest::ExportSessionFile { .. }
+            | ServiceRequest::StreamSessionExport { .. } => Some("export"),
             ServiceRequest::ImportPackageInSpace { .. } => Some("import_package"),
             ServiceRequest::ExportSessionPackage { .. } => Some("export_package"),
             _ => None,
@@ -465,7 +532,13 @@ impl VeilService {
             _import.as_ref().map(|guard| guard.key.container.as_path()),
         );
         if operation.is_some() {
-            if matches!(&result, Err(ServiceError::ImportCancelled { .. })) {
+            if matches!(&result, Err(ServiceError::ImportCancelled { .. }))
+                || (matches!(operation, Some("import" | "export"))
+                    && matches!(
+                        &result,
+                        Err(ServiceError::Core(veil_core::error::VeilError::Cancelled))
+                    ))
+            {
                 self.1.finish_cancelled();
             } else {
                 self.1.finish(result.is_ok());
@@ -595,6 +668,55 @@ impl VeilService {
                     import_container.ok_or(ServiceError::NotOpen)?,
                 )
                 .map(ServiceResponse::Container),
+            ServiceRequest::StreamSessionImport { sources, directory } => {
+                let expected = import_container.ok_or(ServiceError::NotOpen)?;
+                let session = self
+                    .0
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone()
+                    .ok_or(ServiceError::NotOpen)?;
+                if session.path != expected {
+                    return Err(ServiceError::InvalidInput("容器已切换，请重新导入"));
+                }
+                let control = Arc::new(crate::import_pipeline::ImportConflictQueue::default());
+                *self.4.lock().map_err(|_| ServiceError::StateUnavailable)? =
+                    Some(Arc::clone(&control));
+                let _registration = StreamingImportRegistration(&self.4);
+                let mut options = crate::storage::locks::default_options();
+                options.cancellation = Some(self.1.cancellation_flag());
+                let manager =
+                    VeilManager::for_veil(session.path, session.veil_id).with_lock_options(options);
+                let result = crate::import_pipeline::run(
+                    &manager,
+                    session.password.as_str(),
+                    sources,
+                    directory,
+                    &self.1,
+                    &control,
+                );
+                result.map(ServiceResponse::Container)
+            }
+            ServiceRequest::PollSessionImportConflicts => {
+                let control = self
+                    .4
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone();
+                Ok(ServiceResponse::ImportConflicts(control.and_then(
+                    |control| control.poll(self.1.snapshot().total_files),
+                )))
+            }
+            ServiceRequest::ResolveSessionImportConflicts { id, resolutions } => {
+                let control = self
+                    .4
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone()
+                    .ok_or(ServiceError::InvalidInput("导入任务已结束"))?;
+                control.resolve(&id, resolutions)?;
+                Ok(ServiceResponse::Done)
+            }
             ServiceRequest::PreviewSessionFile { name } => {
                 self.preview_file(&name).map(|(bytes, unstable)| {
                     if unstable {
@@ -611,6 +733,68 @@ impl VeilService {
                 } else {
                     ServiceResponse::Done
                 })
+            }
+            ServiceRequest::StreamSessionExport { names, destination } => {
+                let session = self
+                    .0
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone()
+                    .ok_or(ServiceError::NotOpen)?;
+                let control = Arc::new(crate::transfer_conflicts::ConflictQueue::default());
+                *self.5.lock().map_err(|_| ServiceError::StateUnavailable)? =
+                    Some(Arc::clone(&control));
+                struct Registration<'a>(
+                    &'a Mutex<
+                        Option<
+                            Arc<
+                                crate::transfer_conflicts::ConflictQueue<
+                                    crate::export_pipeline::Work,
+                                >,
+                            >,
+                        >,
+                    >,
+                );
+                impl Drop for Registration<'_> {
+                    fn drop(&mut self) {
+                        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
+                }
+                let _registration = Registration(&self.5);
+                let mut options = crate::storage::locks::default_options();
+                options.cancellation = Some(self.1.cancellation_flag());
+                let manager =
+                    VeilManager::for_veil(session.path, session.veil_id).with_lock_options(options);
+                crate::export_pipeline::run(
+                    &manager,
+                    &session.password,
+                    names,
+                    Path::new(&destination),
+                    &self.1,
+                    &control,
+                    true,
+                )?;
+                Ok(ServiceResponse::Done)
+            }
+            ServiceRequest::PollSessionExportConflicts => {
+                let control = self
+                    .5
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone();
+                Ok(ServiceResponse::ImportConflicts(
+                    control.and_then(|c| c.poll(self.1.snapshot().total_files)),
+                ))
+            }
+            ServiceRequest::ResolveSessionExportConflicts { id, resolutions } => {
+                let control = self
+                    .5
+                    .lock()
+                    .map_err(|_| ServiceError::StateUnavailable)?
+                    .clone()
+                    .ok_or(ServiceError::InvalidInput("导出任务已结束"))?;
+                control.resolve(&id, resolutions)?;
+                Ok(ServiceResponse::Done)
             }
             ServiceRequest::ExportSessionPackage { destination } => {
                 let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
@@ -817,6 +1001,9 @@ impl VeilService {
         )?;
         let view = container_view(&path, &metadata);
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
+        if let Some(previous) = session.as_ref() {
+            veil_core::database::invalidate(&previous.path.join(veil_core::database::CONTAINER_DB));
+        }
         *session = Some(Session {
             path,
             veil_id: id,
@@ -849,6 +1036,9 @@ impl VeilService {
         )?;
         let view = container_view(&path, &metadata);
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
+        if let Some(previous) = session.as_ref() {
+            veil_core::database::invalidate(&previous.path.join(veil_core::database::CONTAINER_DB));
+        }
         *session = Some(Session {
             path,
             veil_id: metadata.veil_id.clone(),
@@ -1041,8 +1231,9 @@ impl VeilService {
         std::thread::scope(|scope| {
             // 队列及待提交批次均限制数量，避免长间隔导入时无限累积租约。
             const QUEUE_LIMIT: usize = 8;
-            let (sender, receiver) = std::sync::mpsc::sync_channel(QUEUE_LIMIT);
+            let (sender, receiver) = veil_core::queue::BoundedQueue::new(QUEUE_LIMIT).split();
             let remaining_workers = Arc::new(AtomicUsize::new(worker_count));
+            let directories = Arc::new(crate::directory_cache::DirectoryCache::default());
             for _ in 0..worker_count {
                 let progress = self.1.clone();
                 let manager = &manager;
@@ -1056,6 +1247,7 @@ impl VeilService {
                 let locked_directories = &locked_directories;
                 let remaining_workers = Arc::clone(&remaining_workers);
                 let context = crate::veil_ops::ImportBatchContext {
+                    directories: directories.clone(),
                     sender: sender.clone(),
                     directory_guard: directory_guard.cloned(),
                     owner: owner.clone(),
@@ -1118,26 +1310,27 @@ impl VeilService {
                 let wait = remaining.min(std::time::Duration::from_millis(20));
                 let mut disconnected = false;
                 if pending.len() < commit_count {
-                    match receiver.recv_timeout(wait) {
-                        Ok(item) => {
+                    match receiver.recv_batch_timeout(commit_count - pending.len(), wait) {
+                        Ok(items) => {
                             if pending.is_empty() {
                                 deadline = Some(std::time::Instant::now() + commit_interval);
                             }
-                            pending.push(item);
+                            pending.extend(items);
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(veil_core::queue::RecvError::Closed) => disconnected = true,
+                        Err(
+                            veil_core::queue::RecvError::Timeout
+                            | veil_core::queue::RecvError::Empty,
+                        ) => {}
+                        Err(veil_core::queue::RecvError::Cancelled) => disconnected = true,
                     }
                 } else if !wait.is_zero() {
                     std::thread::sleep(wait);
                 }
                 if !pending.is_empty() {
                     if remaining_workers.load(Ordering::Acquire) == 0 {
-                        while pending.len() < commit_count {
-                            match receiver.try_recv() {
-                                Ok(item) => pending.push(item),
-                                Err(_) => break,
-                            }
+                        if let Ok(items) = receiver.try_recv_batch(commit_count - pending.len()) {
+                            pending.extend(items);
                         }
                     }
                     let stop = stopped.load(Ordering::Acquire)
@@ -1262,12 +1455,15 @@ impl VeilService {
         let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = None;
+        if let Some(current) = session.as_ref() {
+            veil_core::database::invalidate(&current.path.join(veil_core::database::CONTAINER_DB));
+        }
         *session = None;
         Ok(())
     }
 }
 
-fn container_view(path: &Path, metadata: &MetaData) -> ContainerView {
+pub(crate) fn container_view(path: &Path, metadata: &MetaData) -> ContainerView {
     let mut files: Vec<_> = metadata
         .files
         .iter()
@@ -1320,6 +1516,558 @@ fn file_kind(name: &str) -> (&'static str, Option<&'static str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_stream_export(
+        app: &VeilService,
+        names: Vec<String>,
+        destination: &Path,
+    ) -> std::thread::JoinHandle<Result<ServiceResponse, ServiceError>> {
+        let app = app.clone();
+        let destination = destination.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            app.execute(ServiceRequest::StreamSessionExport { names, destination })
+        })
+    }
+    fn await_export_conflicts(app: &VeilService) -> crate::import_pipeline::ConflictBatch {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let ServiceResponse::ImportConflicts(Some(batch)) = app
+                .execute(ServiceRequest::PollSessionExportConflicts)
+                .unwrap()
+            {
+                return batch;
+            }
+            if std::time::Instant::now() > deadline {
+                app.cancel_transfer();
+                panic!("未收到导出冲突");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    fn await_export_end(
+        app: &VeilService,
+        task: std::thread::JoinHandle<Result<ServiceResponse, ServiceError>>,
+    ) -> Result<ServiceResponse, ServiceError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !task.is_finished() {
+            if std::time::Instant::now() > deadline {
+                app.cancel_transfer();
+                panic!("导出未结束");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        task.join().unwrap()
+    }
+    #[test]
+    fn stream_export_pages_folders_preserves_empty_directories_and_deduplicates_selection() {
+        let (root, manager, app, source) = stream_import_fixture();
+        let specs = (0..150)
+            .map(|i| crate::veil_ops::AddFileSpec::new(&source, format!("album/{i:03}")))
+            .collect::<Vec<_>>();
+        manager.add_files(&specs, "password").unwrap();
+        manager
+            .create_directory("album/nested/empty", "password")
+            .unwrap();
+        let output = root.path().join("output");
+        let task = run_stream_export(
+            &app,
+            vec!["album".into(), "album/000".into(), "album".into()],
+            &output,
+        );
+        await_export_end(&app, task).unwrap();
+        assert!(output.join("album/nested/empty").is_dir());
+        for i in 0..150 {
+            assert_eq!(
+                std::fs::read(output.join(format!("album/{i:03}"))).unwrap(),
+                b"original"
+            );
+        }
+        let p = app.transfer_progress();
+        assert_eq!(
+            (
+                p.total_files,
+                p.completed_files,
+                p.checked_files,
+                p.skipped_files
+            ),
+            (150, 150, 150, 0)
+        );
+        assert!(p.scan_complete);
+        assert_eq!(p.phase, "completed");
+    }
+    #[test]
+    fn stream_export_waits_for_choices_reuses_directory_lock_and_backfills_missing_hash() {
+        for action in [SessionImportAction::Skip, SessionImportAction::Overwrite] {
+            let (root, manager, app, source) = stream_import_fixture();
+            manager
+                .add_files(
+                    &[
+                        crate::veil_ops::AddFileSpec::new(&source, "album/same"),
+                        crate::veil_ops::AddFileSpec::new(&source, "album/clear"),
+                    ],
+                    "password",
+                )
+                .unwrap();
+            manager
+                .open_db("password")
+                .unwrap()
+                .conn
+                .execute("DELETE FROM file_hash", [])
+                .unwrap();
+            let output = root.path().join("output");
+            std::fs::create_dir_all(output.join("album")).unwrap();
+            std::fs::write(output.join("album/same"), b"original").unwrap();
+            let task = run_stream_export(&app, vec!["album".into()], &output);
+            let batch = await_export_conflicts(&app);
+            assert_eq!(batch.conflicts.len(), 1);
+            assert!(batch.conflicts[0].same_content);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !output.join("album/clear").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let db = manager.open_db("password").unwrap();
+            let resources = db
+                .conn
+                .prepare("SELECT resource_id FROM operation_locks")
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(resources.len(), 1);
+            assert!(resources[0].contains("veil-dir:"));
+            let cached: i64 = db
+                .conn
+                .query_row("SELECT count(*) FROM file_hash", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cached, 1);
+            drop(db);
+            app.execute(ServiceRequest::ResolveSessionExportConflicts {
+                id: batch.id,
+                resolutions: vec![SessionImportResolution {
+                    target: batch.conflicts[0].target.clone(),
+                    action,
+                }],
+            })
+            .unwrap();
+            await_export_end(&app, task).unwrap();
+            assert_eq!(app.transfer_progress().completed_files, 2);
+            assert_eq!(
+                app.transfer_progress().skipped_files,
+                if matches!(action, SessionImportAction::Skip) {
+                    1
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                std::fs::read(output.join("album/same")).unwrap(),
+                b"original"
+            );
+        }
+    }
+    #[test]
+    fn stream_export_cancel_keeps_published_files_and_cleans_unpublished_plaintext() {
+        let (root, manager, app, source) = stream_import_fixture();
+        manager
+            .add_files(
+                &[
+                    crate::veil_ops::AddFileSpec::new(&source, "album/same"),
+                    crate::veil_ops::AddFileSpec::new(&source, "album/clear"),
+                ],
+                "password",
+            )
+            .unwrap();
+        let output = root.path().join("output");
+        std::fs::create_dir_all(output.join("album")).unwrap();
+        std::fs::write(output.join("album/same"), b"keep").unwrap();
+        let task = run_stream_export(&app, vec!["album".into()], &output);
+        let _ = await_export_conflicts(&app);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.transfer_progress().completed_files == 0 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.cancel_transfer());
+        assert!(await_export_end(&app, task).is_err());
+        assert_eq!(app.transfer_progress().phase, "cancelled");
+        assert_eq!(std::fs::read(output.join("album/same")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(output.join("album/clear")).unwrap(),
+            b"original"
+        );
+        assert_eq!(std::fs::read_dir(output.join("album")).unwrap().count(), 2);
+        assert!(matches!(
+            app.execute(ServiceRequest::PollSessionExportConflicts)
+                .unwrap(),
+            ServiceResponse::ImportConflicts(None)
+        ));
+    }
+    #[test]
+    fn stream_export_rejects_changed_overwrite_target_and_internal_plaintext_destination() {
+        let (root, manager, app, _) = stream_import_fixture();
+        let output = root.path().join("out");
+        std::fs::write(&output, b"before").unwrap();
+        let task = run_stream_export(&app, vec!["file".into()], &output);
+        let batch = await_export_conflicts(&app);
+        std::fs::write(&output, b"changed after review").unwrap();
+        app.execute(ServiceRequest::ResolveSessionExportConflicts {
+            id: batch.id,
+            resolutions: vec![SessionImportResolution {
+                target: batch.conflicts[0].target.clone(),
+                action: SessionImportAction::Overwrite,
+            }],
+        })
+        .unwrap();
+        assert!(await_export_end(&app, task).is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"changed after review");
+        assert_eq!(app.transfer_progress().completed_files, 0);
+        assert!(
+            app.execute(ServiceRequest::StreamSessionExport {
+                names: vec!["file".into()],
+                destination: manager
+                    .veil_dir
+                    .join("plain")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .is_err()
+        );
+        assert!(!manager.veil_dir.join("plain").exists());
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter(|e| e
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tmp"))
+                .count(),
+            0
+        );
+    }
+    #[test]
+    fn stream_export_authentication_failure_removes_partial_plaintext() {
+        let (root, manager, app, _) = stream_import_fixture();
+        let node = manager
+            .open_db("password")
+            .unwrap()
+            .resolve("file")
+            .unwrap()
+            .unwrap();
+        let cipher = manager.veil_dir.join(node.cipher().unwrap());
+        let mut bytes = std::fs::read(&cipher).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(cipher, bytes).unwrap();
+        let output = root.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("keep"), b"existing").unwrap();
+        assert!(
+            app.execute(ServiceRequest::StreamSessionExport {
+                names: vec!["file".into()],
+                destination: output.join("exported").to_string_lossy().into_owned(),
+            })
+            .is_err()
+        );
+        assert!(!output.join("exported").exists());
+        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+        assert_eq!(std::fs::read(output.join("keep")).unwrap(), b"existing");
+        assert_eq!(app.transfer_progress().completed_files, 0);
+    }
+
+    #[test]
+    fn stream_export_unbounded_discovery_continues_when_conflicts_are_full() {
+        let (root, manager, app, source) = stream_import_fixture();
+        manager
+            .add_files(
+                &(0..180)
+                    .map(|i| crate::veil_ops::AddFileSpec::new(&source, format!("album/{i:03}")))
+                    .collect::<Vec<_>>(),
+                "password",
+            )
+            .unwrap();
+        let output = root.path().join("output");
+        std::fs::create_dir_all(output.join("album")).unwrap();
+        for i in 0..180 {
+            std::fs::write(output.join(format!("album/{i:03}")), b"original").unwrap();
+        }
+        let task = run_stream_export(&app, vec!["album".into()], &output);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let p = app.transfer_progress();
+            if p.scan_complete && p.waiting_files == 128 {
+                assert_eq!(p.total_files, 180);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.cancel_transfer());
+        assert!(await_export_end(&app, task).is_err());
+        assert_eq!(app.transfer_progress().completed_files, 0);
+        assert_eq!(
+            std::fs::read_dir(output.join("album")).unwrap().count(),
+            180
+        );
+    }
+    fn run_stream_import(
+        app: &VeilService,
+        source: &Path,
+    ) -> std::thread::JoinHandle<Result<ServiceResponse, ServiceError>> {
+        let worker = app.clone();
+        let source = source.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            worker.execute(ServiceRequest::StreamSessionImport {
+                sources: vec![source],
+                directory: String::new(),
+            })
+        })
+    }
+    fn await_stream_conflicts(app: &VeilService) -> crate::import_pipeline::ConflictBatch {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let ServiceResponse::ImportConflicts(Some(batch)) = app
+                .execute(ServiceRequest::PollSessionImportConflicts)
+                .unwrap()
+            {
+                return batch;
+            }
+            if std::time::Instant::now() > deadline {
+                app.cancel_transfer();
+                panic!("未收到流式导入冲突");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn stream_import_commits_clear_files_while_waiting_for_explicit_choices() {
+        let (root, manager, app, source) = stream_import_fixture();
+        let folder = root.path().join("album");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("same"), b"original").unwrap();
+        std::fs::write(folder.join("new"), b"new").unwrap();
+        manager
+            .add_files(
+                &[crate::veil_ops::AddFileSpec::new(&source, "album/same")],
+                "password",
+            )
+            .unwrap();
+        let worker = run_stream_import(&app, &folder);
+        let batch = await_stream_conflicts(&app);
+        assert_eq!(batch.conflicts.len(), 1);
+        assert!(batch.conflicts[0].same_content);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while manager
+            .read_file_bytes("album/new", "password", 100)
+            .is_err()
+        {
+            if std::time::Instant::now() > deadline {
+                app.cancel_transfer();
+                panic!("待确认文件不应阻塞其他文件提交");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let db = manager.open_db("password").unwrap();
+        let resources = db
+            .conn
+            .prepare("SELECT resource_id FROM operation_locks")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(resources.len(), 1);
+        assert!(
+            resources[0].contains("veil-dir:"),
+            "文件夹导入应复用目录锁，不能另加文件锁"
+        );
+        drop(db);
+        assert!(!worker.is_finished());
+        app.execute(ServiceRequest::ResolveSessionImportConflicts {
+            id: batch.id,
+            resolutions: vec![SessionImportResolution {
+                target: "album/same".into(),
+                action: SessionImportAction::Skip,
+            }],
+        })
+        .unwrap();
+        worker.join().unwrap().unwrap();
+        let progress = app.transfer_progress();
+        assert_eq!(
+            (
+                progress.total_files,
+                progress.completed_files,
+                progress.skipped_files
+            ),
+            (2, 2, 1)
+        );
+        assert!(progress.scan_complete);
+        assert_eq!(progress.waiting_files, 0);
+    }
+    #[test]
+    fn stream_import_rechecks_changed_versions_and_requires_another_choice() {
+        let (_root, manager, app, source) = stream_import_fixture();
+        let worker = run_stream_import(&app, &source);
+        let batch = await_stream_conflicts(&app);
+        std::fs::write(&source, b"concurrent edit").unwrap();
+        manager.add_file(&source, "password").unwrap();
+        app.execute(ServiceRequest::ResolveSessionImportConflicts {
+            id: batch.id.clone(),
+            resolutions: vec![SessionImportResolution {
+                target: "file".into(),
+                action: SessionImportAction::Overwrite,
+            }],
+        })
+        .unwrap();
+        let again = await_stream_conflicts(&app);
+        assert_ne!(again.id, batch.id);
+        assert!(
+            app.execute(ServiceRequest::ResolveSessionImportConflicts {
+                id: batch.id,
+                resolutions: vec![SessionImportResolution {
+                    target: "file".into(),
+                    action: SessionImportAction::Skip
+                }]
+            })
+            .is_err()
+        );
+        app.execute(ServiceRequest::ResolveSessionImportConflicts {
+            id: again.id,
+            resolutions: vec![SessionImportResolution {
+                target: "file".into(),
+                action: SessionImportAction::Skip,
+            }],
+        })
+        .unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(
+            manager.read_file_bytes("file", "password", 100).unwrap(),
+            b"concurrent edit"
+        );
+        assert_eq!(app.transfer_progress().skipped_files, 1);
+    }
+
+    #[test]
+    fn stream_import_resolves_multiple_bounded_batches_and_fills_missing_hashes() {
+        let (root, manager, app, source) = stream_import_fixture();
+        let folder = root.path().join("batches");
+        std::fs::create_dir(&folder).unwrap();
+        let mut specs = Vec::new();
+        for index in 0..70 {
+            std::fs::write(folder.join(format!("file-{index}")), b"original").unwrap();
+            specs.push(crate::veil_ops::AddFileSpec::new(
+                &source,
+                format!("batches/file-{index}"),
+            ));
+        }
+        manager.add_files(&specs, "password").unwrap();
+        manager.open_db("password").unwrap().conn.execute("DELETE FROM file_hash WHERE file_id=(SELECT id FROM file_info WHERE name='file-0')", []).unwrap();
+        let worker = run_stream_import(&app, &folder);
+        let mut chosen = 0;
+        while chosen < 70 {
+            let batch = await_stream_conflicts(&app);
+            assert!(batch.conflicts.len() <= 32);
+            chosen += batch.conflicts.len();
+            assert!(
+                batch
+                    .conflicts
+                    .iter()
+                    .all(|file| file.same_content && file.error.is_none())
+            );
+            app.execute(ServiceRequest::ResolveSessionImportConflicts {
+                id: batch.id,
+                resolutions: batch
+                    .conflicts
+                    .into_iter()
+                    .map(|file| SessionImportResolution {
+                        target: file.target,
+                        action: SessionImportAction::Skip,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        }
+        worker.join().unwrap().unwrap();
+        let progress = app.transfer_progress();
+        assert_eq!(
+            (
+                progress.completed_files,
+                progress.total_files,
+                progress.skipped_files
+            ),
+            (70, 70, 70)
+        );
+        assert!(
+            manager
+                .list_files("password")
+                .unwrap()
+                .iter()
+                .all(|file| file.hash.is_some())
+        );
+    }
+
+    #[test]
+    fn stream_import_unbounded_discovery_continues_while_conflict_queue_is_full() {
+        let (root, manager, app, source) = stream_import_fixture();
+        let folder = root.path().join("many");
+        std::fs::create_dir(&folder).unwrap();
+        let mut specs = Vec::new();
+        for index in 0..600 {
+            let path = folder.join(format!("file-{index}"));
+            std::fs::write(&path, b"original").unwrap();
+            specs.push(crate::veil_ops::AddFileSpec::new(
+                &source,
+                format!("many/file-{index}"),
+            ));
+        }
+        manager.add_files(&specs, "password").unwrap();
+        let worker = run_stream_import(&app, &folder);
+        let _ = await_stream_conflicts(&app);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while (app.transfer_progress().waiting_files < 128
+            || !app.transfer_progress().scan_complete)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let progress = app.transfer_progress();
+        assert_eq!(progress.waiting_files, 128);
+        assert_eq!(progress.total_files, 600);
+        assert!(progress.scan_complete);
+        assert_eq!(progress.completed_files, 0);
+        assert!(app.cancel_transfer());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !worker.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "取消时队列未退出");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(ServiceError::ImportCancelled { .. })
+        ));
+    }
+
+    fn stream_import_fixture() -> (tempfile::TempDir, VeilManager, VeilService, PathBuf) {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("container");
+        let manager = VeilManager::new(path.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let app = VeilService::default();
+        *app.3.write().unwrap() = Some(path.clone());
+        *app.0.lock().unwrap() = Some(Session {
+            path,
+            veil_id: metadata.veil_id.clone(),
+            password: Zeroizing::new("password".into()),
+        });
+        let source = root.path().join("file");
+        std::fs::write(&source, b"original").unwrap();
+        manager.add_file(&source, "password").unwrap();
+        (root, manager, app, source)
+    }
 
     #[test]
     fn import_flushes_on_interval_finishes_last_batch_and_cleans_cancelled_queue() {
@@ -1423,6 +2171,81 @@ mod tests {
     }
 
     #[test]
+    fn multi_file_preparation_and_commit_are_atomic_and_count_every_file() {
+        #[cfg(debug_assertions)]
+        veil_core::kdf::enable_fast_test_kdf();
+        for scenario in ["ok", "key", "lease"] {
+            let fail = scenario != "ok";
+            let root = tempfile::tempdir().unwrap();
+            let manager = VeilManager::new(root.path().join("container"));
+            manager.init_veil("test", "password").unwrap();
+            let source = root.path().join("source");
+            std::fs::write(&source, b"content").unwrap();
+            let files = (0..16)
+                .map(|index| {
+                    crate::veil_ops::AddFileSpec::new(&source, format!("album/file-{index}"))
+                        .without_overwrite()
+                })
+                .collect::<Vec<_>>();
+            let progress = veil_core::progress::Progress::default();
+            let _scope = progress.begin("import");
+            veil_core::progress::start(None);
+            veil_core::progress::set_file_count(files.len());
+            let (sender, receiver) = veil_core::queue::BoundedQueue::new(2).split();
+            let context = crate::veil_ops::ImportBatchContext {
+                directories: Arc::default(),
+                sender,
+                directory_guard: None,
+                owner: crate::execution::ExecutionService::global()
+                    .unwrap()
+                    .runtime()
+                    .current_context()
+                    .owner()
+                    .clone(),
+            };
+            manager
+                .add_files_for_import(&files, "password", None, &Mutex::new(()), &context)
+                .unwrap();
+            assert_eq!(progress.snapshot().pending_files, 16);
+            assert!(manager.list_files("password").unwrap().is_empty());
+            let mut queued = receiver.recv().unwrap();
+            assert_eq!(queued.file_count(), 16);
+            match scenario {
+                "key" => {
+                    queued.invalidate_key();
+                }
+                "lease" => {
+                    manager
+                        .open_db("password")
+                        .unwrap()
+                        .conn
+                        .execute(
+                            "UPDATE operation_locks SET owner_token='invalidated-token'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let result = manager.commit_import_batch(
+                vec![queued],
+                "password",
+                &std::sync::atomic::AtomicBool::new(false),
+            );
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(progress.snapshot().pending_files, 0);
+            assert_eq!(
+                progress.snapshot().completed_files,
+                if fail { 0 } else { 16 }
+            );
+            assert_eq!(
+                manager.list_files("password").unwrap().len(),
+                if fail { 0 } else { 16 }
+            );
+        }
+    }
+
+    #[test]
     fn encrypted_import_records_commit_together_or_roll_back_together() {
         #[cfg(debug_assertions)]
         veil_core::kdf::enable_fast_test_kdf();
@@ -1441,7 +2264,7 @@ mod tests {
                 .current_context()
                 .owner()
                 .clone();
-            let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+            let (sender, receiver) = veil_core::queue::BoundedQueue::new(2).split();
             std::thread::scope(|scope| {
                 let mut workers = Vec::new();
                 for path in &paths {
@@ -1451,6 +2274,7 @@ mod tests {
                     let owner = owner.clone();
                     workers.push(scope.spawn(move || {
                         let context = crate::veil_ops::ImportBatchContext {
+                            directories: Arc::default(),
                             sender,
                             directory_guard: None,
                             owner,

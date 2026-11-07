@@ -14,8 +14,13 @@ import ImageIO
     @Published var mode: BrowseMode = .type
     @Published var category: FileCategory?
     @Published var layout: FileLayout = .grid
+    @Published var conflictOperation = "导入"
+    @Published var exportSelection: BrowserEntry?
+    @Published var importInspection: ImportInspection?
+    private var importReview: CheckedContinuation<[ImportResolution]?, Never>?
     @Published var error: String?
     @Published var notice: String?
+    @Published var importStatus: String?
     @Published var busy = false
     @Published var preview: PreviewItem? { didSet { if oldValue?.id != preview?.id { oldValue?.removeTemporaryFiles() } } }
     @Published var export: ExportItem?
@@ -46,7 +51,7 @@ import ImageIO
     func clearLocalData() async {
         guard !busy else { return }
         generation += 1
-        container = nil; preview = nil; export = nil; directory = ""; search = ""; category = nil
+        container = nil; preview = nil; export = nil; exportSelection = nil; directory = ""; search = ""; category = nil
         thumbnails.removeAll(); textThumbnails.removeAll(); thumbnailTasks.removeAll(); thumbnailFailures.removeAll()
         busy = true; error = nil
         defer { busy = false }
@@ -83,15 +88,86 @@ import ImageIO
         return success
     }
     func lock() async {
-        generation += 1; container = nil; preview = nil; export = nil; directory = ""; search = ""; category = nil
+        generation += 1; _ = client.cancelTransfer(); completeImportReview(nil); container = nil; preview = nil; export = nil; exportSelection = nil; directory = ""; search = ""; category = nil
         thumbnails.removeAll(); textThumbnails.removeAll(); thumbnailTasks.removeAll(); thumbnailFailures.removeAll()
         do { try await client.execute(NativeRequest(operation: "lock")) } catch { self.error = error.localizedDescription }
     }
+    var importProgressDescription: String? {
+        guard let progress = importProgress, progress.total_files > 0 else { return nil }
+        return "已完成 \(progress.completed_files) / \(progress.total_files) · \(Int(min(1, Double(progress.completed_files) / Double(progress.total_files))*100))%" + (progress.scan_complete ? " · 遍历完成" : " · 总数持续增加")
+    }
+
+    func completeImportReview(_ resolutions: [ImportResolution]?, id: String? = nil) {
+        if let id, importInspection?.id != id { return }
+        let continuation = importReview
+        importReview = nil
+        importInspection = nil
+        continuation?.resume(returning: resolutions)
+    }
+
+    func cancelImport() {
+        if importReview != nil { completeImportReview(nil) }
+        else if client.cancelTransfer() { importStatus = "正在取消" }
+    }
+
+    @Published private(set) var importProgress: ImportTransferProgress?
+
+    private func pollImportConflicts(ticket: Int, exporting: Bool = false) async {
+        while !Task.isCancelled, ticket == generation {
+            do {
+                let batch: ImportInspection? = try await client.json(NativeRequest(operation: exporting ? "poll_export_conflicts" : "poll_import_conflicts"))
+                if let batch {
+                    guard ticket == generation, !Task.isCancelled else { return }
+                    self.conflictOperation = exporting ? "导出" : "导入"
+                    let resolutions: [ImportResolution]? = await withTaskCancellationHandler {
+                        await withCheckedContinuation { continuation in
+                            importReview = continuation
+                            importInspection = batch
+                        }
+                    } onCancel: { Task { @MainActor in self.completeImportReview(nil, id: batch.id) } }
+                    guard let resolutions, ticket == generation, !Task.isCancelled else { _ = client.cancelTransfer(); return }
+                    try await client.execute(NativeRequest(operation: exporting ? "resolve_export_conflicts" : "resolve_import_conflicts", id: batch.id, resolutions: resolutions))
+                }
+            } catch {
+                if ticket == generation, !Task.isCancelled { self.error = error.localizedDescription; _ = client.cancelTransfer() }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
+    private func importSources(_ urls: [URL], ticket: Int) async throws {
+        importStatus = "正在导入文件"
+        let conflicts = Task { @MainActor in await self.pollImportConflicts(ticket: ticket) }
+        let progress = Task { @MainActor in
+            while !Task.isCancelled {
+                let snapshot = self.client.transferProgress()
+                self.importProgress = snapshot?.operation == "import" ? snapshot : nil
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        defer { conflicts.cancel(); progress.cancel(); completeImportReview(nil); importStatus = nil; importProgress = nil }
+        do {
+            let result: ContainerSnapshot = try await client.json(NativeRequest(operation: "stream_import_files", sources: urls.map(\.path), directory: mode == .path ? directory : ""))
+            if ticket == generation {
+                container = result
+                if let progress = client.transferProgress() { notice = "已完成 \(progress.completed_files) 个文件，跳过 \(progress.skipped_files) 个文件" }
+            }
+        } catch {
+            if ticket == generation,
+               let refreshed: ContainerSnapshot = try? await client.json(NativeRequest(operation: "refresh")), ticket == generation { container = refreshed }
+            if ticket == generation, let progress = client.transferProgress(), progress.phase == "cancelled" {
+                notice = "导入已中止，已完成 \(progress.completed_files) 个文件（其中跳过 \(progress.skipped_files) 个）"
+                return
+            }
+            throw error
+        }
+    }
+
     func importFiles(_ urls: [URL]) async { await run { ticket in
         let accessed = urls.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
-        let result: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "import_files", sources: urls.map(\.path), directory: self.mode == .path ? self.directory : ""))
-        if ticket == self.generation { self.container = result }
+        try await self.importSources(urls, ticket: ticket)
     } }
     /// 相册选择器返回的临时文件在回调结束后可能失效，先复制到受保护的临时目录。
     func importPhotos(_ items: [PhotosPickerItem]) async { await run { ticket in
@@ -105,8 +181,7 @@ import ImageIO
             staged.append(file)
         }
         guard ticket == self.generation else { return }
-        let result: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "import_files", sources: staged.map { $0.url.path }, directory: self.mode == .path ? self.directory : ""))
-        if ticket == self.generation { self.container = result }
+        try await self.importSources(staged.map(\.url), ticket: ticket)
     } }
     func thumbnailKey(_ file: FileEntry) -> String { "\(file.id):\(file.version)" }
     func loadThumbnail(_ file: FileEntry) async {
@@ -160,14 +235,47 @@ import ImageIO
         let result: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "remove_path", name: item.path))
         if ticket == self.generation { self.container = result }
     } }
+    private func streamExport(_ names: [String], to destination: URL, ticket: Int) async throws {
+        importStatus = "正在导出文件"
+        let conflicts = Task { @MainActor in await self.pollImportConflicts(ticket: ticket, exporting: true) }
+        let progress = Task { @MainActor in
+            while !Task.isCancelled {
+                let snapshot = self.client.transferProgress()
+                self.importProgress = snapshot?.operation == "export" ? snapshot : nil
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        defer { conflicts.cancel(); progress.cancel(); completeImportReview(nil); importStatus = nil; importProgress = nil }
+        try await client.execute(NativeRequest(operation: "stream_export_files", names: names, destination: destination.path))
+    }
+
+    func exportToDirectory(_ entry: BrowserEntry, destination: URL) async { await run { ticket in
+        let accessed = destination.startAccessingSecurityScopedResource()
+        defer { if accessed { destination.stopAccessingSecurityScopedResource() } }
+        let target: URL
+        if case .file(let file) = entry { target = destination.appendingPathComponent(file.leafName) }
+        else { target = destination }
+        do { try await self.streamExport([entry.path], to: target, ticket: ticket) }
+        catch {
+            if ticket == self.generation, self.client.transferProgress()?.phase == "cancelled" {
+                self.notice = "导出已中止，已导出的文件已保留"
+                return
+            }
+            throw error
+        }
+        if ticket == self.generation, let progress = self.client.transferProgress() {
+            self.notice = "导出完成 \(progress.completed_files - progress.skipped_files) 个文件，跳过 \(progress.skipped_files) 个文件"
+        }
+    } }
+
     func prepareExport(_ file: FileEntry? = nil) async { await run { ticket in
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-export-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
         defer { try? FileManager.default.removeItem(at: folder) }
         let filename = file?.leafName ?? ((self.container?.name ?? "Veil").replacingOccurrences(of: "/", with: "_") + ".veil")
         let destination = folder.appendingPathComponent(filename)
-        let request = file.map { NativeRequest(operation: "export_file", name: $0.name, destination: destination.path) } ?? NativeRequest(operation: "export_package", destination: destination.path)
-        try await self.client.execute(request)
+        if let file { try await self.streamExport([file.name], to: destination, ticket: ticket) }
+        else { try await self.client.execute(NativeRequest(operation: "export_package", destination: destination.path)) }
         let data = try Data(contentsOf: destination)
         if ticket == self.generation { self.export = ExportItem(name: filename, document: ExportDocument(data: data)) }
     } }

@@ -15,6 +15,8 @@ pub enum VeilError {
     Cancelled,
     #[error("数据库错误: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("数据库连接池错误: {0}")]
+    DatabasePool(String),
     /// 文件系统或字节流读写失败。
     #[error("I/O 错误: {0}")]
     Io(#[from] std::io::Error),

@@ -130,13 +130,14 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                 }
                 let file_name = parts[1];
                 let output_path = parts[2];
-                match manager.extract_file(file_name, std::path::Path::new(output_path), pwd) {
-                    Ok(()) => {
-                        crate::outln!(
-                            "{}",
-                            crate::i18n::t1("shell.exported", "path", output_path).green()
-                        );
-                    }
+                match super::ex::run(
+                    veil_name,
+                    Some(file_name),
+                    output_path,
+                    Some(pwd.to_owned()),
+                    super::add::ConflictPolicy::Ask,
+                ) {
+                    Ok(()) => {}
                     Err(e) => {
                         crate::outln!(
                             "{}",

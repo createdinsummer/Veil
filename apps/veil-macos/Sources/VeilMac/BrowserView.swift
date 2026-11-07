@@ -258,6 +258,8 @@ private struct EntryActions: View {
         Button("打开", systemImage: "arrow.up.forward.square") { Task { await store.activate(entry) } }
         if case .file(let file) = entry {
             Button("导出…", systemImage: "square.and.arrow.up") { Task { await store.exportFile(file) } }
+        } else {
+            Button("导出…", systemImage: "square.and.arrow.up") { Task { await store.exportFolder(entry.path) } }
         }
         Divider()
         Button("删除…", systemImage: "trash", role: .destructive) { store.pendingDelete = entry }

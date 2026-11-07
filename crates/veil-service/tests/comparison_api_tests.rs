@@ -264,8 +264,14 @@ fn metadata_inputs_compare_identity_and_versions_without_reading_content() {
     };
     let compare = |other: &VersionSnapshot, checks| {
         compare_files(
-            FileInput::ContainerMetadata { version: &base },
-            FileInput::ContainerMetadata { version: other },
+            FileInput::ContainerMetadata {
+                version: &base,
+                hash: None,
+            },
+            FileInput::ContainerMetadata {
+                version: other,
+                hash: None,
+            },
             checks,
         )
     };

@@ -1,10 +1,10 @@
-//! `veil ex` 子命令：从工作区容器解密导出文件。
+//! `veil ex` 子命令：通过共享流水线解密导出文件或文件夹。
 
 use crate::error::Result;
 use colored::Colorize;
 use std::path::Path;
 
-/// 导出文件到本地文件系统（工作区架构）。
+/// 导出文件或文件夹到本地文件系统。
 ///
 /// 从容器中解密并导出文件到本地文件系统。
 ///
@@ -27,10 +27,10 @@ pub fn run(
     file_name: Option<&str>,
     output: &str,
     password: Option<String>,
+    mut conflict_policy: super::add::ConflictPolicy,
 ) -> Result<()> {
     // 链接只负责定位，实际操作绑定到确认后的稳定 ID。
     let resolved = super::resolve_veil(veil_name)?;
-    let manager = super::container_client(&resolved);
 
     // 导出必须明确容器内路径，未提供时直接给出命令用法错误。
     let file_name = file_name.ok_or_else(|| crate::cli_error!(ExportPathRequired))?;
@@ -41,10 +41,24 @@ pub fn run(
     use secrecy::ExposeSecret;
     let password = password_str.expose_secret();
 
-    // 输出路径由调用方决定，core 负责查找、解密和写入。
+    // 复用服务层导出流水线，终端负责进度展示与冲突选择。
     let output_path = Path::new(output);
 
-    manager.extract_file(file_name, output_path, password)?;
+    let result = resolved
+        .stream_export(
+            file_name,
+            output_path,
+            password,
+            |conflict| super::add::decide_conflict(conflict, &mut conflict_policy),
+            super::transfer::progress,
+        )
+        .map_err(super::map_service_error)?;
+    if result.skipped_files > 0 {
+        crate::outln!("已跳过 {} 个文件", result.skipped_files);
+    }
+    if result.completed_files == result.skipped_files && result.total_files > 0 {
+        return Ok(());
+    }
 
     crate::outln!(
         "{}",

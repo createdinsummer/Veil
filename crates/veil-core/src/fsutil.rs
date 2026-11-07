@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 /// 在 macOS 上请求设备刷新；其他平台使用系统文件同步。
-pub(crate) fn sync_file(file: &fs::File) -> io::Result<()> {
+pub fn sync_file(file: &fs::File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;

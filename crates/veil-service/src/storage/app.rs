@@ -1,7 +1,7 @@
 //! 本机索引、设置与缓存，不允许写入容器密码或文件密钥。
 use super::{id, invalid, json, migrate, now, parse};
 use crate::error::Result;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     path::{Path, PathBuf},
@@ -113,7 +113,7 @@ fn ios_relocated_space_path(old: &Path, current_root: &Path, space_id: &str) -> 
 }
 
 pub struct AppStore {
-    pub(crate) conn: Connection,
+    pub(crate) conn: veil_core::database::Connection,
     pub directory: PathBuf,
 }
 impl AppStore {

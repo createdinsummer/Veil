@@ -8,6 +8,7 @@ rust-version = "1.89" # 标准库文件锁接口所需的最低 Rust 版本
 fault-injection = []
 
 [dependencies]
+r2d2 = "0.8.10"
 rusqlite = { version = "=0.38.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
 argon2 = "0.5"
 blake3 = "1.8.5"

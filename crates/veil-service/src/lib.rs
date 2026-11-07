@@ -1,11 +1,16 @@
 //! Veil 应用服务：统一容器操作、工作区、会话流程与执行状态查询。
 
+mod batch_policy;
+mod command_transfer;
 pub mod commands;
 pub mod comparison;
 pub mod config;
+mod directory_cache;
 pub mod execution;
+mod export_pipeline;
 pub mod hints;
 pub mod import;
+mod import_pipeline;
 pub mod lifecycle;
 pub mod link;
 pub mod operations;
@@ -13,6 +18,7 @@ pub mod package;
 pub mod session;
 pub mod spaces;
 pub mod storage;
+mod transfer_conflicts;
 pub mod veil_ops;
 pub mod work;
 pub mod workflow;

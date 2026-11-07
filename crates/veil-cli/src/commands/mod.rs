@@ -17,9 +17,9 @@ pub mod pack;
 pub mod passwd;
 pub mod rm;
 pub mod shell;
+mod transfer;
 pub mod unpack;
 
-use std::path::Path;
 use veil_core::error::VeilError;
 use veil_core::metadata::{FileEntry, MetaData};
 use veil_service::commands::ContainerHandle;
@@ -34,18 +34,30 @@ use crate::error::Result;
 pub(crate) fn request(request: ServiceRequest<'_>) -> Result<ServiceResponse> {
     VeilService::default()
         .execute(request)
-        .map_err(|error| match error {
-            ServiceError::Core(error) => error.into(),
-            ServiceError::Workflow(error) => map_workflow_error(error),
-            ServiceError::Import(error) => match error {
-                veil_service::import::ImportError::Cancelled => VeilError::Cancelled.into(),
-                veil_service::import::ImportError::SourceNotFound(path) => crate::cli_error!(AddSourceNotFound, "path" => path.display()),
-                veil_service::import::ImportError::NotFile(path) => crate::cli_error!(AddNotFile, "path" => path.display()),
-                veil_service::import::ImportError::InvalidDestination(path) => crate::cli_error!(AddInvalidDestination, "path" => path),
-                veil_service::import::ImportError::DirectoryRead { path, error } => crate::cli_error!(AddDirectoryReadFailed, "path" => path.display(), "error" => error),
-            },
-            other => VeilError::WorkError(other.to_string()).into(),
-        })
+        .map_err(map_service_error)
+}
+
+pub(crate) fn map_service_error(error: ServiceError) -> crate::error::CommandError {
+    match error {
+        ServiceError::Core(error) => error.into(),
+        ServiceError::Workflow(error) => map_workflow_error(error),
+        ServiceError::Import(error) => match error {
+            veil_service::import::ImportError::Cancelled => VeilError::Cancelled.into(),
+            veil_service::import::ImportError::SourceNotFound(path) => {
+                crate::cli_error!(AddSourceNotFound, "path" => path.display())
+            }
+            veil_service::import::ImportError::NotFile(path) => {
+                crate::cli_error!(AddNotFile, "path" => path.display())
+            }
+            veil_service::import::ImportError::InvalidDestination(path) => {
+                crate::cli_error!(AddInvalidDestination, "path" => path)
+            }
+            veil_service::import::ImportError::DirectoryRead { path, error } => {
+                crate::cli_error!(AddDirectoryReadFailed, "path" => path.display(), "error" => error)
+            }
+        },
+        other => VeilError::WorkError(other.to_string()).into(),
+    }
 }
 
 fn map_workflow_error(error: veil_service::workflow::WorkflowError) -> crate::error::CommandError {
@@ -174,21 +186,6 @@ impl CliContainer {
     ) -> std::result::Result<ContainerPathKind, VeilError> {
         match self.execute(ContainerOperation::PathKind { path, password })? {
             ContainerOperationResult::PathKind(v) => Ok(v),
-            _ => unreachable!(),
-        }
-    }
-    fn extract_file(
-        &self,
-        name: &str,
-        output: &Path,
-        password: &str,
-    ) -> std::result::Result<(), VeilError> {
-        match self.execute(ContainerOperation::ExtractFile {
-            name,
-            output,
-            password,
-        })? {
-            ContainerOperationResult::Done => Ok(()),
             _ => unreachable!(),
         }
     }

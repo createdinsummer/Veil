@@ -16,7 +16,7 @@ pub enum ConflictPolicy {
     Overwrite,
 }
 
-fn decide_conflict(
+pub(super) fn decide_conflict(
     conflict: &ImportConflict,
     policy: &mut ConflictPolicy,
 ) -> veil_core::error::Result<ImportDecision> {
@@ -34,14 +34,17 @@ fn decide_conflict(
         )));
     }
     loop {
-        let detail = if conflict.is_directory {
+        let can_overwrite = !conflict.is_directory && conflict.error.is_none();
+        let detail = if let Some(error) = conflict.error.as_deref() {
+            error
+        } else if conflict.is_directory {
             "目标是目录，不支持覆盖"
         } else if conflict.same_content {
             "内容相同"
         } else {
             "内容不同"
         };
-        eprintln!("目标已存在：{}（{}）", conflict.target, detail);
+        eprintln!("\n目标已存在：{}（{}）", conflict.target, detail);
         eprint!("选择 [o]覆盖/[s]跳过/[a]后续全部覆盖/[k]后续全部跳过/[q]取消：");
         io::stderr().flush()?;
         let mut input = String::new();
@@ -49,9 +52,9 @@ fn decide_conflict(
             return Err(VeilError::Cancelled);
         }
         match input.trim() {
-            "o" if !conflict.is_directory => return Ok(ImportDecision::Overwrite),
+            "o" if can_overwrite => return Ok(ImportDecision::Overwrite),
             "s" => return Ok(ImportDecision::Skip),
-            "a" if !conflict.is_directory => {
+            "a" if can_overwrite => {
                 *policy = ConflictPolicy::Overwrite;
                 return Ok(ImportDecision::Overwrite);
             }
@@ -60,12 +63,10 @@ fn decide_conflict(
                 return Ok(ImportDecision::Skip);
             }
             "q" => return Err(VeilError::Cancelled),
-            _ => eprintln!("请输入有效选项；目录不能覆盖。"),
+            _ => eprintln!("请输入有效选项；该目标可能只能跳过或取消。"),
         }
     }
 }
-
-use veil_service::{ServiceRequest, ServiceResponse};
 
 pub fn run(
     veil_name: &str,
@@ -74,67 +75,45 @@ pub fn run(
     password: Option<String>,
     mut conflict_policy: ConflictPolicy,
 ) -> Result<()> {
-    let plan = match super::request(ServiceRequest::PrepareImport {
-        selector: veil_name,
-        source: Path::new(source),
-        destination: dest,
-    })? {
-        ServiceResponse::ImportPrepared(plan) => plan,
-        _ => {
-            return Err(
-                veil_core::error::VeilError::WorkError("服务响应类型不符合请求".into()).into(),
-            );
-        }
-    };
-    if let Some(path) = plan.recovered_link() {
-        crate::hints::show_link_recovery_hint(path);
-    }
-    if plan.is_empty() {
-        crate::outln!("{}", crate::i18n::t("add.empty_dir").yellow());
-        return Ok(());
-    }
+    let container = super::resolve_veil(veil_name)?;
     crate::outln!("{}", crate::i18n::t("opening_veil").cyan());
     let password = super::prompt_password(crate::i18n::t("prompt.veil_password"), password)?;
     use secrecy::ExposeSecret;
-    let plan = plan.resolve_conflicts(password.expose_secret(), |conflict| {
-        decide_conflict(conflict, &mut conflict_policy)
-    })?;
-    let result = match super::request(ServiceRequest::CommitImport {
-        plan,
-        password: password.expose_secret(),
-    })? {
-        ServiceResponse::Imported(result) => result,
-        _ => {
-            return Err(
-                veil_core::error::VeilError::WorkError("服务响应类型不符合请求".into()).into(),
-            );
-        }
-    };
-    if result.skipped > 0 {
-        crate::outln!("已跳过 {} 个文件", result.skipped);
-    }
-    if result.targets.is_empty() {
+    let result = container
+        .stream_import(
+            Path::new(source),
+            dest,
+            password.expose_secret(),
+            |conflict| decide_conflict(conflict, &mut conflict_policy),
+            super::transfer::progress,
+        )
+        .map_err(super::map_service_error)?;
+    if result.total_files == 0 {
+        crate::outln!("{}", crate::i18n::t("add.empty_dir").yellow());
         return Ok(());
     }
-    if result.targets.len() == 1 {
+    if result.skipped_files > 0 {
+        crate::outln!("已跳过 {} 个文件", result.skipped_files);
+    }
+    let imported = result.completed_files - result.skipped_files;
+    if imported == 0 {
+        return Ok(());
+    }
+    if let Some(target) = result.target {
         crate::outln!(
             "{}",
-            crate::i18n::t1("add.file_added", "path", &result.targets[0]).green()
+            crate::i18n::t1("add.file_added", "path", &target).green()
         );
-        crate::outln!(
-            "{}",
-            crate::i18n::t1("common.encrypted_name", "name", &result.encrypted_names[0])
-                .bright_black()
-        );
+        if let Some(name) = result.encrypted_name {
+            crate::outln!(
+                "{}",
+                crate::i18n::t1("common.encrypted_name", "name", &name).bright_black()
+            );
+        }
     } else {
         crate::outln!(
             "{}",
-            crate::i18n::t1(
-                "add.files_added",
-                "count",
-                &result.encrypted_names.len().to_string()
-            )
-            .green()
+            crate::i18n::t1("add.files_added", "count", &imported.to_string()).green()
         );
     }
     Ok(())

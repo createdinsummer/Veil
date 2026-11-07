@@ -1160,3 +1160,113 @@ fn add_requires_explicit_choice_even_for_identical_content() {
         .success();
     assert_eq!(std::fs::read_to_string(output).unwrap(), "original");
 }
+
+#[test]
+fn queued_export_requires_explicit_choices_and_preserves_skipped_output() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("queued-export");
+    let source = env.write_file("source.txt", "original");
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+    let output = env.write_file("output.txt", "keep");
+    env.command()
+        .args(["ex", &env.path(&link), "source.txt", &env.path(&output)])
+        .write_stdin("o\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--on-conflict"));
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "keep");
+    env.command()
+        .args([
+            "ex",
+            &env.path(&link),
+            "source.txt",
+            &env.path(&output),
+            "--on-conflict",
+            "skip",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已跳过 1 个文件"));
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "keep");
+    env.command()
+        .args([
+            "ex",
+            &env.path(&link),
+            "source.txt",
+            &env.path(&output),
+            "--on-conflict",
+            "overwrite",
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "original");
+    // 内容相同也必须选择，不能隐式跳过。
+    env.command()
+        .args(["ex", &env.path(&link), "source.txt", &env.path(&output)])
+        .assert()
+        .failure();
+    env.command()
+        .args([
+            "ex",
+            &env.path(&link),
+            "source.txt",
+            &env.path(&output),
+            "--on-conflict",
+            "error",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "original");
+}
+
+#[test]
+fn queued_folder_import_maps_target_and_exports_all_batches() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("queued-folder");
+    for index in 0..20 {
+        env.write_file(
+            &format!("tree/sub-{}/{index}.txt", index % 3),
+            &format!("file {index}"),
+        );
+    }
+    let source = env.work.path().join("tree");
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source), "-o", "renamed"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加 20 个文件"));
+    env.command()
+        .args(["list", &env.path(&link)])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("renamed/sub-0/0.txt"))
+        .stdout(predicate::str::contains("tree/sub-").not());
+    let output = env.work.path().join("exports");
+    env.command()
+        .args(["ex", &env.path(&link), "renamed", "-o", &env.path(&output)])
+        .assert()
+        .success();
+    for index in 0..20 {
+        assert_eq!(
+            std::fs::read_to_string(output.join(format!("renamed/sub-{}/{index}.txt", index % 3)))
+                .unwrap(),
+            format!("file {index}")
+        );
+    }
+}
+
+#[test]
+fn queued_import_of_an_empty_folder_keeps_the_cli_success_contract() {
+    let env = TestEnv::new("test-password");
+    let link = env.init("queued-empty");
+    let source = env.work.path().join("empty");
+    std::fs::create_dir(&source).unwrap();
+    env.command()
+        .args(["add", &env.path(&link), &env.path(&source)])
+        .assert()
+        .success();
+    assert_eq!(encrypted_file_count(&env), 0);
+}

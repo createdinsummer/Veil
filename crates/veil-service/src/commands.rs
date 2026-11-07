@@ -1,5 +1,6 @@
 //! 为各调用方组合容器定位与文件操作。
 
+pub use crate::command_transfer::TransferResult;
 use crate::config::{AppConfig, ResolvedVeil};
 use crate::import::collect_add_specs;
 use crate::operations::{ContainerOperation, ContainerOperationResult};
@@ -27,7 +28,7 @@ impl ContainerHandle {
             None
         }
     }
-    fn manager(&self) -> VeilManager {
+    pub(crate) fn manager(&self) -> VeilManager {
         VeilManager::for_veil(self.resolved.veil_dir.clone(), &self.resolved.veil_id)
     }
 }
@@ -99,6 +100,7 @@ impl ImportPlan {
                 None,
             )?;
             let conflict = ImportConflict {
+                error: None,
                 target: file.target.clone(),
                 same_content: outcome == ConflictOutcome::NoConflict,
                 is_directory,
@@ -127,6 +129,7 @@ impl ImportPlan {
 }
 /// 已占用目标的比较信息；相同内容也交给调用方选择。
 pub struct ImportConflict {
+    pub error: Option<String>,
     pub target: String,
     pub same_content: bool,
     pub is_directory: bool,
@@ -241,6 +244,158 @@ pub(crate) fn commit_pack(
 mod tests {
     use super::*;
     use crate::{ServiceError, ServiceRequest, ServiceResponse, VeilService};
+
+    fn streaming_fixture() -> (tempfile::TempDir, VeilManager, ContainerHandle) {
+        veil_core::kdf::enable_fast_test_kdf();
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("container");
+        let manager = VeilManager::new(directory.clone());
+        let metadata = manager.init_veil("test", "password").unwrap();
+        let handle = ContainerHandle {
+            resolved: ResolvedVeil {
+                veil_name: "test".into(),
+                veil_id: metadata.veil_id.clone(),
+                veil_dir: directory,
+                link_path: None,
+                recovered_link: false,
+            },
+        };
+        (root, manager, handle)
+    }
+    #[test]
+    fn command_import_continues_while_waiting_for_a_choice_and_uses_mapped_directory_lock() {
+        let (root, manager, handle) = streaming_fixture();
+        let folder = root.path().join("source");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("same"), b"original").unwrap();
+        std::fs::write(folder.join("clear"), b"clear").unwrap();
+        manager
+            .add_files(
+                &[AddFileSpec::new(folder.join("same"), "renamed/same")],
+                "password",
+            )
+            .unwrap();
+        let mut snapshots = Vec::new();
+        let mut choices = 0;
+        let result = handle
+            .stream_import(
+                &folder,
+                Some("renamed"),
+                "password",
+                |conflict| {
+                    choices += 1;
+                    assert_eq!(conflict.target, "renamed/same");
+                    assert!(conflict.same_content);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while manager
+                        .read_file_bytes("renamed/clear", "password", 100)
+                        .is_err()
+                    {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "等待选择时其他文件必须继续提交"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let db = manager.open_db("password").unwrap();
+                    let resources = db
+                        .conn
+                        .prepare("SELECT resource_id FROM operation_locks")
+                        .unwrap()
+                        .query_map([], |r| r.get::<_, String>(0))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap();
+                    assert_eq!(resources.len(), 1);
+                    assert!(resources[0].contains("veil-dir:"));
+                    Ok(ImportDecision::Skip)
+                },
+                |snapshot| snapshots.push(snapshot),
+            )
+            .unwrap();
+        assert_eq!(choices, 1);
+        assert_eq!(
+            (
+                result.total_files,
+                result.completed_files,
+                result.skipped_files
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(snapshots.first().unwrap().total_files, 0);
+        assert_eq!(snapshots.last().unwrap().phase, "completed");
+        assert!(snapshots.last().unwrap().scan_complete);
+        assert!(
+            manager
+                .open_db("password")
+                .unwrap()
+                .resolve("source")
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn command_export_cancellation_preserves_published_files_and_cleans_staging() {
+        let (root, manager, handle) = streaming_fixture();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"original").unwrap();
+        manager
+            .add_files(
+                &[
+                    AddFileSpec::new(&source, "album/same"),
+                    AddFileSpec::new(&source, "album/clear"),
+                ],
+                "password",
+            )
+            .unwrap();
+        let output = root.path().join("out");
+        std::fs::create_dir_all(output.join("album")).unwrap();
+        std::fs::write(output.join("album/same"), b"keep").unwrap();
+        let result = handle.stream_export(
+            "album",
+            &output,
+            "password",
+            |_| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while !output.join("album/clear").exists() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(VeilError::Cancelled)
+            },
+            |_| {},
+        );
+        assert!(matches!(
+            result,
+            Err(ServiceError::Core(VeilError::Cancelled))
+        ));
+        assert_eq!(std::fs::read(output.join("album/same")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(output.join("album/clear")).unwrap(),
+            b"original"
+        );
+        assert_eq!(std::fs::read_dir(output.join("album")).unwrap().count(), 2);
+    }
+    #[test]
+    fn command_transfer_callback_panic_cancels_the_worker_before_joining() {
+        let (root, manager, handle) = streaming_fixture();
+        let source = root.path().join("source");
+        std::fs::write(&source, b"original").unwrap();
+        manager.add_file(&source, "password").unwrap();
+        let output = root.path().join("output");
+        std::fs::write(&output, b"keep").unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = handle.stream_export(
+                "source",
+                &output,
+                "password",
+                |_| panic!("模拟调用方中断"),
+                |_| {},
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"keep");
+    }
 
     #[test]
     fn import_choices_preserve_content_and_reject_stale_confirmation() {

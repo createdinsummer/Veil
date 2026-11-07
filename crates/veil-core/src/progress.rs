@@ -18,6 +18,9 @@ pub struct Snapshot {
     pub pending_files: u64,
     pub skipped_files: u64,
     pub total_files: u64,
+    pub scan_complete: bool,
+    pub checked_files: u64,
+    pub waiting_files: u64,
     pub current_file: Option<String>,
     pub cancel_requested: bool,
     pub parallel_workers: u64,
@@ -92,10 +95,10 @@ impl Progress {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).phase =
             if success { "completed" } else { "failed" };
     }
-    /// 只接受仍可安全中止的文件导入任务。
+    /// 只接受仍可安全中止的文件导入或文件导出任务。
     pub fn request_cancel(&self) -> bool {
         let mut snapshot = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if snapshot.operation != "import"
+        if !matches!(snapshot.operation, "import" | "export")
             || !matches!(snapshot.phase, "preparing" | "processing" | "verifying")
         {
             return false;
@@ -226,6 +229,23 @@ pub fn copy_cancellable(
 pub fn set_file_count(total: usize) {
     update(|p| p.total_files = total as u64);
 }
+/// 遍历线程逐个发现文件；总数和总字节数允许持续增长。
+pub fn discovered_file(size: u64) {
+    update(|p| {
+        p.total_files += 1;
+        p.total_bytes = p.total_bytes.and_then(|total| total.checked_add(size));
+    });
+}
+pub fn scan_finished() {
+    update(|p| p.scan_complete = true);
+}
+pub fn file_checked() {
+    update(|p| p.checked_files += 1);
+}
+pub fn set_waiting_files(count: usize) {
+    update(|p| p.waiting_files = count as u64);
+}
+
 pub fn set_parallel_workers(count: usize) {
     update(|p| p.parallel_workers = count as u64);
 }
@@ -278,12 +298,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancellation_is_only_accepted_before_finalizing_an_import() {
+    fn discovery_increases_totals_without_resetting_completed_progress() {
+        let progress = Progress::default();
+        let _scope = progress.begin("import");
+        start(Some(0));
+        discovered_file(10);
+        file_done(false);
+        assert_eq!(
+            (
+                progress.snapshot().completed_files,
+                progress.snapshot().total_files
+            ),
+            (1, 1)
+        );
+        discovered_file(20);
+        let snapshot = progress.snapshot();
+        assert_eq!(
+            (
+                snapshot.completed_files,
+                snapshot.total_files,
+                snapshot.total_bytes
+            ),
+            (1, 2, Some(30))
+        );
+        assert!(!snapshot.scan_complete);
+        scan_finished();
+        assert!(progress.snapshot().scan_complete);
+    }
+
+    #[test]
+    fn cancellation_is_only_accepted_before_finalizing_a_file_transfer() {
         let progress = Progress::default();
         assert!(!progress.request_cancel());
         {
             let _scope = progress.begin("export");
             start(Some(1));
+            assert!(progress.request_cancel());
+            finalizing();
             assert!(!progress.request_cancel());
         }
         {

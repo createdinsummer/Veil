@@ -6,10 +6,13 @@ import UniformTypeIdentifiers
 /// 仅描述 macOS 客户端的服务调用，不承载业务规则。
 struct NativeRequest: Encodable, Sendable {
     var operation: String
+    var id: String? = nil
+    var resolutions: [ImportResolution]? = nil
     var space: String? = nil
     var name: String? = nil
     var password: String? = nil
     var path: String? = nil
+    var names: [String]? = nil
     var sources: [String]? = nil
     var directory: String? = nil
     var destination: String? = nil
@@ -17,6 +20,32 @@ struct NativeRequest: Encodable, Sendable {
     var value: String? = nil
     var seconds: Int? = nil
     var count: Int? = nil
+}
+
+
+struct ImportConflict: Decodable, Identifiable, Sendable {
+    let target: String
+    let sameContent: Bool
+    let isDirectory: Bool
+    let error: String?
+    var canOverwrite: Bool { !isDirectory && error == nil }
+    var id: String { target }
+    var detail: String {
+        if let error { return "无法确定：\(error)" }
+        return isDirectory ? "文件与文件夹类型冲突，只能跳过" : (sameContent ? "内容相同" : "内容不同")
+    }
+}
+
+struct ImportInspection: Decodable, Identifiable, Sendable {
+    let id: String
+    let totalFiles: Int
+    let conflicts: [ImportConflict]
+}
+
+enum ImportAction: String, Encodable, Sendable { case overwrite, skip }
+struct ImportResolution: Encodable, Sendable {
+    let target: String
+    let action: ImportAction
 }
 
 enum ClientError: LocalizedError {
@@ -40,12 +69,16 @@ struct TransferProgress: Decodable, Sendable {
     let pendingFiles: UInt64
     let skippedFiles: UInt64
     let totalFiles: UInt64
+    let scanComplete: Bool
+    let waitingFiles: UInt64
+    let checkedFiles: UInt64
     let currentFile: String?
     let cancelRequested: Bool
     let parallelWorkers: UInt64
 
     enum CodingKeys: String, CodingKey {
         case operation, phase
+        case scanComplete = "scan_complete", waitingFiles = "waiting_files", checkedFiles = "checked_files"
         case processedBytes = "processed_bytes", totalBytes = "total_bytes"
         case completedFiles = "completed_files", skippedFiles = "skipped_files"
         case pendingFiles = "pending_files"

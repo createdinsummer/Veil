@@ -22,8 +22,11 @@ use zeroize::Zeroizing;
 
 /// 路径冲突由调用方判断；此处的容器路径仅用于定位已有密文。
 pub enum FileInput<'a> {
-    /// 调用方在事务内读取的容器文件版本快照，仅支持版本比较。
-    ContainerMetadata { version: &'a VersionSnapshot },
+    /// 调用方在事务内读取的容器文件元数据；缺失哈希时需通过容器输入补算。
+    ContainerMetadata {
+        version: &'a VersionSnapshot,
+        hash: Option<&'a str>,
+    },
     /// 调用方已解密的容器文件明文，版本快照可缺省。
     ContainerPlaintext {
         bytes: &'a [u8],
@@ -191,7 +194,7 @@ impl ComparisonGuard<'_> {
 }
 
 enum Prepared<'a> {
-    Metadata(&'a VersionSnapshot),
+    Metadata(&'a VersionSnapshot, Option<&'a str>),
     Plaintext {
         bytes: &'a [u8],
         version: Option<&'a VersionSnapshot>,
@@ -207,7 +210,7 @@ enum Prepared<'a> {
 impl<'a> Prepared<'a> {
     fn new(input: FileInput<'a>) -> Result<Self> {
         Ok(match input {
-            FileInput::ContainerMetadata { version } => Self::Metadata(version),
+            FileInput::ContainerMetadata { version, hash } => Self::Metadata(version, hash),
             FileInput::ContainerPlaintext { bytes, version } => Self::Plaintext { bytes, version },
             FileInput::External { path, version } => {
                 let before = fs::metadata(path)?;
@@ -243,7 +246,16 @@ impl<'a> Prepared<'a> {
                 let mode = if credential.is_shared_write() {
                     LockMode::SharedWrite
                 } else {
-                    LockMode::Write
+                    let mode: String = db.conn.query_row(
+                        "SELECT mode FROM operation_locks WHERE lock_id=?1",
+                        [&credential.lock_id],
+                        |r| r.get(0),
+                    )?;
+                    if mode == "read" {
+                        LockMode::Read
+                    } else {
+                        LockMode::Write
+                    }
                 };
                 locks::validate(&db.conn, &credential, Some(mode))?;
                 let key = db
@@ -281,7 +293,7 @@ impl<'a> Prepared<'a> {
 
     fn reader(&self) -> Result<Box<dyn Read + '_>> {
         Ok(match self {
-            Self::Metadata(_) => return Err(invalid("仅提供元数据的输入不支持哈希或明文比较")),
+            Self::Metadata(..) => return Err(invalid("所选比较需要文件明文，元数据输入无法提供")),
             Self::Plaintext { bytes, .. } => Box::new(Cursor::new(*bytes)),
             Self::External { path, .. } => Box::new(File::open(path)?),
             Self::Ciphertext(item) => Box::new(DecryptedFileReader::open(
@@ -311,14 +323,14 @@ impl<'a> Prepared<'a> {
                     ));
                 }
             }
-            Self::Plaintext { .. } | Self::Metadata(_) => {}
+            Self::Plaintext { .. } | Self::Metadata(..) => {}
         }
         Ok(())
     }
 
     fn version(&self) -> Result<Option<VersionSnapshot>> {
         Ok(match self {
-            Self::Metadata(version) => Some((*version).clone()),
+            Self::Metadata(version, _) => Some((*version).clone()),
             Self::Plaintext { version, .. } | Self::External { version, .. } => {
                 version.map(Clone::clone)
             }
@@ -331,6 +343,9 @@ impl<'a> Prepared<'a> {
     }
 
     fn hash(&mut self) -> Result<String> {
+        if let Self::Metadata(_, Some(hash)) = self {
+            return Ok((*hash).to_owned());
+        }
         if let Self::Ciphertext(item) = self {
             if let Some(value) = item
                 .db

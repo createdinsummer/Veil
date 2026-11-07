@@ -1,6 +1,7 @@
 //! 所有平台共用的 SQLite / SQLCipher 连接及固定磁盘格式。
+pub use crate::database_pool::{Connection, PoolScope, invalidate};
 use crate::error::{Result, VeilError};
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection as NativeConnection, OpenFlags, Transaction, TransactionBehavior};
 use std::{path::Path, time::Duration};
 
 pub const CONTAINER_DB: &str = "veil.db";
@@ -9,7 +10,7 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 在同一个写事务中执行一批更新。提交开始后的错误需要由调用方核对实际结果。
 pub fn commit_batch<T>(
-    conn: &mut Connection,
+    conn: &mut NativeConnection,
     apply: impl FnOnce(&Transaction<'_>) -> Result<T>,
     before_commit: impl FnOnce(),
 ) -> Result<T> {
@@ -35,8 +36,17 @@ pub fn open_with_timeout(
             "数据库不存在或为空；不支持旧容器格式".into(),
         ));
     }
+    crate::database_pool::open(path, password, create, timeout)
+}
+
+pub(crate) fn open_native(
+    path: &Path,
+    password: Option<&str>,
+    create: bool,
+    timeout: Duration,
+) -> Result<NativeConnection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(
+    let conn = NativeConnection::open_with_flags(
         path,
         if create {
             flags | OpenFlags::SQLITE_OPEN_CREATE
@@ -65,15 +75,7 @@ pub fn open_with_timeout(
         }
         conn.execute_batch("PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_use_hmac=ON; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512; PRAGMA cipher_plaintext_header_size=0; PRAGMA cipher_memory_security=ON;")?;
     }
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-        r.get::<_, i64>(0)
-    })
-    .map_err(|e| match e.sqlite_error_code() {
-        Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) => {
-            VeilError::DecryptionError("密码错误、数据库损坏或格式不受支持".into())
-        }
-        _ => VeilError::Database(e),
-    })?;
+    verify_readable(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;")?;
     // 使用回滚日志，便于独立快照和原生 rekey；绝不自行删除 SQLite 日志。
     let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
@@ -83,12 +85,28 @@ pub fn open_with_timeout(
     Ok(conn)
 }
 
-pub fn rekey(conn: &Connection, password: &str) -> Result<()> {
+pub(crate) fn verify_readable(conn: &NativeConnection) -> Result<()> {
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map_err(|e| match e.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) => {
+            VeilError::DecryptionError("密码错误、数据库损坏或格式不受支持".into())
+        }
+        _ => VeilError::Database(e),
+    })?;
+    Ok(())
+}
+
+pub fn rekey(conn: &NativeConnection, password: &str) -> Result<()> {
     if password.is_empty() {
         return Err(VeilError::InvalidFormat("密码不能为空".into()));
     }
     let length =
         i32::try_from(password.len()).map_err(|_| VeilError::InvalidFormat("密码过长".into()))?;
+    if let Some(path) = conn.path() {
+        invalidate(Path::new(path));
+    }
     let result =
         unsafe { rusqlite::ffi::sqlite3_rekey(conn.handle(), password.as_ptr().cast(), length) };
     if result != rusqlite::ffi::SQLITE_OK {
@@ -106,7 +124,7 @@ mod tests {
 
     #[test]
     fn batch_is_atomic_and_only_signals_when_commit_starts() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let mut conn = NativeConnection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE entries (id INTEGER PRIMARY KEY)")
             .unwrap();
         let started = Cell::new(false);
