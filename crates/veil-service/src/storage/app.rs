@@ -1,9 +1,10 @@
 //! 本机索引、设置与缓存，不允许写入容器密码或文件密钥。
-use super::{ensure_schema, id, invalid, json, now, parse};
+use super::{ensure_schema, id, invalid, json, locks::LockMode, now, parse};
 use crate::error::Result;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -180,6 +181,85 @@ impl AppStore {
         #[cfg(target_os = "ios")]
         store.rebind_ios_sandbox_spaces()?;
         Ok(store)
+    }
+
+    /// 获取空间级共享锁；锁文件保存在 app.db 目录，空间目录删除后锁仍有效。
+    pub fn acquire_space_shared_lock(&self, identity: &str) -> Result<Vec<std::fs::File>> {
+        self.acquire_space_lock(identity, LockMode::SharedWrite)
+    }
+
+    /// 获取空间级独占锁；锁文件保存在 app.db 目录，空间目录删除后锁仍有效。
+    pub fn acquire_space_exclusive_lock(&self, identity: &str) -> Result<Vec<std::fs::File>> {
+        self.acquire_space_lock(identity, LockMode::Write)
+    }
+
+    /// 重叠空间按路径组件匹配，并按稳定顺序加锁，避免父空间和子空间并发删除。
+    fn acquire_space_lock(&self, identity: &str, mode: LockMode) -> Result<Vec<std::fs::File>> {
+        let exclusive = match mode {
+            LockMode::SharedWrite => false,
+            LockMode::Write => true,
+            LockMode::Read | LockMode::ReadOnly => {
+                return Err(invalid("空间锁仅允许共享写锁或排他写锁"));
+            }
+        };
+        let spaces = self.spaces()?;
+        let target = spaces
+            .iter()
+            .find(|space| space.id == identity)
+            .ok_or_else(|| invalid("空间不存在"))?;
+        let target_path = target
+            .local_path
+            .as_deref()
+            .ok_or_else(|| invalid("空间目录不可用"))?;
+        let mut overlapping = spaces
+            .iter()
+            .filter(|space| {
+                space.local_path.as_deref().is_some_and(|path| {
+                    path.starts_with(target_path) || target_path.starts_with(path)
+                })
+            })
+            .map(|space| space.id.as_str())
+            .collect::<Vec<_>>();
+        overlapping.sort_unstable();
+        overlapping.dedup();
+
+        let mut files = Vec::with_capacity(overlapping.len());
+        for identity in overlapping {
+            let file = self.open_space_lock_file(identity)?;
+            if exclusive {
+                file.lock()?;
+            } else {
+                file.lock_shared()?;
+            }
+            files.push(file);
+        }
+        Ok(files)
+    }
+
+    fn open_space_lock_file(&self, identity: &str) -> Result<std::fs::File> {
+        if identity.is_empty() {
+            return Err(invalid("空间锁 ID 不能为空"));
+        }
+        let lock_directory = self.directory.join("space-locks");
+        std::fs::create_dir_all(&lock_directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lock_directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let lock_path = lock_directory.join(format!("{}.lock", blake3::hash(identity.as_bytes())));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(file)
     }
 
     /// iOS 更新或还原应用时，私有数据目录的系统标识可能发生变化。

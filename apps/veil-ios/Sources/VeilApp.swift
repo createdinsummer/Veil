@@ -53,6 +53,8 @@ struct RootView: View {
     @State private var importingPackage = false
     @State private var pendingPackage: URL?
     @State private var deleting: BrowserEntry?
+    @State private var deletingContainer: ContainerSummary?
+    @State private var deletingSpace: Space?
     var body: some View {
         NavigationStack {
             Group { if store.container == nil { home } else { browser } }
@@ -104,7 +106,7 @@ struct RootView: View {
         }
         .privacySensitive()
         .overlay { if phase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
-        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; importing = false; importingPackage = false; store.exportSelection = nil } }
+        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; deletingContainer = nil; deletingSpace = nil; importing = false; importingPackage = false; store.exportSelection = nil } }
         .tint(ink)
         .sheet(item: $form, onDismiss: { if let url = pendingPackage { url.stopAccessingSecurityScopedResource(); pendingPackage = nil } }) { ContainerFormView(form: $0) { form = nil } }
         .fileImporter(isPresented: Binding(get: { store.exportSelection != nil }, set: { _ in }), allowedContentTypes: [.folder]) { result in
@@ -121,6 +123,7 @@ struct RootView: View {
                 .onDisappear { store.completeImportReview(nil, id: inspection.id) }
         }
         .sheet(item: $store.preview) { PreviewView(item: $0) }
+        .sheet(item: $deletingContainer) { item in DeleteContainerView(item: item) }
         .sheet(isPresented: $newSpace) { NewSpaceView() }
         .alert("清理所有本机数据？", isPresented: $confirmClearData) {
             Button("取消", role: .cancel) { }
@@ -128,12 +131,18 @@ struct RootView: View {
         } message: {
             Text("将永久删除此设备上 Veil 的所有空间、容器、文件和设置，无法撤销。请先导出需要保留的加密备份。")
         }
-        .alert("清理完成", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
+        .alert("操作完成", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("好") { store.notice = nil }
         } message: { Text(store.notice ?? "") }
         .alert("操作未完成", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("好") { store.error = nil } } message: { Text(store.error ?? "") }
         .confirmationDialog("删除后无法恢复", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             Button("删除", role: .destructive) { if let item = deleting { Task { await store.remove(item) } }; deleting = nil }
+        }
+        .confirmationDialog("删除空间？", isPresented: Binding(get: { deletingSpace != nil }, set: { if !$0 { deletingSpace = nil } }), titleVisibility: .visible) {
+            Button("删除空间", role: .destructive) { if let space = deletingSpace { Task { await store.deleteSpace(space) } }; deletingSpace = nil }
+            Button("取消", role: .cancel) { deletingSpace = nil }
+        } message: {
+            Text(deletingSpace?.isDefault == true ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
         }
         .photosPicker(isPresented: $importingPhotos, selection: $selectedPhotos, matching: .any(of: [.images, .videos]))
         .onChange(of: selectedPhotos) { _, items in
@@ -169,6 +178,11 @@ struct RootView: View {
                             }
                             Button("新建空间", systemImage: "folder.badge.plus") { newSpace = true }
                         }
+                        Section("管理空间") {
+                            if let space = store.space {
+                                Button("删除当前空间", systemImage: "trash", role: .destructive) { deletingSpace = space }
+                            }
+                        }
                         Section("其他操作") {
                             Button("导入加密备份", systemImage: "square.and.arrow.down") { importingPackage = true }
                             Button("清理数据", systemImage: "trash", role: .destructive) { confirmClearData = true }
@@ -195,13 +209,21 @@ struct RootView: View {
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(16).background(surface, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(outline, style: StrokeStyle(lineWidth: 1, dash: [4])))
                         }
                         ForEach(space.containers) { item in
-                            Button { form = .open(path: item.path, name: item.name) } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: "checkmark.shield").font(.title3).foregroundStyle(.secondary).frame(width: 42, height: 42).background(mutedSurface, in: RoundedRectangle(cornerRadius: 9))
-                                    VStack(alignment: .leading, spacing: 5) { Text(item.name).font(.subheadline.weight(.semibold)); Text("本机 / \(space.name)").font(.caption).foregroundStyle(.secondary) }
-                                    Spacer(); Image(systemName: "arrow.right").font(.caption).foregroundStyle(.secondary)
-                                }.padding(15).background(surface, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(outline))
-                            }.buttonStyle(.plain)
+                            HStack(spacing: 6) {
+                                Button { form = .open(path: item.path, name: item.name) } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "checkmark.shield").font(.title3).foregroundStyle(.secondary).frame(width: 42, height: 42).background(mutedSurface, in: RoundedRectangle(cornerRadius: 9))
+                                        VStack(alignment: .leading, spacing: 5) { Text(item.name).font(.subheadline.weight(.semibold)); Text("本机 / \(space.name)").font(.caption).foregroundStyle(.secondary) }
+                                        Spacer(); Image(systemName: "arrow.right").font(.caption).foregroundStyle(.secondary)
+                                    }.padding(.vertical, 13).padding(.leading, 14)
+                                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
+                                Menu {
+                                    Button("删除容器", systemImage: "trash", role: .destructive) { deletingContainer = item }
+                                } label: {
+                                    Image(systemName: "ellipsis").font(.body.weight(.medium)).foregroundStyle(.secondary)
+                                        .frame(width: 38, height: 44).contentShape(Rectangle())
+                                }.accessibilityLabel("管理容器")
+                            }.padding(.trailing, 4).background(surface, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(outline))
                         }
                     }
                 }
@@ -366,6 +388,54 @@ struct NewSpaceView: View {
             }.scrollDismissesKeyboard(.interactively).background(Color(uiColor: .systemGroupedBackground)).navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
                 .alert("操作未完成", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) { Button("好") { store.error = nil } } message: { Text(store.error ?? "") }
+        }
+    }
+}
+
+struct DeleteContainerView: View {
+    @EnvironmentObject private var store: Store
+    @Environment(\.dismiss) private var dismiss
+    let item: ContainerSummary
+    @State private var password = ""
+    @FocusState private var passwordFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("容器") {
+                    Text(item.name)
+                    Text("加密容器目录及其中的文件将被永久删除，无法恢复。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("验证密码") {
+                    if let error = store.error {
+                        Text(error).font(.footnote).foregroundStyle(.red)
+                    }
+                    SecureField("容器密码", text: $password)
+                        .focused($passwordFocused)
+                        .textContentType(.password)
+                        .submitLabel(.done)
+                        .onSubmit { submit() }
+                }
+            }
+            .navigationTitle("删除容器")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("永久删除", role: .destructive) { submit() }
+                        .disabled(password.isEmpty || store.busy)
+                }
+            }
+            .tint(.red)
+            .onAppear { passwordFocused = true }
+        }
+    }
+
+    private func submit() {
+        guard !password.isEmpty, !store.busy else { return }
+        Task {
+            if await store.deleteContainer(item, password: password) { dismiss() }
         }
     }
 }

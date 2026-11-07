@@ -18,6 +18,9 @@ impl ContainerHandle {
     pub fn name(&self) -> &str {
         &self.resolved.veil_name
     }
+    pub(crate) fn id(&self) -> &str {
+        &self.resolved.veil_id
+    }
     pub fn directory(&self) -> &Path {
         &self.resolved.veil_dir
     }
@@ -54,6 +57,10 @@ pub struct ImportPlan {
     skipped: usize,
 }
 impl ImportPlan {
+    pub(crate) fn container_id(&self) -> &str {
+        self.container.id()
+    }
+
     /// 检查所有已占用路径，由调用方显式选择处理；确认覆盖后绑定基础版本。
     pub fn resolve_conflicts(
         mut self,
@@ -186,6 +193,10 @@ pub struct PackPlan {
     output: PathBuf,
 }
 impl PackPlan {
+    pub(crate) fn container_id(&self) -> &str {
+        self.container.id()
+    }
+
     pub fn recovered_link(&self) -> Option<&Path> {
         self.container.recovered_link()
     }

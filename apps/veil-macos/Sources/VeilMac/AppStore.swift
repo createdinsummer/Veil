@@ -21,6 +21,10 @@ final class AppStore: ObservableObject {
     @Published var showNewSpace = false
     @Published var showImportPackage = false
     @Published var pendingDelete: BrowserEntry?
+    @Published var pendingContainerDelete: ContainerSummary?
+    @Published var pendingSpaceDelete: Space?
+    @Published var showDeleteContainerPassword = false
+    @Published private(set) var deleteContainerPasswordTarget: ContainerSummary?
     @Published var preview: PreviewAsset?
     @Published var conflictOperation = "导入"
     @Published var importInspection: ImportInspection?
@@ -339,6 +343,61 @@ final class AppStore: ObservableObject {
                 self.form = nil
                 self.selectedSpaceID = spaces.first(where: { $0.name == name })?.id ?? self.selectedSpaceID
             }
+        }
+    }
+
+    func confirmDeleteContainer(_ item: ContainerSummary) {
+        pendingContainerDelete = nil
+        deleteContainerPasswordTarget = item
+        showDeleteContainerPassword = true
+    }
+
+    @discardableResult
+    func deleteContainer(_ item: ContainerSummary, password: String) async -> Bool {
+        var deleted = false
+        await perform { ticket in
+            if self.container?.id == item.id {
+                self.container = nil
+                self.form = nil
+                self.resetBrowser()
+                try await self.client.execute(NativeRequest(operation: "lock"))
+                guard ticket == self.generation else { return }
+            }
+            let spaces: [Space] = try await self.client.json(
+                NativeRequest(operation: "delete_container", id: item.id, password: password)
+            )
+            guard ticket == self.generation else { return }
+            self.unlockedPasswords.removeValue(forKey: item.id)
+            self.spaces = spaces
+            self.recents = try await self.client.json(NativeRequest(operation: "list_recents"))
+            if !spaces.contains(where: { $0.id == self.selectedSpaceID }) {
+                self.selectedSpaceID = spaces.first(where: \.isDefault)?.id ?? spaces.first?.id ?? ""
+            }
+            self.deleteContainerPasswordTarget = nil
+            self.showDeleteContainerPassword = false
+            self.notice = "容器已删除"
+            deleted = true
+        }
+        return deleted
+    }
+
+    func deleteSpace(_ space: Space) async {
+        await perform { ticket in
+            if space.containers.contains(where: { $0.id == self.container?.id }) {
+                self.container = nil
+                self.form = nil
+                self.resetBrowser()
+            }
+            let spaces: [Space] = try await self.client.json(
+                NativeRequest(operation: "delete_space", id: space.id)
+            )
+            guard ticket == self.generation else { return }
+            for item in space.containers { self.unlockedPasswords.removeValue(forKey: item.id) }
+            self.spaces = spaces
+            if !spaces.contains(where: { $0.id == self.selectedSpaceID }) {
+                self.selectedSpaceID = spaces.first(where: \.isDefault)?.id ?? spaces.first?.id ?? ""
+            }
+            self.notice = space.isDefault ? "默认空间已删除并重新建立" : "空间已删除"
         }
     }
 

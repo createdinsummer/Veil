@@ -71,6 +71,47 @@ import ImageIO
         let items: [Space] = try await self.client.json(NativeRequest(operation: "create_space", name: name))
         guard ticket == self.generation else { return }; self.spaces = items; self.selectedSpace = items.first(where: { $0.name == name })?.id ?? self.selectedSpace
     } }
+    func deleteContainer(_ item: ContainerSummary, password: String) async -> Bool {
+        var deleted = false
+        await run { ticket in
+            let items: [Space] = try await self.client.json(
+                NativeRequest(operation: "delete_container", id: item.id, password: password)
+            )
+            guard ticket == self.generation else { return }
+            if self.container?.id == item.id {
+                self.container = nil; self.preview = nil; self.export = nil; self.exportSelection = nil
+                self.directory = ""; self.search = ""; self.category = nil
+                self.thumbnails.removeAll(); self.textThumbnails.removeAll()
+                self.thumbnailTasks.removeAll(); self.thumbnailFailures.removeAll()
+            }
+            self.spaces = items
+            if !items.contains(where: { $0.id == self.selectedSpace }) {
+                self.selectedSpace = items.first(where: { $0.isDefault })?.id ?? items.first?.id ?? ""
+            }
+            self.notice = "容器已删除"
+            deleted = true
+        }
+        return deleted
+    }
+    func deleteSpace(_ space: Space) async {
+        await run { ticket in
+            let items: [Space] = try await self.client.json(
+                NativeRequest(operation: "delete_space", id: space.id)
+            )
+            guard ticket == self.generation else { return }
+            if space.containers.contains(where: { $0.id == self.container?.id }) {
+                self.container = nil; self.preview = nil; self.export = nil; self.exportSelection = nil
+                self.directory = ""; self.search = ""; self.category = nil
+                self.thumbnails.removeAll(); self.textThumbnails.removeAll()
+                self.thumbnailTasks.removeAll(); self.thumbnailFailures.removeAll()
+            }
+            self.spaces = items
+            if !items.contains(where: { $0.id == self.selectedSpace }) {
+                self.selectedSpace = items.first(where: { $0.isDefault })?.id ?? items.first?.id ?? ""
+            }
+            self.notice = space.isDefault ? "默认空间已删除并重新建立" : "空间已删除"
+        }
+    }
     func open(form: ContainerForm, name: String, password: String) async -> Bool {
         var success = false
         await run { ticket in

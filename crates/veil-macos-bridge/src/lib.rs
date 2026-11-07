@@ -42,6 +42,13 @@ enum Request {
         name: String,
         path: Option<std::path::PathBuf>,
     },
+    DeleteSpace {
+        id: String,
+    },
+    DeleteContainer {
+        id: String,
+        password: String,
+    },
     CreateContainer {
         space: String,
         name: String,
@@ -117,6 +124,10 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::ListSpaces => ServiceRequest::ListSpaces,
         Request::ListRecents => ServiceRequest::ListRecents,
         Request::CreateSpace { name, path } => ServiceRequest::CreateSpace { name, path },
+        Request::DeleteSpace { id } => ServiceRequest::DeleteSpace { id },
+        Request::DeleteContainer { id, password } => {
+            ServiceRequest::DeleteContainer { id, password }
+        }
         Request::CreateContainer {
             space,
             name,

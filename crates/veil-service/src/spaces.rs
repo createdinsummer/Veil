@@ -2,10 +2,16 @@
 use crate::{
     config::AppConfig,
     error::VeilError,
-    storage::app::AppStore,
+    storage::{
+        app::AppStore,
+        container::ContainerDb,
+        locks::{LockManager, LockMode, LockOptions},
+    },
     workflow::{self, CreateOptions, CreatedContainer, WorkflowError},
 };
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::Serialize;
+use std::time::Duration;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceView {
@@ -81,6 +87,201 @@ pub(crate) fn create_space(name: &str, path: Option<&std::path::Path>) -> Result
     store.create_space(name, path, false)?;
     Ok(())
 }
+
+/// 物理删除空间目录及其全部内容，并清除空间、容器和本机缓存记录。
+pub fn delete_space(identity: &str) -> Result<(), VeilError> {
+    let mut store = AppStore::global()?;
+    let space_lock = store.acquire_space_exclusive_lock(identity)?;
+    let tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let stored_path: Option<String> = tx
+        .query_row(
+            "SELECT local_path FROM space_info WHERE id=?1",
+            [identity],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| VeilError::WorkError("空间不存在".into()))?;
+    let stored_path = stored_path
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| VeilError::WorkError("空间目录不可用".into()))?;
+    if !stored_path.is_absolute() {
+        return Err(VeilError::WorkError("空间目录必须是绝对路径".into()));
+    }
+    let app_directory = std::fs::canonicalize(&store.directory)?;
+    if stored_path == app_directory || app_directory.starts_with(&stored_path) {
+        return Err(VeilError::WorkError(
+            "拒绝删除文件系统根目录或包含 Veil 数据库的目录".into(),
+        ));
+    }
+    let space_ids = {
+        let mut statement =
+            tx.prepare("SELECT id,local_path FROM space_info WHERE local_path IS NOT NULL")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(id, path)| {
+                std::path::PathBuf::from(path)
+                    .starts_with(&stored_path)
+                    .then_some(id)
+            })
+            .collect::<Vec<_>>()
+    };
+    if !space_ids.iter().any(|id| id == identity) {
+        return Err(VeilError::WorkError("空间目录登记无效".into()));
+    }
+    match std::fs::remove_dir_all(&stored_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let default_id: Option<String> = tx
+        .query_row(
+            "SELECT value_json FROM system_setting WHERE key='default_space_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let encoded_space_ids = space_ids
+        .iter()
+        .map(crate::storage::json)
+        .collect::<Result<Vec<_>, _>>()?;
+    if default_id
+        .as_ref()
+        .is_some_and(|default| encoded_space_ids.iter().any(|id| id == default))
+    {
+        tx.execute(
+            "DELETE FROM system_setting WHERE key='default_space_id'",
+            [],
+        )?;
+    }
+    let space_ids_json = crate::storage::json(&space_ids)?;
+    tx.execute(
+        "DELETE FROM local_record WHERE record_type IN ('recent_div','div_state') AND record_key IN (SELECT div_id FROM space_div WHERE space_id IN (SELECT value FROM json_each(?1)))",
+        [&space_ids_json],
+    )?;
+    tx.execute(
+        "DELETE FROM local_record WHERE record_type='link_cache' AND json_extract(value_json,'$.link.veil.veil_id') IN (SELECT div_id FROM space_div WHERE space_id IN (SELECT value FROM json_each(?1)))",
+        [&space_ids_json],
+    )?;
+    tx.execute(
+        "DELETE FROM local_record WHERE record_type='space_access' AND record_key IN (SELECT value FROM json_each(?1))",
+        [&space_ids_json],
+    )?;
+    tx.execute(
+        "DELETE FROM space_div WHERE space_id IN (SELECT value FROM json_each(?1))",
+        [&space_ids_json],
+    )?;
+    if tx.execute(
+        "DELETE FROM space_info WHERE id IN (SELECT value FROM json_each(?1))",
+        [&space_ids_json],
+    )? == 0
+    {
+        return Err(VeilError::WorkError("空间不存在".into()));
+    }
+    tx.commit()?;
+    drop(space_lock);
+    Ok(())
+}
+
+/// 删除已登记容器的加密目录，并清除本机登记和最近记录。
+pub fn delete_container(identity: &str, password: &str) -> Result<(), VeilError> {
+    crate::work::validate_veil_id(identity)?;
+    let mut store = AppStore::global()?;
+    let registration = store
+        .registrations()?
+        .into_iter()
+        .find(|registration| registration.div_id == identity)
+        .ok_or_else(|| VeilError::WorkError("容器未登记到空间".into()))?;
+    // 与空间删除的独占锁互斥，避免空间目录正在移除时继续删除容器。
+    let _space_lock = store.acquire_space_shared_lock(&registration.space_id)?;
+    let space = store
+        .spaces()?
+        .into_iter()
+        .find(|space| space.id == registration.space_id)
+        .ok_or_else(|| VeilError::WorkError("容器所属空间不存在".into()))?;
+    let root = space
+        .local_path
+        .ok_or_else(|| VeilError::WorkError("空间目录不可用".into()))?;
+    let root = std::fs::canonicalize(root)?;
+    let container_path = root.join(identity);
+    let metadata = std::fs::symlink_metadata(&container_path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(VeilError::WorkError("容器目录无效".into()));
+    }
+    let container_path = std::fs::canonicalize(container_path)?;
+    if container_path.parent() != Some(root.as_path())
+        || container_path.file_name().and_then(|name| name.to_str()) != Some(identity)
+    {
+        return Err(VeilError::WorkError("容器目录超出空间范围".into()));
+    }
+
+    // 先验证密码和容器身份，再取得容器排他锁，避免删除正在使用的容器。
+    drop(ContainerDb::open(
+        &container_path,
+        password,
+        Some(identity),
+    )?);
+    let lock = LockManager::new(&container_path, password)
+        .with_options(LockOptions {
+            timeout: Some(Duration::from_millis(100)),
+            cancellation: None,
+        })
+        .acquire_container(LockMode::Write)?;
+
+    let tombstone = root.join(format!(
+        ".veil-deleting-{}-{}",
+        identity,
+        crate::storage::id()
+    ));
+    let tx = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current_space: Option<String> = tx
+        .query_row(
+            "SELECT space_id FROM space_div WHERE div_id=?1",
+            [identity],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current_space.as_deref() != Some(registration.space_id.as_str()) {
+        return Err(VeilError::WorkError("容器归属已变化，请刷新后重试".into()));
+    }
+
+    tx.execute("DELETE FROM space_div WHERE div_id=?1", [identity])?;
+    tx.execute(
+        "DELETE FROM local_record WHERE record_key=?1 AND record_type IN ('recent_div','div_state')",
+        [identity],
+    )?;
+    tx.execute(
+        "DELETE FROM local_record WHERE record_type='link_cache' AND json_extract(value_json,'$.link.veil.veil_id')=?1",
+        [identity],
+    )?;
+    veil_core::fsutil::rename_no_replace(&container_path, &tombstone)?;
+    if let Err(error) = veil_core::fsutil::sync_directory(&root) {
+        let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
+        return Err(error.into());
+    }
+    if let Err(error) = tx.commit() {
+        let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
+        let _ = veil_core::fsutil::sync_directory(&root);
+        return Err(error.into());
+    }
+
+    drop(lock);
+    std::fs::remove_dir_all(&tombstone).map_err(|error| {
+        VeilError::WorkError(format!(
+            "容器已从空间移除，但临时数据清理失败（{}）：{error}",
+            tombstone.display()
+        ))
+    })?;
+    veil_core::fsutil::sync_directory(&root)?;
+    Ok(())
+}
 pub(crate) fn create_container(
     space: &str,
     name: &str,
@@ -132,6 +333,8 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     if source_space.id == target.id {
         return Ok(());
     }
+    let _source_space_lock = store.acquire_space_shared_lock(&source_space.id)?;
+    let _target_space_lock = store.acquire_space_shared_lock(&target.id)?;
     let source = source_space
         .local_path
         .as_ref()

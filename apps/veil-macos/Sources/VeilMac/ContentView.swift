@@ -54,6 +54,11 @@ struct ContentView: View {
         .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
         .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
         .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
+        .sheet(isPresented: $store.showDeleteContainerPassword) {
+            if let item = store.deleteContainerPasswordTarget {
+                DeleteContainerPasswordView(item: item).environmentObject(store)
+            }
+        }
         .alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingDelete != nil }, set: { if !$0 { store.pendingDelete = nil } }
         ), presenting: store.pendingDelete) { target in
@@ -64,6 +69,22 @@ struct ContentView: View {
             case .folder: Text("此文件夹及其全部文件将从容器中删除。此操作无法撤销。")
             case .file: Text("此文件将从容器中删除。此操作无法撤销。")
             }
+        }
+        .alert("删除空间「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
+            get: { store.pendingSpaceDelete != nil }, set: { if !$0 { store.pendingSpaceDelete = nil } }
+        ), presenting: store.pendingSpaceDelete) { space in
+            Button("删除空间", role: .destructive) { store.pendingSpaceDelete = nil; Task { await store.deleteSpace(space) } }
+            Button("取消", role: .cancel) { store.pendingSpaceDelete = nil }
+        } message: { space in
+            Text(space.isDefault ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+        }
+        .alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
+            get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
+        ), presenting: store.pendingContainerDelete) { item in
+            Button("继续", role: .destructive) { store.confirmDeleteContainer(item) }
+            Button("取消", role: .cancel) { store.pendingContainerDelete = nil }
+        } message: { _ in
+            Text("加密容器目录及其中的文件将被永久删除。需要验证容器密码，无法撤销。")
         }
     }
 
@@ -217,6 +238,11 @@ private struct SidebarView: View {
                                 ForEach(space.containers) { item in SidebarContainerRow(item: item, selected: store.container?.id == item.id) }
                             }
                         }
+                        .contextMenu {
+                            Button("删除空间", systemImage: "trash", role: .destructive) {
+                                store.pendingSpaceDelete = space
+                            }
+                        }
                     }
                     Button { store.error = nil; store.showNewSpace = true } label: {
                         Label("新建空间", systemImage: "plus").font(.system(size: 12))
@@ -248,6 +274,11 @@ private struct SidebarContainerRow: View {
                 .background(selected ? VeilTheme.selected : hovering ? VeilTheme.hover : .clear, in: RoundedRectangle(cornerRadius: 7))
         }.buttonStyle(VeilPlainButtonStyle()).onHover { hovering = $0 }.help(item.path)
             .accessibilityAddTraits(selected ? .isSelected : [])
+            .contextMenu {
+                Button("删除容器", systemImage: "trash", role: .destructive) {
+                    store.pendingContainerDelete = item
+                }
+            }
     }
 }
 

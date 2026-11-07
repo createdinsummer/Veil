@@ -111,7 +111,7 @@ fn all_input_combinations_support_selected_checks_and_missing_versions() {
 }
 
 #[test]
-fn missing_container_file_hash_is_rejected() {
+fn missing_container_file_hash_falls_back_to_decrypted_content() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("veil"));
     manager.init_veil("test", "password").unwrap();
@@ -129,7 +129,7 @@ fn missing_container_file_hash_is_rejected() {
     db.execute("DELETE FROM file_hash", []).unwrap();
     drop(db);
     assert!(manager.list_files("password").unwrap()[0].hash.is_none());
-    let result = compare_files(
+    let report = compare_files(
         FileInput::ContainerCiphertext {
             manager: &manager,
             password: "password",
@@ -143,8 +143,11 @@ fn missing_container_file_hash_is_rejected() {
             hash: true,
             ..Default::default()
         },
-    );
-    assert!(result.is_err());
+    )
+    .unwrap();
+    assert_eq!(report.hash, Some(ComparisonState::Same));
+    assert_eq!(report.outcome, ConflictOutcome::NoConflict);
+    // 普通读锁不能写缓存，但缺失缓存不影响本次比较。
     assert!(manager.list_files("password").unwrap()[0].hash.is_none());
 }
 

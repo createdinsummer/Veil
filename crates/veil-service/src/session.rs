@@ -19,6 +19,7 @@ pub struct VeilService(
     Arc<RwLock<Option<PathBuf>>>,
     Arc<Mutex<Option<Arc<crate::import_pipeline::ImportConflictQueue>>>>,
     Arc<Mutex<Option<Arc<crate::transfer_conflicts::ConflictQueue<crate::export_pipeline::Work>>>>>,
+    Arc<Mutex<Option<Vec<std::fs::File>>>>,
 );
 
 impl Drop for VeilService {
@@ -117,6 +118,13 @@ pub enum ServiceRequest<'a> {
     },
     SetDefaultSpace {
         id: &'a str,
+    },
+    DeleteSpace {
+        id: String,
+    },
+    DeleteContainer {
+        id: String,
+        password: String,
     },
     UnregisterContainer {
         id: &'a str,
@@ -576,6 +584,17 @@ impl VeilService {
                 crate::storage::app::AppStore::global()?.set_default_space(id)?;
                 Ok(ServiceResponse::Done)
             }
+            ServiceRequest::DeleteSpace { id } => {
+                self.lock_if_space_open(&id)?;
+                crate::spaces::delete_space(&id)?;
+                Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
+            }
+            ServiceRequest::DeleteContainer { id, password } => {
+                self.lock_if_open(&id)?;
+                let password = Zeroizing::new(password);
+                crate::spaces::delete_container(&id, password.as_str())?;
+                Ok(ServiceResponse::Spaces(crate::spaces::list_spaces()?))
+            }
             ServiceRequest::UnregisterContainer { id } => {
                 crate::storage::app::AppStore::global()?.unregister(id)?;
                 Ok(ServiceResponse::Done)
@@ -585,8 +604,9 @@ impl VeilService {
                 target_space,
                 password,
             } => {
-                crate::spaces::move_container(id, target_space, password)?;
                 let store = crate::storage::app::AppStore::global()?;
+                let mut target_space_lock = Some(store.acquire_space_shared_lock(target_space)?);
+                crate::spaces::move_container(id, target_space, password)?;
                 let destination = store
                     .spaces()?
                     .into_iter()
@@ -603,6 +623,8 @@ impl VeilService {
                 {
                     session.path = destination.clone();
                     session.password = Zeroizing::new(password.into());
+                    *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? =
+                        target_space_lock.take();
                     *self.3.write().map_err(|_| ServiceError::StateUnavailable)? =
                         Some(destination);
                 }
@@ -653,6 +675,7 @@ impl VeilService {
                 name,
                 password,
             } => {
+                let _space_lock = Self::space_lock_for_selector(&space)?;
                 let password = Zeroizing::new(password);
                 let created = crate::spaces::create_container(&space, &name, password.as_str())?;
                 self.open(
@@ -810,6 +833,7 @@ impl VeilService {
                 space,
                 password,
             } => {
+                let _space_lock = Self::space_lock_for_selector(&space)?;
                 let password = Zeroizing::new(password);
                 let link = crate::config::AppConfig::config_path()?
                     .parent()
@@ -837,6 +861,7 @@ impl VeilService {
                 veil_id,
                 operation,
             } => {
+                let _space_lock = Self::space_lock_for_container(veil_id)?;
                 let manager = VeilManager::for_veil(directory.to_path_buf(), veil_id);
                 Ok(ServiceResponse::Operation(crate::operations::execute(
                     &manager, operation,
@@ -848,9 +873,12 @@ impl VeilService {
             ServiceRequest::OperatePrepared {
                 container,
                 operation,
-            } => Ok(ServiceResponse::Operation(crate::commands::operate(
-                container, operation,
-            )?)),
+            } => {
+                let _space_lock = Self::space_lock_for_container(container.id())?;
+                Ok(ServiceResponse::Operation(crate::commands::operate(
+                    container, operation,
+                )?))
+            }
             ServiceRequest::PrepareImport {
                 selector,
                 source,
@@ -858,17 +886,23 @@ impl VeilService {
             } => Ok(ServiceResponse::ImportPrepared(
                 crate::commands::prepare_import(selector, source, destination)?,
             )),
-            ServiceRequest::CommitImport { plan, password } => Ok(ServiceResponse::Imported(
-                crate::commands::commit_import(plan, password)?,
-            )),
+            ServiceRequest::CommitImport { plan, password } => {
+                let _space_lock = Self::space_lock_for_container(plan.container_id())?;
+                Ok(ServiceResponse::Imported(crate::commands::commit_import(
+                    plan, password,
+                )?))
+            }
             ServiceRequest::PrepareContainerPack { selector, output } => {
                 Ok(ServiceResponse::ContainerPackPrepared(
                     crate::commands::prepare_pack(selector, output)?,
                 ))
             }
-            ServiceRequest::CommitContainerPack { plan, password } => Ok(
-                ServiceResponse::ContainerPacked(crate::commands::commit_pack(plan, password)?),
-            ),
+            ServiceRequest::CommitContainerPack { plan, password } => {
+                let _space_lock = Self::space_lock_for_container(plan.container_id())?;
+                Ok(ServiceResponse::ContainerPacked(
+                    crate::commands::commit_pack(plan, password)?,
+                ))
+            }
             ServiceRequest::ResolveContainer { selector } => {
                 let mut config = crate::config::AppConfig::load()?;
                 Ok(ServiceResponse::Resolved(config.resolve_veil(selector)?))
@@ -1034,11 +1068,14 @@ impl VeilService {
             &metadata.veil_name,
             &metadata.created_at,
         )?;
+        let space_lock = Self::space_lock_for_container(&metadata.veil_id)?;
+        let metadata = VeilManager::new(path.clone()).read_meta(password.as_str())?;
         let view = container_view(&path, &metadata);
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
         if let Some(previous) = session.as_ref() {
             veil_core::database::invalidate(&previous.path.join(veil_core::database::CONTAINER_DB));
         }
+        *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? = space_lock;
         *session = Some(Session {
             path,
             veil_id: metadata.veil_id.clone(),
@@ -1443,6 +1480,13 @@ impl VeilService {
     fn remove_path(&self, name: &str) -> Result<ContainerView, ServiceError> {
         let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let app_store = crate::storage::app::AppStore::global()?;
+        let _space_lock = app_store
+            .registrations()?
+            .into_iter()
+            .find(|registration| registration.div_id == session.veil_id)
+            .map(|registration| app_store.acquire_space_shared_lock(&registration.space_id))
+            .transpose()?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
         manager.remove_path(name, session.password.as_str())?;
         Ok(container_view(
@@ -1459,6 +1503,89 @@ impl VeilService {
             veil_core::database::invalidate(&current.path.join(veil_core::database::CONTAINER_DB));
         }
         *session = None;
+        *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? = None;
+        Ok(())
+    }
+
+    fn space_lock_for_container(
+        identity: &str,
+    ) -> Result<Option<Vec<std::fs::File>>, ServiceError> {
+        let store = crate::storage::app::AppStore::global()?;
+        let Some(registration) = store
+            .registrations()?
+            .into_iter()
+            .find(|registration| registration.div_id == identity)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            store.acquire_space_shared_lock(&registration.space_id)?,
+        ))
+    }
+
+    fn space_lock_for_selector(selector: &str) -> Result<Vec<std::fs::File>, ServiceError> {
+        let store = crate::storage::app::AppStore::global()?;
+        let space_id = store
+            .spaces()?
+            .into_iter()
+            .find(|space| space.id == selector || space.name == selector)
+            .map(|space| space.id)
+            .ok_or(ServiceError::InvalidInput("空间不存在"))?;
+        Ok(store.acquire_space_shared_lock(&space_id)?)
+    }
+
+    fn lock_if_open(&self, identity: &str) -> Result<(), ServiceError> {
+        let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        if session
+            .as_ref()
+            .is_some_and(|current| current.veil_id == identity)
+        {
+            if let Some(current) = session.as_ref() {
+                veil_core::database::invalidate(
+                    &current.path.join(veil_core::database::CONTAINER_DB),
+                );
+            }
+            *session = None;
+            *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = None;
+            *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? = None;
+        }
+        Ok(())
+    }
+
+    fn lock_if_space_open(&self, space_identity: &str) -> Result<(), ServiceError> {
+        let store = crate::storage::app::AppStore::global()?;
+        let spaces = store.spaces()?;
+        let Some(target_path) = spaces
+            .iter()
+            .find(|space| space.id == space_identity)
+            .and_then(|space| space.local_path.as_deref())
+        else {
+            return Ok(());
+        };
+        let active_identity = self
+            .0
+            .lock()
+            .map_err(|_| ServiceError::StateUnavailable)?
+            .as_ref()
+            .map(|session| session.veil_id.clone());
+        if let Some(identity) = active_identity {
+            let active_space = store
+                .registrations()?
+                .into_iter()
+                .find(|registration| registration.div_id == identity)
+                .map(|registration| registration.space_id);
+            if active_space
+                .as_deref()
+                .and_then(|id| spaces.iter().find(|space| space.id == id))
+                .and_then(|space| space.local_path.as_deref())
+                .is_some_and(|active_path| {
+                    active_path.starts_with(target_path) || target_path.starts_with(active_path)
+                })
+            {
+                self.lock_if_open(&identity)?;
+            }
+        }
         Ok(())
     }
 }
@@ -1635,7 +1762,8 @@ mod tests {
                 .conn
                 .query_row("SELECT count(*) FROM file_hash", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(cached, 2);
+            // 夹具预先放入一个源文件，当前导出目录另有两个文件。
+            assert_eq!(cached, 3);
             drop(db);
             app.execute(ServiceRequest::ResolveSessionExportConflicts {
                 id: batch.id,

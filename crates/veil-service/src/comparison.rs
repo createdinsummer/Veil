@@ -2,13 +2,13 @@
 use crate::{
     error::{Result, VeilError},
     storage::{
-        container::{ContainerDb, Node},
+        container::{self, ContainerDb, Node},
         invalid,
         locks::{self, LeaseGuard, LockMode},
     },
     veil_ops::{LockedDirectory, VeilManager},
 };
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use std::{
     fs::{self, File, Metadata},
     io::{Cursor, Read},
@@ -171,6 +171,30 @@ struct LockedContainer<'a> {
     guard: ComparisonGuard<'a>,
     mode: LockMode,
     key: Zeroizing<[u8; 32]>,
+}
+
+impl LockedContainer<'_> {
+    fn store_hash(&mut self, hash: &str) -> Result<()> {
+        let credentials = self.guard.credentials()?;
+        let tx = self
+            .db
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for credential in &credentials {
+            locks::validate(&tx, credential, Some(self.mode))?;
+        }
+        if container::node(&tx, &self.node.id)?.as_ref() != Some(&self.node) {
+            return Err(VeilError::VersionConflict(
+                "补充文件哈希期间容器文件发生变化".into(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO file_hash(file_id,blake3) VALUES(?1,?2) ON CONFLICT(file_id) DO UPDATE SET blake3=excluded.blake3",
+            rusqlite::params![self.node.id, hash],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 enum ComparisonGuard<'a> {
@@ -356,7 +380,9 @@ impl<'a> Prepared<'a> {
                     |row| row.get(0),
                 )
                 .optional()?;
-            return value.ok_or_else(|| invalid("容器文件哈希缺失"));
+            if let Some(value) = value {
+                return Ok(value);
+            }
         }
         let digest = {
             let mut reader = self.reader()?;
@@ -373,6 +399,11 @@ impl<'a> Prepared<'a> {
             hasher.finalize().to_hex().to_string()
         };
         self.verify()?;
+        if let Self::Ciphertext(item) = self
+            && item.mode != LockMode::Read
+        {
+            item.store_hash(&digest)?;
+        }
         Ok(digest)
     }
 }
