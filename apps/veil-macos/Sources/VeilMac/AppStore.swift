@@ -179,6 +179,20 @@ final class AppStore: ObservableObject {
         if !spaces.contains(where: { $0.id == selectedSpaceID }) { selectedSpaceID = activeSpace?.id ?? "" }
     }
 
+    func refreshSpaceAvailability() async {
+        guard !isBusy else { return }
+        let wasRegisteredContainer = container.map { opened in
+            spaces.contains(where: { $0.containers.contains(where: { $0.id == opened.id }) })
+        } ?? false
+        do {
+            try await reloadCatalog()
+            if wasRegisteredContainer, let container,
+               !spaces.contains(where: { $0.containers.contains(where: { $0.id == container.id }) }) {
+                _ = await lock()
+            }
+        } catch { return }
+    }
+
     private func resetBrowser() {
         thumbnailBatch = UUID()
         thumbnails = [:]
@@ -258,7 +272,8 @@ final class AppStore: ObservableObject {
     }
 
     func newContainer(in spaceID: String? = nil) async {
-        guard !isBusy, let space = spaceID ?? activeSpace?.id, spaces.contains(where: { $0.id == space }) else { return }
+        guard !isBusy, let space = spaceID ?? activeSpace?.id,
+              spaces.contains(where: { $0.id == space && $0.isAvailable }) else { return }
         if container != nil { guard await lock() else { return } }
         selectedSpaceID = space
         resetBrowser()
@@ -284,12 +299,22 @@ final class AppStore: ObservableObject {
     }
 
     func choosePackage() async {
-        guard !isBusy, activeSpace != nil else { return }
+        guard !isBusy, activeSpace?.isAvailable == true else { return }
         error = nil
         showImportPackage = true
     }
 
     func submit(_ form: ContainerForm, name: String, password: String, confirmation: String) async {
+        let spaceID: String?
+        switch form {
+        case .create(let space): spaceID = space
+        case .importPackage(_, let space): spaceID = space
+        case .open: spaceID = nil
+        }
+        if let spaceID, !spaces.contains(where: { $0.id == spaceID && $0.isAvailable }) {
+            error = "空间当前不可用，请重新挂载外置磁盘后再试"
+            return
+        }
         guard !password.isEmpty else { error = "请输入容器密码"; return }
         if form.isCreate && password != confirmation { error = "两次输入的密码不一致"; return }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -369,6 +394,7 @@ final class AppStore: ObservableObject {
             guard ticket == self.generation else { return }
             self.unlockedPasswords.removeValue(forKey: item.id)
             self.spaces = spaces
+            self.recents.removeAll { $0.id == item.id }
             self.recents = try await self.client.json(NativeRequest(operation: "list_recents"))
             if !spaces.contains(where: { $0.id == self.selectedSpaceID }) {
                 self.selectedSpaceID = spaces.first(where: \.isDefault)?.id ?? spaces.first?.id ?? ""
@@ -383,21 +409,29 @@ final class AppStore: ObservableObject {
 
     func deleteSpace(_ space: Space) async {
         await perform { ticket in
-            if space.containers.contains(where: { $0.id == self.container?.id }) {
+            let openContainer = self.container
+            let belongsToSpace = space.containers.contains(where: { $0.id == openContainer?.id })
+                || openContainer.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == space.path } == true
+            if belongsToSpace {
                 self.container = nil
                 self.form = nil
                 self.resetBrowser()
             }
             let spaces: [Space] = try await self.client.json(
-                NativeRequest(operation: "delete_space", id: space.id)
+                NativeRequest(operation: space.isAvailable ? "delete_space" : "delete_space_record", id: space.id)
             )
             guard ticket == self.generation else { return }
             for item in space.containers { self.unlockedPasswords.removeValue(forKey: item.id) }
             self.spaces = spaces
+            let deletedContainerIDs = Set(space.containers.map(\.id))
+            self.recents.removeAll { deletedContainerIDs.contains($0.id) }
+            self.recents = try await self.client.json(NativeRequest(operation: "list_recents"))
             if !spaces.contains(where: { $0.id == self.selectedSpaceID }) {
                 self.selectedSpaceID = spaces.first(where: \.isDefault)?.id ?? spaces.first?.id ?? ""
             }
-            self.notice = space.isDefault ? "默认空间已删除并重新建立" : "空间已删除"
+            self.notice = space.isAvailable
+                ? (space.isDefault ? "默认空间已删除并重新建立" : "空间已删除")
+                : "空间记录已删除，磁盘文件仍保留"
         }
     }
 

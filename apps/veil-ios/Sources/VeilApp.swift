@@ -68,6 +68,7 @@ struct RootView: View {
                         Menu { if store.container == nil {
                             Button("新建空间", systemImage: "folder.badge.plus") { newSpace = true }
                             Button("导入加密备份", systemImage: "square.and.arrow.down") { importingPackage = true }
+                                .disabled(store.space?.isAvailable != true)
                             Divider()
                             Button("清理数据", systemImage: "trash", role: .destructive) { confirmClearData = true }
                         } else {
@@ -104,6 +105,12 @@ struct RootView: View {
             do { try await Task.sleep(for: .seconds(1)) } catch { return }
             withAnimation(.easeOut(duration: 0.2)) { showIntro = false }
         }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                if phase == .active { await store.refreshSpaceAvailability() }
+            }
+        }
         .privacySensitive()
         .overlay { if phase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
         .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; deletingContainer = nil; deletingSpace = nil; importing = false; importingPackage = false; store.exportSelection = nil } }
@@ -138,11 +145,15 @@ struct RootView: View {
         .confirmationDialog("删除后无法恢复", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
             Button("删除", role: .destructive) { if let item = deleting { Task { await store.remove(item) } }; deleting = nil }
         }
-        .confirmationDialog("删除空间？", isPresented: Binding(get: { deletingSpace != nil }, set: { if !$0 { deletingSpace = nil } }), titleVisibility: .visible) {
-            Button("删除空间", role: .destructive) { if let space = deletingSpace { Task { await store.deleteSpace(space) } }; deletingSpace = nil }
+        .confirmationDialog(deletingSpace?.isAvailable == true ? "删除空间？" : "删除空间记录？", isPresented: Binding(get: { deletingSpace != nil }, set: { if !$0 { deletingSpace = nil } }), titleVisibility: .visible) {
+            Button(deletingSpace?.isAvailable == true ? "删除空间" : "删除记录", role: .destructive) { if let space = deletingSpace { Task { await store.deleteSpace(space) } }; deletingSpace = nil }
             Button("取消", role: .cancel) { deletingSpace = nil }
         } message: {
-            Text(deletingSpace?.isDefault == true ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+            if let space = deletingSpace, !space.isAvailable {
+                Text("删除后，Veil 中的空间和容器记录无法恢复。磁盘上的空间文件和容器文件不会被删除。")
+            } else {
+                Text(deletingSpace?.isDefault == true ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+            }
         }
         .photosPicker(isPresented: $importingPhotos, selection: $selectedPhotos, matching: .any(of: [.images, .videos]))
         .onChange(of: selectedPhotos) { _, items in
@@ -172,15 +183,16 @@ struct RootView: View {
                         Section("切换空间") {
                             ForEach(store.spaces) { space in
                                 Button { store.selectedSpace = space.id } label: {
-                                    if space.id == store.space?.id { Label(space.name, systemImage: "checkmark") }
-                                    else { Text(space.name) }
+                                    let title = space.name + (space.isAvailable ? "" : " · 不可用")
+                                    if space.id == store.space?.id { Label(title, systemImage: "checkmark") }
+                                    else { Text(title) }
                                 }
                             }
                             Button("新建空间", systemImage: "folder.badge.plus") { newSpace = true }
                         }
                         Section("管理空间") {
                             if let space = store.space {
-                                Button("删除当前空间", systemImage: "trash", role: .destructive) { deletingSpace = space }
+                                Button(space.isAvailable ? "删除当前空间" : "删除空间记录", systemImage: "trash", role: .destructive) { deletingSpace = space }
                             }
                         }
                         Section("其他操作") {
@@ -196,13 +208,21 @@ struct RootView: View {
                         Spacer(minLength: 4)
                         Button { if let space = store.space { form = .create(space: space.id) } } label: {
                             Label("创建", systemImage: "plus")
-                        }.buttonStyle(HomeActionButton(primary: true)).disabled(store.space == nil)
+                        }.buttonStyle(HomeActionButton(primary: true)).disabled(store.busy || store.space?.isAvailable != true)
                         Button { importingPackage = true } label: {
                             Label("导入", systemImage: "square.and.arrow.down")
-                        }.buttonStyle(HomeActionButton(primary: false)).disabled(store.space == nil)
+                        }.buttonStyle(HomeActionButton(primary: false)).disabled(store.busy || store.space?.isAvailable != true)
                     }
                     if let space = store.space {
-                        if space.containers.isEmpty {
+                        if !space.isAvailable {
+                            HStack(spacing: 12) {
+                                Image(systemName: "externaldrive.badge.xmark").font(.title3).frame(width: 42, height: 42).background(mutedSurface, in: RoundedRectangle(cornerRadius: 9))
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("空间当前不可用").font(.subheadline.weight(.semibold))
+                                    Text("请重新连接外置磁盘，或检查空间目录：\(space.path)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(16).background(surface, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(outline))
+                        } else if space.containers.isEmpty {
                             HStack(spacing: 12) {
                                 Image(systemName: "folder").font(.title3).frame(width: 42, height: 42).background(mutedSurface, in: RoundedRectangle(cornerRadius: 9))
                                 VStack(alignment: .leading, spacing: 5) { Text("这个空间还没有容器").font(.subheadline.weight(.semibold)); Text("创建或导入容器后，它会显示在这里。").font(.caption).foregroundStyle(.secondary) }

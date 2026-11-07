@@ -5,6 +5,7 @@ struct Space: Decodable, Identifiable, Sendable {
     let name: String
     let path: String
     let isDefault: Bool
+    let isAvailable: Bool
     let containers: [ContainerSummary]
 }
 

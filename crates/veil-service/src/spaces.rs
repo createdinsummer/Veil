@@ -19,6 +19,7 @@ pub struct SpaceView {
     pub name: String,
     pub path: String,
     pub is_default: bool,
+    pub is_available: bool,
     pub containers: Vec<ContainerSummary>,
 }
 #[derive(Serialize)]
@@ -37,25 +38,54 @@ pub(crate) fn list_spaces() -> Result<Vec<SpaceView>, VeilError> {
         .into_iter()
         .map(|s| {
             let path = s.local_path.unwrap_or_default();
-            let containers = registrations
-                .iter()
-                .filter(|r| r.space_id == s.id)
-                .map(|r| ContainerSummary {
-                    id: r.div_id.clone(),
-                    name: r.cached_name.clone(),
-                    path: path.join(&r.div_id).to_string_lossy().into_owned(),
-                })
-                .collect();
+            let is_available = !path.as_os_str().is_empty() && path.is_dir();
+            let containers = if is_available {
+                registrations
+                    .iter()
+                    .filter(|r| r.space_id == s.id)
+                    .map(|r| ContainerSummary {
+                        id: r.div_id.clone(),
+                        name: r.cached_name.clone(),
+                        path: path.join(&r.div_id).to_string_lossy().into_owned(),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             SpaceView {
                 is_default: s.id == default,
                 id: s.id,
                 name: s.name,
                 path: path.to_string_lossy().into_owned(),
+                is_available,
                 containers,
             }
         })
         .collect())
 }
+
+pub(crate) fn ensure_space_available(identity: &str) -> Result<(), VeilError> {
+    let store = AppStore::global()?;
+    let matches = store
+        .spaces()?
+        .into_iter()
+        .filter(|space| space.id == identity || space.name == identity)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(VeilError::WorkError("空间不存在或名称不唯一".into()));
+    }
+    let path = matches[0]
+        .local_path
+        .as_deref()
+        .ok_or_else(|| VeilError::WorkError("空间目录不可用".into()))?;
+    if !path.is_dir() {
+        return Err(VeilError::WorkError(
+            "空间当前不可用，请检查空间目录或重新挂载外置磁盘".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn create_space(name: &str, path: Option<&std::path::Path>) -> Result<(), VeilError> {
     if name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err(VeilError::WorkError("空间名称无效".into()));
@@ -90,6 +120,15 @@ pub(crate) fn create_space(name: &str, path: Option<&std::path::Path>) -> Result
 
 /// 物理删除空间目录及其全部内容，并清除空间、容器和本机缓存记录。
 pub fn delete_space(identity: &str) -> Result<(), VeilError> {
+    delete_space_inner(identity, true)
+}
+
+/// 仅移除不可用空间的本机记录，保留磁盘上的全部文件。
+pub fn delete_space_record(identity: &str) -> Result<(), VeilError> {
+    delete_space_inner(identity, false)
+}
+
+fn delete_space_inner(identity: &str, delete_files: bool) -> Result<(), VeilError> {
     let mut store = AppStore::global()?;
     let space_lock = store.acquire_space_exclusive_lock(identity)?;
     let tx = store
@@ -109,13 +148,23 @@ pub fn delete_space(identity: &str) -> Result<(), VeilError> {
     if !stored_path.is_absolute() {
         return Err(VeilError::WorkError("空间目录必须是绝对路径".into()));
     }
+    if delete_files && !stored_path.is_dir() {
+        return Err(VeilError::WorkError(
+            "空间当前不可用，不能删除磁盘文件；可选择删除空间记录".into(),
+        ));
+    }
+    if !delete_files && stored_path.is_dir() {
+        return Err(VeilError::WorkError(
+            "空间仍可访问，请使用删除空间以同时删除磁盘文件".into(),
+        ));
+    }
     let app_directory = std::fs::canonicalize(&store.directory)?;
     if stored_path == app_directory || app_directory.starts_with(&stored_path) {
         return Err(VeilError::WorkError(
             "拒绝删除文件系统根目录或包含 Veil 数据库的目录".into(),
         ));
     }
-    let space_ids = {
+    let space_ids = if delete_files {
         let mut statement =
             tx.prepare("SELECT id,local_path FROM space_info WHERE local_path IS NOT NULL")?;
         statement
@@ -130,14 +179,14 @@ pub fn delete_space(identity: &str) -> Result<(), VeilError> {
                     .then_some(id)
             })
             .collect::<Vec<_>>()
+    } else {
+        vec![identity.to_owned()]
     };
     if !space_ids.iter().any(|id| id == identity) {
         return Err(VeilError::WorkError("空间目录登记无效".into()));
     }
-    match std::fs::remove_dir_all(&stored_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    if delete_files {
+        std::fs::remove_dir_all(&stored_path)?;
     }
     let default_id: Option<String> = tx
         .query_row(
@@ -294,6 +343,7 @@ pub(crate) fn create_container(
     {
         return Err(WorkflowError::InvalidName);
     }
+    ensure_space_available(space)?;
     let link = AppConfig::config_path()?
         .parent()
         .unwrap()

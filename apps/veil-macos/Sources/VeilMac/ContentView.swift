@@ -46,6 +46,12 @@ struct ContentView: View {
             do { try await Task.sleep(for: .seconds(3)) } catch { return }
             if store.notice == notice { store.notice = nil }
         }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                await store.refreshSpaceAvailability()
+            }
+        }
         .sheet(item: $store.importInspection) { inspection in
             ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
                 .interactiveDismissDisabled()
@@ -70,13 +76,17 @@ struct ContentView: View {
             case .file: Text("此文件将从容器中删除。此操作无法撤销。")
             }
         }
-        .alert("删除空间「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
+        .alert("\(store.pendingSpaceDelete?.isAvailable == true ? "删除空间" : "删除空间记录")「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingSpaceDelete != nil }, set: { if !$0 { store.pendingSpaceDelete = nil } }
         ), presenting: store.pendingSpaceDelete) { space in
-            Button("删除空间", role: .destructive) { store.pendingSpaceDelete = nil; Task { await store.deleteSpace(space) } }
+            Button(space.isAvailable ? "删除空间" : "删除记录", role: .destructive) { store.pendingSpaceDelete = nil; Task { await store.deleteSpace(space) } }
             Button("取消", role: .cancel) { store.pendingSpaceDelete = nil }
         } message: { space in
-            Text(space.isDefault ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+            if space.isAvailable {
+                Text(space.isDefault ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+            } else {
+                Text("删除后，Veil 中的空间和容器记录无法恢复。磁盘上的空间文件和容器文件不会被删除。")
+            }
         }
         .alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
@@ -111,9 +121,9 @@ struct ContentView: View {
             } else {
                 Label("本地模式", systemImage: "lock").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                 Menu {
-                    Button("新建容器…") { Task { await store.newContainer() } }.disabled(store.activeSpace == nil)
+                    Button("新建容器…") { Task { await store.newContainer() } }.disabled(store.activeSpace?.isAvailable != true)
                     Button("打开容器…") { Task { await store.chooseContainerDirectory() } }
-                    Button("导入加密容器…") { Task { await store.choosePackage() } }.disabled(store.activeSpace == nil)
+                    Button("导入加密容器…") { Task { await store.choosePackage() } }.disabled(store.activeSpace?.isAvailable != true)
                     Divider()
                     Button("刷新") { Task { await store.refresh() } }
                 } label: { Image(systemName: "ellipsis") }
@@ -227,11 +237,18 @@ private struct SidebarView: View {
                                     HStack(spacing: 8) {
                                         Image(systemName: "folder").font(.system(size: 14)).foregroundStyle(VeilTheme.secondary)
                                         Text(space.name).font(.system(size: 12)).lineLimit(1)
+                                        if !space.isAvailable {
+                                            Text("不可用").font(.system(size: 9, weight: .medium))
+                                                .foregroundStyle(VeilTheme.muted)
+                                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                                .background(VeilTheme.thumbnail, in: Capsule())
+                                        }
                                         Spacer(minLength: 0)
                                     }.padding(.vertical, 8).contentShape(Rectangle())
                                 }.buttonStyle(VeilPlainButtonStyle())
                                 Button { Task { await store.newContainer(in: space.id) } } label: { Image(systemName: "plus") }
                                     .buttonStyle(VeilIconButtonStyle()).help("在\(space.name)中创建容器")
+                                    .disabled(!space.isAvailable)
                             }
                             .background(store.container == nil && store.activeSpace?.id == space.id ? VeilTheme.selected : .clear, in: RoundedRectangle(cornerRadius: 7))
                             if !collapsed.contains(space.id) {
@@ -239,7 +256,7 @@ private struct SidebarView: View {
                             }
                         }
                         .contextMenu {
-                            Button("删除空间", systemImage: "trash", role: .destructive) {
+                            Button(space.isAvailable ? "删除空间" : "删除空间记录", systemImage: "trash", role: .destructive) {
                                 store.pendingSpaceDelete = space
                             }
                         }
@@ -298,7 +315,35 @@ private struct HomeView: View {
                     }
                     Spacer()
                     Button("新建容器", systemImage: "plus") { Task { await store.newContainer() } }
-                        .buttonStyle(VeilButtonStyle(variant: .primary)).disabled(store.isBusy || store.activeSpace == nil)
+                        .buttonStyle(VeilButtonStyle(variant: .primary)).disabled(store.isBusy || store.activeSpace?.isAvailable != true)
+                }
+                if let space = store.activeSpace {
+                    HStack(spacing: 11) {
+                        Image(systemName: space.isAvailable ? "externaldrive" : "externaldrive.badge.xmark")
+                            .font(.system(size: 18)).foregroundStyle(VeilTheme.muted)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(space.isAvailable ? "空间可用" : "空间当前不可用")
+                                .font(.system(size: 12, weight: .semibold))
+                            HStack(spacing: 4) {
+                                Text(space.isAvailable ? "空间目录：" : "请重新挂载外置磁盘，或检查空间目录：")
+                                    .font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
+                                Button {
+                                    NSWorkspace.shared.activateFileViewerSelecting([
+                                        URL(fileURLWithPath: space.path, isDirectory: true)
+                                    ])
+                                } label: {
+                                    Text(space.path).font(.system(size: 11)).underline()
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(VeilTheme.muted)
+                                .help("在访达中显示空间目录")
+                                .accessibilityLabel("在访达中打开空间目录：\(space.path)")
+                            }
+                        }
+                        Spacer()
+                    }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(VeilTheme.border))
                 }
                 WelcomeCard()
                 VStack(alignment: .leading, spacing: 18) {
@@ -316,9 +361,11 @@ private struct HomeView: View {
                                 Image(systemName: "arrow.right")
                             }.font(.system(size: 11, weight: .semibold)).foregroundStyle(VeilTheme.secondary)
                                 .padding(.horizontal, 8).frame(minHeight: 32).contentShape(Rectangle())
-                        }.buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy || store.activeSpace == nil)
+                        }.buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy || store.activeSpace?.isAvailable != true)
                     }
-                    if let space = store.activeSpace, !space.containers.isEmpty {
+                    if let space = store.activeSpace, !space.isAvailable {
+                        EmptyView()
+                    } else if let space = store.activeSpace, !space.containers.isEmpty {
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(space.containers) { item in
                                 ContainerCard(name: item.name, subtitle: "本机 / \(space.name)") { Task { await store.chooseContainer(item) } }.help(item.path)

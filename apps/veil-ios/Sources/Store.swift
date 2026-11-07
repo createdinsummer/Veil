@@ -47,6 +47,19 @@ import ImageIO
         spaces = try await client.json(NativeRequest(operation: "list_spaces"))
         if !spaces.contains(where: { $0.id == selectedSpace }) { selectedSpace = spaces.first(where: { $0.isDefault })?.id ?? spaces.first?.id ?? "" }
     }
+    func refreshSpaceAvailability() async {
+        guard !busy else { return }
+        let wasRegisteredContainer = container.map { opened in
+            spaces.contains(where: { $0.containers.contains(where: { $0.id == opened.id }) })
+        } ?? false
+        do {
+            try await reload()
+            if wasRegisteredContainer, let container,
+               !spaces.contains(where: { $0.containers.contains(where: { $0.id == container.id }) }) {
+                await lock()
+            }
+        } catch { return }
+    }
     /// 先清除界面上的敏感内容，再串行锁定会话并删除应用私有数据。
     func clearLocalData() async {
         guard !busy else { return }
@@ -95,11 +108,14 @@ import ImageIO
     }
     func deleteSpace(_ space: Space) async {
         await run { ticket in
+            let openContainer = self.container
+            let belongsToSpace = space.containers.contains(where: { $0.id == openContainer?.id })
+                || openContainer.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path == space.path } == true
             let items: [Space] = try await self.client.json(
-                NativeRequest(operation: "delete_space", id: space.id)
+                NativeRequest(operation: space.isAvailable ? "delete_space" : "delete_space_record", id: space.id)
             )
             guard ticket == self.generation else { return }
-            if space.containers.contains(where: { $0.id == self.container?.id }) {
+            if belongsToSpace {
                 self.container = nil; self.preview = nil; self.export = nil; self.exportSelection = nil
                 self.directory = ""; self.search = ""; self.category = nil
                 self.thumbnails.removeAll(); self.textThumbnails.removeAll()
@@ -109,10 +125,22 @@ import ImageIO
             if !items.contains(where: { $0.id == self.selectedSpace }) {
                 self.selectedSpace = items.first(where: { $0.isDefault })?.id ?? items.first?.id ?? ""
             }
-            self.notice = space.isDefault ? "默认空间已删除并重新建立" : "空间已删除"
+            self.notice = space.isAvailable
+                ? (space.isDefault ? "默认空间已删除并重新建立" : "空间已删除")
+                : "空间记录已删除，磁盘文件仍保留"
         }
     }
     func open(form: ContainerForm, name: String, password: String) async -> Bool {
+        let spaceID: String?
+        switch form {
+        case .create(let space): spaceID = space
+        case .importPackage(_, let space): spaceID = space
+        case .open: spaceID = nil
+        }
+        if let spaceID, !spaces.contains(where: { $0.id == spaceID && $0.isAvailable }) {
+            error = "空间当前不可用，请重新连接外置磁盘后再试"
+            return false
+        }
         var success = false
         await run { ticket in
             let request: NativeRequest

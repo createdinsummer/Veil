@@ -61,6 +61,27 @@ struct BrowserView: View {
                 }
             }.padding(.horizontal, 24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if let space = store.activeSpace {
+                Rectangle().fill(VeilTheme.border).frame(height: 1)
+                HStack(spacing: 7) {
+                    Label("空间磁盘路径", systemImage: "folder").foregroundStyle(VeilTheme.muted)
+                    Spacer(minLength: 8)
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([
+                            URL(fileURLWithPath: space.path, isDirectory: true)
+                        ])
+                    } label: {
+                        Text(space.path).underline().lineLimit(1).truncationMode(.middle)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(VeilTheme.secondary)
+                    .help("在访达中显示空间目录")
+                    .accessibilityLabel("在访达中打开空间目录：\(space.path)")
+                }
+                .font(.system(size: 10))
+                .padding(.horizontal, 24)
+                .padding(.vertical, 10)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(VeilTheme.card)

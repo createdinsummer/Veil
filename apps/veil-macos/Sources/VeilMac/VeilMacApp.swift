@@ -26,6 +26,12 @@ struct VeilMacApp: App {
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.sessionDidResignActiveNotification)) { _ in
                     Task { await store.lock() }
                 }
+                .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in
+                    Task { await store.refreshSpaceAvailability() }
+                }
+                .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in
+                    Task { await store.refreshSpaceAvailability() }
+                }
                 .onDisappear { Task { await store.lock() } }
         }
         .windowStyle(.hiddenTitleBar)
@@ -34,11 +40,11 @@ struct VeilMacApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("新建容器…") { Task { await store.newContainer() } }
-                    .keyboardShortcut("n").disabled(store.isBusy || store.activeSpace == nil)
+                    .keyboardShortcut("n").disabled(store.isBusy || store.activeSpace?.isAvailable != true)
                 Button("打开容器…") { Task { await store.chooseContainerDirectory() } }
                     .keyboardShortcut("o").disabled(store.isBusy)
                 Button("导入加密容器…") { Task { await store.choosePackage() } }
-                    .keyboardShortcut("o", modifiers: [.command, .shift]).disabled(store.isBusy || store.activeSpace == nil)
+                    .keyboardShortcut("o", modifiers: [.command, .shift]).disabled(store.isBusy || store.activeSpace?.isAvailable != true)
                 Divider()
                 Button("新建空间…") { store.error = nil; store.showNewSpace = true }
                     .disabled(store.isBusy)

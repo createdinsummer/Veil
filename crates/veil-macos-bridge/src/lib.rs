@@ -45,6 +45,9 @@ enum Request {
     DeleteSpace {
         id: String,
     },
+    DeleteSpaceRecord {
+        id: String,
+    },
     DeleteContainer {
         id: String,
         password: String,
@@ -125,6 +128,7 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::ListRecents => ServiceRequest::ListRecents,
         Request::CreateSpace { name, path } => ServiceRequest::CreateSpace { name, path },
         Request::DeleteSpace { id } => ServiceRequest::DeleteSpace { id },
+        Request::DeleteSpaceRecord { id } => ServiceRequest::DeleteSpaceRecord { id },
         Request::DeleteContainer { id, password } => {
             ServiceRequest::DeleteContainer { id, password }
         }

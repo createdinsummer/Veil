@@ -72,9 +72,9 @@ struct WelcomeCard: View {
                         .font(.system(size: 12)).foregroundStyle(VeilTheme.secondary).lineSpacing(7).padding(.top, 11)
                     HStack(spacing: 10) {
                         Button("创建容器", systemImage: "plus") { Task { await store.newContainer() } }
-                            .buttonStyle(VeilButtonStyle(variant: .primary)).disabled(store.activeSpace == nil)
+                            .buttonStyle(VeilButtonStyle(variant: .primary)).disabled(store.activeSpace?.isAvailable != true)
                         Button("导入容器", systemImage: "folder") { Task { await store.choosePackage() } }
-                            .buttonStyle(VeilButtonStyle()).disabled(store.activeSpace == nil)
+                            .buttonStyle(VeilButtonStyle()).disabled(store.activeSpace?.isAvailable != true)
                     }.padding(.top, 22).disabled(store.isBusy)
                 }
                 .padding(.horizontal, 38)
