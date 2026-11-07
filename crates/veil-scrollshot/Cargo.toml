@@ -13,6 +13,7 @@ name = "veil-scrollshot"
 path = "src/main.rs"
 
 [dependencies]
+veil-core = { path = "../veil-core" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 png = "0.18"

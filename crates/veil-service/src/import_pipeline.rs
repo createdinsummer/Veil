@@ -49,14 +49,60 @@ fn is_database_busy(error: &VeilError) -> bool {
 }
 
 fn retry_database_busy<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    use veil_core::logging::{self, Field, Level};
     let mut attempt = 0;
+    let started = std::time::Instant::now();
     loop {
         match operation() {
-            Err(error) if is_database_busy(&error) && attempt < DATABASE_BUSY_RETRY_DELAYS.len() => {
+            Err(error)
+                if is_database_busy(&error) && attempt < DATABASE_BUSY_RETRY_DELAYS.len() =>
+            {
+                if attempt == 0 {
+                    logging::failure(
+                        Level::Warn,
+                        "service",
+                        "import_retry",
+                        "IMPORT_RETRY_STARTED",
+                        &error,
+                        &[
+                            ("attempts", Field::Count(1)),
+                            (
+                                "backoff_ms",
+                                Field::Duration(DATABASE_BUSY_RETRY_DELAYS[attempt]),
+                            ),
+                        ],
+                    );
+                }
                 std::thread::sleep(DATABASE_BUSY_RETRY_DELAYS[attempt]);
                 attempt += 1;
             }
-            result => return result,
+            result => {
+                if attempt > 0 {
+                    let context = [
+                        ("retries", Field::Count(attempt as u64)),
+                        ("elapsed_ms", Field::Duration(started.elapsed())),
+                    ];
+                    match &result {
+                        Ok(_) => logging::event(
+                            Level::Warn,
+                            "service",
+                            "import_retry",
+                            "IMPORT_RETRY_RECOVERED",
+                            "数据库忙重试后恢复",
+                            &context,
+                        ),
+                        Err(error) => logging::failure(
+                            Level::Error,
+                            "service",
+                            "import_retry",
+                            "IMPORT_RETRY_EXHAUSTED",
+                            error,
+                            &context,
+                        ),
+                    }
+                }
+                return result;
+            }
         }
     }
 }
@@ -320,7 +366,14 @@ fn check(
                         Ok(nodes)
                     }
                     Err(error) => {
-                        let _ = db.conn.execute_batch("ROLLBACK");
+                        if let Err(rollback) = db.conn.execute_batch("ROLLBACK") {
+                            veil_core::logging::error_with_code(
+                                "database",
+                                "import_rollback",
+                                "ROLLBACK_FAILED",
+                                &rollback,
+                            );
+                        }
                         Err(error)
                     }
                 }
@@ -354,6 +407,11 @@ fn check(
                     let source_size = match work.spec.source.metadata() {
                         Ok(metadata) => Some(metadata.len()),
                         Err(failure) => {
+                            veil_core::logging::error_chain(
+                                "service",
+                                "import_inspection",
+                                &failure,
+                            );
                             error = Some(failure.to_string());
                             None
                         }
@@ -394,7 +452,14 @@ fn check(
                         ) {
                             Ok(report) => same_content = report.hash == Some(ComparisonState::Same),
                             Err(VeilError::Cancelled) => return Err(VeilError::Cancelled),
-                            Err(failure) => error = Some(failure.to_string()),
+                            Err(failure) => {
+                                veil_core::logging::error_chain(
+                                    "service",
+                                    "import_comparison",
+                                    &failure,
+                                );
+                                error = Some(failure.to_string());
+                            }
                         }
                     }
                 } else {
@@ -435,7 +500,18 @@ fn process_work_group(
         Err(error) if works.len() == 1 => {
             retry_work(works.into_iter().next().unwrap(), error, feedback, shared)
         }
-        Err(_) => {
+        Err(error) => {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "service",
+                "import_batch",
+                "BATCH_FALLBACK",
+                &error,
+                &[(
+                    "batch_files",
+                    veil_core::logging::Field::Count(works.len() as u64),
+                )],
+            );
             // 仅异常批次逐项定位；正常批次共用连接、密钥、准备事务和目录锁。
             for work in works {
                 if !shared.active() {
@@ -458,6 +534,23 @@ fn process_work_group(
 fn retry_work(mut work: Work, error: VeilError, feedback: &Sender<Work>, shared: &Shared) {
     if matches!(error, VeilError::Cancelled) {
         return;
+    }
+    // 版本冲突会重新核对后交给用户选择，是正常并发结果。
+    if !matches!(
+        &error,
+        VeilError::FileAlreadyExists(_) | VeilError::VersionConflict(_)
+    ) {
+        veil_core::logging::failure(
+            veil_core::logging::Level::Warn,
+            "service",
+            "import_worker",
+            "IMPORT_FILE_RECHECK",
+            &error,
+            &[(
+                "retries",
+                veil_core::logging::Field::Count(work.retries as u64),
+            )],
+        );
     }
     work.retries += 1;
     work.spec.reject_existing = true;
@@ -549,7 +642,9 @@ pub(crate) fn run_mapped(
         }
         Err(error) => return Err(error.into()),
     };
+    let logging_context = veil_core::logging::capture_context();
     std::thread::scope(|scope| {
+        let logging_context = &logging_context;
         // 遍历线程持续整理文件清单，不因核对或用户选择暂停；仅投递任务描述。
         let (scan_tx, scan_rx) = UnboundedQueue::new().split();
         // 核对完成后交给处理线程的执行队列仍有容量上限。
@@ -560,6 +655,7 @@ pub(crate) fn run_mapped(
         let shared_ref = &shared;
         let directory_locks = &directory_locks;
         scope.spawn(move || {
+            let _logging = logging_context.attach();
             let _guard = ThreadGuard(shared_ref);
             let _attachment = progress_state.attach();
             match enumerate(
@@ -577,6 +673,7 @@ pub(crate) fn run_mapped(
             }
         });
         scope.spawn(move || {
+            let _logging = logging_context.attach();
             let _guard = ThreadGuard(shared_ref);
             let _attachment = progress_state.attach();
             if let Err(error) = check(
@@ -606,6 +703,7 @@ pub(crate) fn run_mapped(
             };
             let gate = &gate;
             scope.spawn(move || {
+                let _logging = logging_context.attach();
                 let _guard = ThreadGuard(shared_ref);
                 let _attachment = progress_state.attach();
                 let execute_policy = BatchPolicy {

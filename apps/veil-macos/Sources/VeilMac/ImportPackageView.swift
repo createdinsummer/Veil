@@ -48,7 +48,7 @@ struct ImportPackageView: View {
                         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(VeilTheme.border, style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
                 }.buttonStyle(VeilPlainButtonStyle())
                     .dropDestination(for: URL.self) { urls, _ in
-                        guard let url = urls.first, urls.count == 1 else { selectionError = "请选择一个 .veil 文件"; return false }
+                        guard let url = urls.first, urls.count == 1 else { selectionError = AppLog.validation("请选择一个 .veil 文件"); return false }
                         return selectFile(url)
                     } isTargeted: { isTargeted = $0 }
                 if let selectionError { Text(selectionError).font(.system(size: 11)).foregroundStyle(VeilTheme.danger) }
@@ -90,9 +90,9 @@ struct ImportPackageView: View {
     @discardableResult
     private func selectFile(_ url: URL) -> Bool {
         guard url.isFileURL, url.pathExtension.lowercased() == "veil",
-              (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+              (AppLog.attempt({ try url.resourceValues(forKeys: [.isRegularFileKey]) })?.isRegularFile) == true else {
             selectedURL = nil
-            selectionError = "请选择 .veil 文件"
+            selectionError = AppLog.validation("请选择 .veil 文件")
             return false
         }
         selectedURL = url

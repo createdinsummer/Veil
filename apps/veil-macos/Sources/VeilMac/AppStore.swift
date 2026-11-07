@@ -112,7 +112,7 @@ final class AppStore: ObservableObject {
                 let image = try await client.thumbnail(name: file.name)
                 guard !Task.isCancelled, ticket == generation, batch == thumbnailBatch else { return }
                 thumbnails[file.id] = image
-            } catch { /* 不可解码的图片使用类型图标，不影响文件操作。 */ }
+            } catch { AppLog.capture(error); /* 不可解码的图片使用类型图标，不影响文件操作。 */ }
         }
     }
 
@@ -142,7 +142,7 @@ final class AppStore: ObservableObject {
         let ticket = generation
         defer { pendingOperations -= 1 }
         do { try await work(ticket) }
-        catch { if ticket == generation { self.error = error.localizedDescription } }
+        catch { AppLog.capture(error); if ticket == generation { self.error = error.localizedDescription } }
     }
 
     private func withTransferProgress<T>(_ title: String, operation: String, work: () async throws -> T) async throws -> T {
@@ -186,7 +186,7 @@ final class AppStore: ObservableObject {
                 lastTransferFailure = record
                 TransferDiagnostics.append(record)
             }
-            throw error
+            throw AppLog.recorded(error)
         }
     }
 
@@ -198,12 +198,22 @@ final class AppStore: ObservableObject {
         return "Veil-诊断日志-\(formatter.string(from: Date())).json"
     }
 
+    func exportErrorLogs(to url: URL) {
+        do {
+            try AppLog.export().write(to: url, options: .atomic)
+            notice = "错误日志已导出，可附在反馈中。"
+        } catch {
+            AppLog.capture(error)
+            self.error = "无法导出错误日志：\(error.localizedDescription)"
+        }
+    }
+
     func exportTransferDiagnostic(to url: URL) {
         guard let lastTransferFailure else { return }
         do {
             try TransferDiagnostics.export(lastTransferFailure, to: url)
             notice = "诊断日志已导出，可附在反馈中。"
-        } catch {
+        } catch { AppLog.capture(error);
             self.error = "无法导出诊断日志：\(error.localizedDescription)"
         }
     }
@@ -230,7 +240,7 @@ final class AppStore: ObservableObject {
                !spaces.contains(where: { $0.containers.contains(where: { $0.id == container.id }) }) {
                 _ = await lock()
             }
-        } catch { return }
+        } catch { AppLog.capture(error); return }
     }
 
     private func resetBrowser() {
@@ -261,7 +271,7 @@ final class AppStore: ObservableObject {
         do {
             try await client.execute(NativeRequest(operation: "lock"))
             return true
-        } catch {
+        } catch { AppLog.capture(error);
             self.error = error.localizedDescription
             return false
         }
@@ -299,11 +309,11 @@ final class AppStore: ObservableObject {
                     if let space = spaces.first(where: { $0.containers.contains(where: { $0.id == view.id }) }) {
                         selectedSpaceID = space.id
                     }
-                } catch {
+                } catch { AppLog.capture(error);
                     notice = "容器已打开，空间列表刷新失败：\(error.localizedDescription)"
                 }
                 return
-            } catch {
+            } catch { AppLog.capture(error);
                 // 密码已失效（例如容器被重建），清除缓存后回到输入密码流程。
                 unlockedPasswords.removeValue(forKey: item.id)
             }
@@ -352,13 +362,13 @@ final class AppStore: ObservableObject {
         case .open: spaceID = nil
         }
         if let spaceID, !spaces.contains(where: { $0.id == spaceID && $0.isAvailable }) {
-            error = "空间当前不可用，请重新挂载外置磁盘后再试"
+            error = AppLog.validation("空间当前不可用，请重新挂载外置磁盘后再试")
             return
         }
-        guard !password.isEmpty else { error = "请输入容器密码"; return }
-        if form.isCreate && password != confirmation { error = "两次输入的密码不一致"; return }
+        guard !password.isEmpty else { error = AppLog.validation("请输入容器密码"); return }
+        if form.isCreate && password != confirmation { error = AppLog.validation("两次输入的密码不一致"); return }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if form.isCreate && name.isEmpty { error = "请输入容器名称"; return }
+        if form.isCreate && name.isEmpty { error = AppLog.validation("请输入容器名称"); return }
         await perform { ticket in
             // Rust 的会话仍负责真实的锁定与密码校验。
             try await self.client.execute(NativeRequest(operation: "lock"))
@@ -390,7 +400,7 @@ final class AppStore: ObservableObject {
             do {
                 try await self.reloadCatalog()
                 if let space = self.spaces.first(where: { $0.containers.contains(where: { $0.id == view.id }) }) { self.selectedSpaceID = space.id }
-            } catch { self.notice = "容器已打开，空间列表刷新失败：\(error.localizedDescription)" }
+            } catch { AppLog.capture(error); self.notice = "容器已打开，空间列表刷新失败：\(error.localizedDescription)" }
         }
     }
 
@@ -484,7 +494,7 @@ final class AppStore: ObservableObject {
         do {
             try await client.execute(NativeRequest(operation: "set_preference", key: "layout", value: layout))
             try await client.execute(NativeRequest(operation: "set_preference", key: "view_mode", value: mode))
-        } catch { self.error = error.localizedDescription }
+        } catch { AppLog.capture(error); self.error = error.localizedDescription }
     }
 
     /// 免密时长只写入 app.db 的设置项；密码本身仍只在内存中。
@@ -562,7 +572,7 @@ final class AppStore: ObservableObject {
                     }
                     try await client.execute(NativeRequest(operation: exporting ? "resolve_export_conflicts" : "resolve_import_conflicts", id: batch.id, resolutions: resolutions))
                 }
-            } catch {
+            } catch { AppLog.capture(error);
                 if ticket == generation, !Task.isCancelled {
                     self.error = error.localizedDescription
                     _ = client.cancelTransfer()
@@ -597,7 +607,7 @@ final class AppStore: ObservableObject {
                         self.notice = "导入已中止，已完成 \(progress.completedFiles) 个文件（其中跳过 \(progress.skippedFiles) 个）"
                         return
                     }
-                    throw error
+                    throw AppLog.recorded(error)
                 }
             }
         }
@@ -615,14 +625,14 @@ final class AppStore: ObservableObject {
         closePreview()
         let asset = PreviewAsset(file: file)
         preview = asset
-        guard file.previewMime != nil else { asset.error = "此类型暂不支持内置预览，可导出后查看。"; return }
+        guard file.previewMime != nil else { asset.error = AppLog.validation("此类型暂不支持内置预览，可导出后查看。"); return }
         await perform(allowDuringImport: true) { ticket in
             do {
                 let result = try await self.client.previewWithStatus(name: file.name)
                 guard ticket == self.generation, self.preview === asset else { return }
                 asset.unstable = result.unstable
                 try asset.install(result.data)
-            } catch {
+            } catch { AppLog.capture(error);
                 if ticket == self.generation && self.preview === asset { asset.error = error.localizedDescription }
             }
         }
@@ -666,7 +676,7 @@ final class AppStore: ObservableObject {
                     self.notice = "导出已中止，已导出的文件已保留"
                     return
                 }
-                throw error
+                throw AppLog.recorded(error)
             }
             if ticket == self.generation, let progress = self.client.transferProgress() {
                 self.notice = "导出完成 \(progress.completedFiles - progress.skippedFiles) 个文件，跳过 \(progress.skippedFiles) 个文件"
@@ -741,16 +751,16 @@ final class PreviewAsset: ObservableObject, Identifiable {
                 try bytes.write(to: url, options: .atomic)
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
                 videoURL = url
-            } catch { close(); throw error }
+            } catch { close(); throw AppLog.recorded(error) }
         } else { data = bytes }
     }
 
     func close() {
         data = nil
         videoURL = nil
-        if let temporaryDirectory { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        if let temporaryDirectory { AppLog.attempt({ try FileManager.default.removeItem(at: temporaryDirectory) }) }
         temporaryDirectory = nil
     }
 
-    deinit { if let temporaryDirectory { try? FileManager.default.removeItem(at: temporaryDirectory) } }
+    deinit { if let temporaryDirectory { AppLog.attempt({ try FileManager.default.removeItem(at: temporaryDirectory) }) } }
 }

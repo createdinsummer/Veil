@@ -123,6 +123,47 @@ fn future_keeps_task_identity_when_polled_on_another_thread() {
     );
 }
 
+#[test]
+fn future_restores_logging_context_on_each_scheduler_thread() {
+    let runtime = ExecutionRuntime::global().unwrap();
+    let request = crate::logging::request_scope();
+    let expected = crate::logging::request_id();
+    let mut polls = 0;
+    let mut future = runtime.track_future(
+        "诊断关联",
+        std::future::poll_fn(move |_| {
+            assert_eq!(crate::logging::request_id(), expected);
+            polls += 1;
+            if polls == 1 {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }),
+    );
+    drop(request);
+    let first = thread::spawn(move || {
+        let _ambient = crate::logging::attach_request(Some("scheduler-first".into()));
+        assert!(poll_once(&mut future).is_pending());
+        assert_eq!(
+            crate::logging::request_id().as_deref(),
+            Some("scheduler-first")
+        );
+        future
+    });
+    let mut future = first.join().unwrap();
+    thread::spawn(move || {
+        let _ambient = crate::logging::attach_request(Some("scheduler-second".into()));
+        assert!(poll_once(&mut future).is_ready());
+        assert_eq!(
+            crate::logging::request_id().as_deref(),
+            Some("scheduler-second")
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 struct CleanupFuture {
     runtime: ExecutionRuntime,
     owner: Arc<Mutex<Option<ExecutionOwner>>>,

@@ -322,7 +322,14 @@ fn check(
                                 },
                             ) {
                                 Ok(report) => same = report.hash == Some(ComparisonState::Same),
-                                Err(e) => error = Some(e.to_string()),
+                                Err(e) => {
+                                    veil_core::logging::error_chain(
+                                        "service",
+                                        "export_comparison",
+                                        &e,
+                                    );
+                                    error = Some(e.to_string());
+                                }
                             }
                             if Stamp::read(&work.target)? != work.expected {
                                 error = Some("目标在检查期间已变化，请重新导出".into());
@@ -336,6 +343,7 @@ fn check(
                         });
                     }
                     Err(e) => {
+                        veil_core::logging::error_chain("service", "export_inspection", &e);
                         view = Some(ConflictView {
                             target: work.target.to_string_lossy().into_owned(),
                             same_content: false,
@@ -637,9 +645,12 @@ pub(crate) fn run(
     let workers = progress::worker_count(32);
     progress::stage("processing", Some(0));
     progress::set_parallel_workers(workers);
+    let logging_context = veil_core::logging::capture_context();
     std::thread::scope(|scope| {
+        let logging_context = &logging_context;
         let shared = &shared;
         scope.spawn(move || {
+            let _logging = logging_context.attach();
             let _attachment = progress.attach();
             let _thread_guard = ThreadGuard(shared);
             if let Err(e) = enumerate(manager, password, roots, pending_tx, shared) {
@@ -649,6 +660,7 @@ pub(crate) fn run(
         let guard = &guard;
         let directory = &directory;
         scope.spawn(move || {
+            let _logging = logging_context.attach();
             let _attachment = progress.attach();
             let _thread_guard = ThreadGuard(shared);
             if let Err(e) = check(
@@ -672,6 +684,7 @@ pub(crate) fn run(
             let keys = &keys;
             let directories = &directories;
             scope.spawn(move || {
+                let _logging = logging_context.attach();
                 let _attachment = progress.attach();
                 let _thread_guard = ThreadGuard(shared);
                 if let Err(e) = process(manager, keys, directories, input, output, shared) {

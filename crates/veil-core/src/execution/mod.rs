@@ -352,7 +352,9 @@ impl ExecutionRuntime {
         let owner = record.owner.clone();
         let runtime = self.clone();
         let child_record = Arc::clone(&record);
+        let logging_context = crate::logging::capture_context();
         let result = thread::Builder::new().name(name).spawn(move || {
+            let _logging = logging_context.attach();
             runtime.register_thread(Some(Arc::clone(&child_record)));
             let completion = ThreadCompletion {
                 runtime: runtime.clone(),
@@ -386,7 +388,9 @@ impl ExecutionRuntime {
             record: self.record(name.into(), false),
         };
         let owner = lifetime.record.owner.clone();
+        let logging_context = crate::logging::capture_context();
         (owner, move || {
+            let _logging = logging_context.attach();
             lifetime.runtime.register_thread(None);
             lifetime.start();
             let _scope = ActiveScope::new(&lifetime);
@@ -400,6 +404,7 @@ impl ExecutionRuntime {
     pub fn track_future<F: Future>(&self, name: impl Into<String>, future: F) -> TrackedFuture<F> {
         TrackedFuture {
             future: Some(Box::pin(future)),
+            logging_context: crate::logging::capture_context(),
             lifetime: TaskLifetime {
                 runtime: self.clone(),
                 record: self.record(name.into(), false),
@@ -521,7 +526,16 @@ impl Drop for TaskScope {
 
 pub struct TrackedFuture<F: Future> {
     future: Option<Pin<Box<F>>>,
+    logging_context: crate::logging::LogContext,
     lifetime: TaskLifetime,
+}
+
+impl<F: Future> Drop for TrackedFuture<F> {
+    fn drop(&mut self) {
+        let _logging = self.logging_context.attach();
+        // 未完成任务的清理也使用任务原有的关联号和脱敏上下文。
+        drop(self.future.take());
+    }
 }
 
 impl<F: Future> TrackedFuture<F> {
@@ -535,6 +549,7 @@ impl<F: Future> Future for TrackedFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let _logging = this.logging_context.attach();
         assert!(
             !this.lifetime.record.state().is_finished()
                 && !this.lifetime.record.panicked.load(Ordering::Acquire),

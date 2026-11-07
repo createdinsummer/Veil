@@ -12,6 +12,7 @@ pub mod info;
 pub mod init;
 pub mod link;
 pub mod list;
+pub mod logs;
 pub mod mv;
 pub mod pack;
 pub mod passwd;
@@ -34,7 +35,7 @@ use crate::error::Result;
 pub(crate) fn request(request: ServiceRequest<'_>) -> Result<ServiceResponse> {
     VeilService::default()
         .execute(request)
-        .map_err(map_service_error)
+        .map_err(|error| map_service_error(error).already_reported())
 }
 
 pub(crate) fn map_service_error(error: ServiceError) -> crate::error::CommandError {
@@ -117,8 +118,7 @@ pub fn resolve_veil(input: &str) -> Result<ContainerHandle> {
         .execute(ServiceRequest::PrepareContainer { selector: input })
     {
         Ok(ServiceResponse::ContainerPrepared(resolved)) => resolved,
-        Err(ServiceError::Core(error)) => return Err(error.into()),
-        Err(error) => return Err(VeilError::WorkError(error.to_string()).into()),
+        Err(error) => return Err(map_service_error(error).already_reported()),
         _ => return Err(VeilError::WorkError("服务响应类型不符合请求".into()).into()),
     };
 
@@ -144,78 +144,53 @@ pub fn container_client(resolved: &ContainerHandle) -> CliContainer {
 }
 
 impl CliContainer {
-    fn info(
-        &self,
-        password: &str,
-    ) -> std::result::Result<veil_service::operations::ContainerInfo, VeilError> {
+    fn info(&self, password: &str) -> Result<veil_service::operations::ContainerInfo> {
         match self.execute(ContainerOperation::ReadInfo { password })? {
             ContainerOperationResult::Info(value) => Ok(value),
             _ => unreachable!(),
         }
     }
-    fn execute(
-        &self,
-        operation: ContainerOperation<'_>,
-    ) -> std::result::Result<ContainerOperationResult, VeilError> {
+    fn execute(&self, operation: ContainerOperation<'_>) -> Result<ContainerOperationResult> {
         match self.service.execute(ServiceRequest::OperatePrepared {
             container: &self.container,
             operation,
         }) {
             Ok(ServiceResponse::Operation(result)) => Ok(result),
-            Err(ServiceError::Core(error)) => Err(error),
-            Err(error) => Err(VeilError::WorkError(error.to_string())),
-            _ => Err(VeilError::WorkError("服务响应类型不符合请求".into())),
+            Err(error) => Err(map_service_error(error).already_reported()),
+            _ => Err(VeilError::WorkError("服务响应类型不符合请求".into()).into()),
         }
     }
-    fn read_meta(&self, password: &str) -> std::result::Result<MetaData, VeilError> {
+    fn read_meta(&self, password: &str) -> Result<MetaData> {
         match self.execute(ContainerOperation::ReadMetadata { password })? {
             ContainerOperationResult::Metadata(v) => Ok(v),
             _ => unreachable!(),
         }
     }
-    fn list_files(&self, password: &str) -> std::result::Result<Vec<FileEntry>, VeilError> {
+    fn list_files(&self, password: &str) -> Result<Vec<FileEntry>> {
         match self.execute(ContainerOperation::ListFiles { password })? {
             ContainerOperationResult::Files(v) => Ok(v),
             _ => unreachable!(),
         }
     }
-    fn path_kind(
-        &self,
-        path: &str,
-        password: &str,
-    ) -> std::result::Result<ContainerPathKind, VeilError> {
+    fn path_kind(&self, path: &str, password: &str) -> Result<ContainerPathKind> {
         match self.execute(ContainerOperation::PathKind { path, password })? {
             ContainerOperationResult::PathKind(v) => Ok(v),
             _ => unreachable!(),
         }
     }
-    fn remove_path(
-        &self,
-        path: &str,
-        password: &str,
-    ) -> std::result::Result<RemovedPathKind, VeilError> {
+    fn remove_path(&self, path: &str, password: &str) -> Result<RemovedPathKind> {
         match self.execute(ContainerOperation::RemovePath { path, password })? {
             ContainerOperationResult::Removed(v) => Ok(v),
             _ => unreachable!(),
         }
     }
-    fn move_path(
-        &self,
-        from: &str,
-        to: &str,
-        password: &str,
-    ) -> std::result::Result<(MovedPathKind, String), VeilError> {
+    fn move_path(&self, from: &str, to: &str, password: &str) -> Result<(MovedPathKind, String)> {
         match self.execute(ContainerOperation::MovePath { from, to, password })? {
             ContainerOperationResult::Moved(k, p) => Ok((k, p)),
             _ => unreachable!(),
         }
     }
-    fn change_password(
-        &self,
-        old: &str,
-        new: &str,
-        full: bool,
-    ) -> std::result::Result<(), VeilError> {
+    fn change_password(&self, old: &str, new: &str, full: bool) -> Result<()> {
         match self.execute(ContainerOperation::ChangePassword { old, new, full })? {
             ContainerOperationResult::Done => Ok(()),
             _ => unreachable!(),

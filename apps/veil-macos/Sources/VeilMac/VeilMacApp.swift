@@ -106,9 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let store else { return .terminateNow }
+        guard let store else { AppLog.flush(); return .terminateNow }
         Task {
             await store.lock()
+            AppLog.flush()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

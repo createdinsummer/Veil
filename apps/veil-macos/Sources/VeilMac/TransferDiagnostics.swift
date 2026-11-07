@@ -22,9 +22,14 @@ struct TransferDiagnosticRecord: Codable, Identifiable, Sendable {
 
 enum TransferDiagnostics {
     private static let maximumRecords = 20
-    private static let directory = FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Veil/diagnostics", isDirectory: true)
+    private static let directory: URL = {
+        if let root = ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"], root.hasPrefix("/") {
+            return URL(fileURLWithPath: root, isDirectory: true)
+                .appendingPathComponent("diagnostics", isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Veil/diagnostics", isDirectory: true)
+    }()
 
     static func makeRecord(error: Error, operation: String, progress: TransferProgress?) -> TransferDiagnosticRecord {
         let description = error.localizedDescription.lowercased()
@@ -61,18 +66,26 @@ enum TransferDiagnostics {
     }
 
     static func latestRecord() -> TransferDiagnosticRecord? {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ) else { return nil }
-
+        let files: [URL]
+        do {
+            files = try FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil)
+        } catch {
+            let native = error as NSError
+            // 尚未发生过传输故障时，诊断目录不存在属于正常状态。
+            if native.domain != NSCocoaErrorDomain || native.code != NSFileReadNoSuchFileError {
+                AppLog.capture(error)
+            }
+            return nil
+        }
         let decoder = JSONDecoder()
-        return files
-            .filter { $0.pathExtension == "json" }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .prefix(maximumRecords)
-            .compactMap { try? decoder.decode(TransferDiagnosticRecord.self, from: Data(contentsOf: $0)) }
-            .first
+        for file in files.filter({ $0.pathExtension == "json" })
+            .sorted(by: { $0.lastPathComponent > $1.lastPathComponent }).prefix(maximumRecords) {
+            if let record = AppLog.attempt({
+                try decoder.decode(TransferDiagnosticRecord.self, from: Data(contentsOf: file))
+            }) { return record }
+        }
+        return nil
     }
 
     static func append(_ record: TransferDiagnosticRecord) {
@@ -93,16 +106,16 @@ enum TransferDiagnostics {
             try encoded(record).write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 
-            let files = (try? FileManager.default.contentsOfDirectory(
+            let files = (AppLog.attempt({ try FileManager.default.contentsOfDirectory(
                 at: directory,
                 includingPropertiesForKeys: [.contentModificationDateKey]
-            )) ?? []
+            ) })) ?? []
             for file in files.filter({ $0.pathExtension == "json" })
                 .sorted(by: { $0.lastPathComponent > $1.lastPathComponent })
                 .dropFirst(maximumRecords) {
-                try? FileManager.default.removeItem(at: file)
+                AppLog.attempt({ try FileManager.default.removeItem(at: file) })
             }
-        } catch {
+        } catch { AppLog.capture(error);
             // 诊断记录失败不能改变原任务的结果。
         }
     }

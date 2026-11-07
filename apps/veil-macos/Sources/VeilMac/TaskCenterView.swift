@@ -104,10 +104,27 @@ struct TaskCenterView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(VeilTheme.border))
             }
             Spacer(minLength: 0)
+            HStack {
+                Text("错误日志仅保存在本机，可导出用于反馈。")
+                    .font(.system(size: 11)).foregroundStyle(VeilTheme.secondary)
+                Spacer()
+                Button("导出错误日志…", action: exportErrorLogs)
+                    .buttonStyle(VeilButtonStyle())
+            }
         }
         .padding(24)
         .frame(minWidth: 520, minHeight: 280, alignment: .topLeading)
         .background(VeilTheme.canvas)
+    }
+
+    private func exportErrorLogs() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Veil-错误日志.json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            store.exportErrorLogs(to: url)
+        }
     }
 
     private func exportDiagnostic() {

@@ -11,5 +11,8 @@ void veil_client_free(VeilService *client);
 VeilBuffer veil_client_call(VeilService *client, const uint8_t *data, size_t length);
 VeilBuffer veil_client_progress(const VeilService *client);
 _Bool veil_client_cancel_transfer(const VeilService *client);
+void veil_log_client_error(uint32_t category, const char *source, uint32_t line, int64_t native_code, const char *message);
+void veil_logs_flush(void);
+VeilBuffer veil_logs_export(void);
 void veil_buffer_free(VeilBuffer buffer);
 #endif

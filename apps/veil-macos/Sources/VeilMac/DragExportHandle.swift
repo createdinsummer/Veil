@@ -58,7 +58,7 @@ final class DragExportView: NSView, NSDraggingSource, NSFilePromiseProviderDeleg
             do {
                 try await store.exportDraggedFile(file, to: url, generation: ticket)
                 completion.call(nil)
-            } catch {
+            } catch { AppLog.capture(error);
                 store.error = error.localizedDescription
                 completion.call(error)
             }

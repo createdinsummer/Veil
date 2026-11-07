@@ -175,6 +175,18 @@ fn atomic_write_inner(path: &Path, data: &[u8], strict: bool) -> Result<(), Atom
         })?;
         #[cfg(any(test, feature = "fault-injection"))]
         fault_point("after_commit");
+    } else if let Err(error) = synced {
+        crate::logging::failure(
+            crate::logging::Level::Warn,
+            "storage",
+            "sync_published_file",
+            "PUBLISHED_DIRECTORY_SYNC_FAILED",
+            &error,
+            &[
+                ("destination", crate::logging::Field::Path(path)),
+                ("published", crate::logging::Field::Label("true")),
+            ],
+        );
     }
 
     Ok(())

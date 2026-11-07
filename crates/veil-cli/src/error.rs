@@ -318,6 +318,7 @@ impl ErrorCode {
 pub struct CliError {
     code: ErrorCode,
     params: BTreeMap<&'static str, String>,
+    reported: bool,
 }
 
 impl CliError {
@@ -326,6 +327,7 @@ impl CliError {
         Self {
             code,
             params: BTreeMap::new(),
+            reported: false,
         }
     }
 
@@ -345,6 +347,11 @@ impl CliError {
 pub enum CommandError {
     /// 具有稳定错误码和模板参数的预期错误。
     Coded(CliError),
+    /// 保留用户提示与原始错误，直到最终处理边界再记录。
+    Sourced {
+        display: CliError,
+        source: anyhow::Error,
+    },
     /// 无稳定业务分类的底层错误。
     Unexpected(anyhow::Error),
 }
@@ -360,7 +367,7 @@ impl CommandError {
 
     /// 添加模板参数。
     pub fn param(mut self, name: &'static str, value: impl ToString) -> Self {
-        if let Self::Coded(error) = &mut self {
+        if let Self::Coded(error) | Self::Sourced { display: error, .. } = &mut self {
             error.params.insert(name, value.to_string());
         }
         self
@@ -370,6 +377,7 @@ impl CommandError {
     pub const fn code(&self) -> ErrorCode {
         match self {
             Self::Coded(error) => error.code(),
+            Self::Sourced { display, .. } => display.code(),
             Self::Unexpected(_) => ErrorCode::Unexpected,
         }
     }
@@ -379,10 +387,88 @@ impl CommandError {
         self.code().spec().exit_code
     }
 
+    /// 先收集错误，再渲染终端提示；用户参数不进入日志。
+    pub fn report(&self) -> String {
+        if matches!(
+            self,
+            Self::Coded(CliError { reported: true, .. })
+                | Self::Sourced {
+                    display: CliError { reported: true, .. },
+                    ..
+                }
+        ) {
+            return self.render();
+        }
+        match self {
+            Self::Unexpected(error) => veil_core::logging::error_with_code(
+                "cli",
+                "command",
+                self.code().spec().name,
+                error.as_ref(),
+            ),
+            Self::Sourced { source, .. } => {
+                use veil_core::{
+                    error::VeilError,
+                    logging::{Level, failure},
+                };
+                let level = match source.downcast_ref::<VeilError>() {
+                    Some(
+                        VeilError::Cancelled
+                        | VeilError::LockConflict { .. }
+                        | VeilError::VeilNotFound(_)
+                        | VeilError::VeilNameAmbiguous(_)
+                        | VeilError::FileNotFound(_)
+                        | VeilError::FileAlreadyExists(_)
+                        | VeilError::VersionConflict(_)
+                        | VeilError::VolumeUnavailable(_),
+                    ) => Level::Info,
+                    Some(VeilError::InvalidFormat(_) | VeilError::DecryptionError(_)) => {
+                        Level::Warn
+                    }
+                    _ => Level::Error,
+                };
+                failure(
+                    level,
+                    "cli",
+                    "command",
+                    self.code().spec().name,
+                    source.as_ref(),
+                    &[],
+                );
+            }
+            // 参数校验和可预期冲突不进入默认生产日志。
+            Self::Coded(_) => veil_core::logging::record(
+                if matches!(
+                    self.code(),
+                    ErrorCode::AddDirectoryReadFailed
+                        | ErrorCode::InitLinkRegistrationFailed
+                        | ErrorCode::InitWorkCreateFailed
+                ) {
+                    veil_core::logging::Level::Error
+                } else {
+                    veil_core::logging::Level::Info
+                },
+                "cli",
+                "command",
+                self.code().spec().name,
+            ),
+        }
+        self.render()
+    }
+
+    /// 服务处理边界已记录原始原因，CLI 只负责显示，避免重复打印同一错误链。
+    pub(crate) fn already_reported(mut self) -> Self {
+        if let Self::Coded(display) | Self::Sourced { display, .. } = &mut self {
+            display.reported = true;
+        }
+        self
+    }
+
     /// 渲染用户可见错误文本。
     pub fn render(&self) -> String {
         match self {
             Self::Coded(error) => error.render(),
+            Self::Sourced { display, .. } => display.render(),
             Self::Unexpected(error) => {
                 render_with_code(ErrorCode::Unexpected.spec().value, &error.to_string())
             }
@@ -415,7 +501,12 @@ impl From<anyhow::Error> for CommandError {
 
 impl From<std::io::Error> for CommandError {
     fn from(error: std::io::Error) -> Self {
-        Self::coded(ErrorCode::Io).param("error", error)
+        let mut display = CliError::coded(ErrorCode::Io);
+        display.params.insert("error", error.to_string());
+        Self::Sourced {
+            display,
+            source: error.into(),
+        }
     }
 }
 
@@ -423,14 +514,14 @@ impl From<veil_core::error::VeilError> for CommandError {
     fn from(error: veil_core::error::VeilError) -> Self {
         use veil_core::error::VeilError;
 
-        let (code, detail) = match error {
+        let (code, detail) = match &error {
             VeilError::Cancelled => (ErrorCode::Work, "操作已中止".into()),
             VeilError::LockConflict { level, scope } => (
                 ErrorCode::Work,
                 format!("锁冲突：级别 {level}，范围 {scope}"),
             ),
-            VeilError::ImportBatchFailed { file, message } => {
-                (ErrorCode::Work, format!("导入文件 {file} 失败: {message}"))
+            VeilError::ImportBatchFailed { file, source } => {
+                (ErrorCode::Work, format!("导入文件 {file} 失败: {source}"))
             }
             VeilError::Database(error) => (ErrorCode::Config, error.to_string()),
             VeilError::Io(error) => (ErrorCode::Io, error.to_string()),
@@ -438,28 +529,33 @@ impl From<veil_core::error::VeilError> for CommandError {
                 ErrorCode::Io,
                 format!("提交结果或持久化状态不确定: {error}"),
             ),
-            VeilError::Format(error) => (ErrorCode::Format, error),
-            VeilError::WorkError(error) => (ErrorCode::Work, error),
+            VeilError::Format(error) => (ErrorCode::Format, error.clone()),
+            VeilError::WorkError(error) => (ErrorCode::Work, error.clone()),
             VeilError::ConfigError(error) | VeilError::DatabasePool(error) => {
-                (ErrorCode::Config, error)
+                (ErrorCode::Config, error.clone())
             }
-            VeilError::VeilNotFound(error) => (ErrorCode::VeilNotFound, error),
-            VeilError::InvalidFormat(error) => (ErrorCode::InvalidFormat, error),
-            VeilError::SerializationError(error) => (ErrorCode::Serialization, error),
-            VeilError::EncryptionError(error) => (ErrorCode::Encryption, error),
-            VeilError::DecryptionError(error) => (ErrorCode::Decryption, error),
-            VeilError::KeyDerivationError(error) => (ErrorCode::KeyDerivation, error),
-            VeilError::FileNotFound(error) => (ErrorCode::FileNotFound, error),
-            VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error),
+            VeilError::VeilNotFound(error) => (ErrorCode::VeilNotFound, error.clone()),
+            VeilError::InvalidFormat(error) => (ErrorCode::InvalidFormat, error.clone()),
+            VeilError::SerializationError(error) => (ErrorCode::Serialization, error.clone()),
+            VeilError::EncryptionError(error) => (ErrorCode::Encryption, error.clone()),
+            VeilError::DecryptionError(error) => (ErrorCode::Decryption, error.clone()),
+            VeilError::KeyDerivationError(error) => (ErrorCode::KeyDerivation, error.clone()),
+            VeilError::FileNotFound(error) => (ErrorCode::FileNotFound, error.clone()),
+            VeilError::FileAlreadyExists(error) => (ErrorCode::FileAlreadyExists, error.clone()),
             VeilError::VersionConflict(error) => {
                 (ErrorCode::Work, format!("文件版本冲突: {error}"))
             }
-            VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error),
-            VeilError::VeilIdConflict(error) => (ErrorCode::VeilIdConflict, error),
-            VeilError::VeilNameAmbiguous(error) => (ErrorCode::VeilNameAmbiguous, error),
+            VeilError::VolumeUnavailable(error) => (ErrorCode::VolumeUnavailable, error.clone()),
+            VeilError::VeilIdConflict(error) => (ErrorCode::VeilIdConflict, error.clone()),
+            VeilError::VeilNameAmbiguous(error) => (ErrorCode::VeilNameAmbiguous, error.clone()),
         };
 
-        Self::coded(code).param("error", detail)
+        let mut display = CliError::coded(code);
+        display.params.insert("error", detail);
+        Self::Sourced {
+            display,
+            source: error.into(),
+        }
     }
 }
 
@@ -485,6 +581,11 @@ impl fmt::Debug for CommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Coded(error) => error.fmt(formatter),
+            Self::Sourced { display, source } => formatter
+                .debug_struct("Sourced")
+                .field("display", display)
+                .field("source", source)
+                .finish(),
             Self::Unexpected(error) => formatter.debug_tuple("Unexpected").field(error).finish(),
         }
     }

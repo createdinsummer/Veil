@@ -45,7 +45,9 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
         io::stdout().flush()?;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        if io::stdin().read_line(&mut input)? == 0 {
+            break;
+        }
 
         let input = input.trim();
         if input.is_empty() {
@@ -72,14 +74,15 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                     if let Err(e) = show_info(&display_name, &current_metadata) {
                         crate::outln!(
                             "{}",
-                            crate::i18n::t1("shell.info_failed", "error", &e.to_string()).red()
+                            crate::i18n::t1("shell.info_failed", "error", &e.report()).red()
                         );
                     }
                 }
                 Err(e) => {
+                    let error = crate::error::CommandError::from(e);
                     crate::outln!(
                         "{}",
-                        crate::i18n::t1("shell.metadata_failed", "error", &e.to_string()).red()
+                        crate::i18n::t1("shell.metadata_failed", "error", &error.report()).red()
                     );
                 }
             },
@@ -98,7 +101,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                 ) {
                     crate::outln!(
                         "{}",
-                        crate::i18n::t1("shell.add_failed", "error", &error.to_string()).red()
+                        crate::i18n::t1("shell.add_failed", "error", &error.report()).red()
                     );
                 }
             }
@@ -116,9 +119,10 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                         );
                     }
                     Err(e) => {
+                        let error = crate::error::CommandError::from(e);
                         crate::outln!(
                             "{}",
-                            crate::i18n::t1("shell.delete_failed", "error", &e.to_string()).red()
+                            crate::i18n::t1("shell.delete_failed", "error", &error.report()).red()
                         );
                     }
                 }
@@ -141,7 +145,7 @@ pub fn run(veil_name: &str, password: Option<String>) -> Result<()> {
                     Err(e) => {
                         crate::outln!(
                             "{}",
-                            crate::i18n::t1("shell.export_failed", "error", &e.to_string()).red()
+                            crate::i18n::t1("shell.export_failed", "error", &e.report()).red()
                         );
                     }
                 }

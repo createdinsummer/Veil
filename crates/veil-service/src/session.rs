@@ -270,6 +270,68 @@ pub enum ServiceRequest<'a> {
     },
 }
 
+impl ServiceRequest<'_> {
+    /// 只返回变体名称，禁止格式化请求参数。
+    fn log_operation(&self) -> &'static str {
+        match self {
+            Self::CheckExecution { .. } => "CheckExecution",
+            Self::CreateContainer { .. } => "CreateContainer",
+            Self::OpenContainer { .. } => "OpenContainer",
+            Self::RefreshContainer => "RefreshContainer",
+            Self::LockContainer => "LockContainer",
+            Self::ListSpaces => "ListSpaces",
+            Self::ListRecents => "ListRecents",
+            Self::GetUserSetting { .. } => "GetUserSetting",
+            Self::SetUserSetting { .. } => "SetUserSetting",
+            Self::RenameSpace { .. } => "RenameSpace",
+            Self::SetDefaultSpace { .. } => "SetDefaultSpace",
+            Self::DeleteSpace { .. } => "DeleteSpace",
+            Self::DeleteSpaceRecord { .. } => "DeleteSpaceRecord",
+            Self::DeleteContainer { .. } => "DeleteContainer",
+            Self::UnregisterContainer { .. } => "UnregisterContainer",
+            Self::MoveContainer { .. } => "MoveContainer",
+            Self::CreateSpace { .. } => "CreateSpace",
+            Self::CreateInSpace { .. } => "CreateInSpace",
+            Self::ImportSessionFiles { .. } => "ImportSessionFiles",
+            Self::StreamSessionImport { .. } => "StreamSessionImport",
+            Self::PollSessionImportConflicts => "PollSessionImportConflicts",
+            Self::ResolveSessionImportConflicts { .. } => "ResolveSessionImportConflicts",
+            Self::PreviewSessionFile { .. } => "PreviewSessionFile",
+            Self::ExportSessionFile { .. } => "ExportSessionFile",
+            Self::StreamSessionExport { .. } => "StreamSessionExport",
+            Self::PollSessionExportConflicts => "PollSessionExportConflicts",
+            Self::ResolveSessionExportConflicts { .. } => "ResolveSessionExportConflicts",
+            Self::ExportSessionPackage { .. } => "ExportSessionPackage",
+            Self::ImportPackageInSpace { .. } => "ImportPackageInSpace",
+            Self::RemoveSessionPath { .. } => "RemoveSessionPath",
+            Self::OperateContainer { .. } => "OperateContainer",
+            Self::PrepareContainer { .. } => "PrepareContainer",
+            Self::OperatePrepared { .. } => "OperatePrepared",
+            Self::PrepareImport { .. } => "PrepareImport",
+            Self::CommitImport { .. } => "CommitImport",
+            Self::PrepareContainerPack { .. } => "PrepareContainerPack",
+            Self::CommitContainerPack { .. } => "CommitContainerPack",
+            Self::ResolveContainer { .. } => "ResolveContainer",
+            Self::ReadConfigSummary => "ReadConfigSummary",
+            Self::RegisterContainer { .. } => "RegisterContainer",
+            Self::ConfigPath => "ConfigPath",
+            Self::GuessMime { .. } => "GuessMime",
+            Self::EffectiveHintLevel { .. } => "EffectiveHintLevel",
+            Self::ShouldShowHint { .. } => "ShouldShowHint",
+            Self::SetHintLevel { .. } => "SetHintLevel",
+            Self::PrepareLink { .. } => "PrepareLink",
+            Self::CommitLink { .. } => "CommitLink",
+            Self::CollectImport { .. } => "CollectImport",
+            Self::PreparePack { .. } => "PreparePack",
+            Self::ValidateNewPassword { .. } => "ValidateNewPassword",
+            Self::PrepareCreate { .. } => "PrepareCreate",
+            Self::CommitCreate { .. } => "CommitCreate",
+            Self::PrepareUnpack { .. } => "PrepareUnpack",
+            Self::CommitUnpack { .. } => "CommitUnpack",
+        }
+    }
+}
+
 /// 业务请求的结果。
 pub enum ServiceResponse {
     ExecutionStatus(crate::execution::Liveness),
@@ -350,6 +412,75 @@ pub enum ServiceError {
     },
     #[error("服务响应类型不符合请求")]
     UnexpectedResponse,
+}
+
+impl ServiceError {
+    fn log_level(&self, operation: &str) -> Option<veil_core::logging::Level> {
+        use veil_core::logging::Level;
+        match self {
+            Self::InvalidInput(_)
+            | Self::DuplicateImport
+            | Self::NotOpen
+            | Self::ImportCancelled { .. }
+            | Self::Import(
+                crate::import::ImportError::Cancelled
+                | crate::import::ImportError::InvalidDestination(_)
+                | crate::import::ImportError::NotFile(_),
+            ) => None,
+            Self::Workflow(error) => match error {
+                crate::workflow::WorkflowError::Core(error) => core_log_level(error),
+                crate::workflow::WorkflowError::Io(_)
+                | crate::workflow::WorkflowError::CreateFailed { .. }
+                | crate::workflow::WorkflowError::LinkRegistrationFailed { .. } => {
+                    Some(Level::Error)
+                }
+                _ => None,
+            },
+            Self::Core(veil_core::error::VeilError::DecryptionError(_))
+                if operation == "OpenContainer" =>
+            {
+                Some(Level::Warn)
+            }
+            Self::Core(error) | Self::ImportFileFailed { source: error, .. } => {
+                core_log_level(error)
+            }
+            Self::Import(crate::import::ImportError::SourceNotFound(_)) => Some(Level::Warn),
+            _ => Some(Level::Error),
+        }
+    }
+
+    fn log_code(&self) -> &'static str {
+        match self {
+            Self::InvalidInput(..) => "INVALID_INPUT",
+            Self::StateUnavailable => "STATE_UNAVAILABLE",
+            Self::DuplicateImport => "DUPLICATE_IMPORT",
+            Self::NotOpen => "NOT_OPEN",
+            Self::Io { .. } => "IO",
+            Self::Core(..) => "CORE",
+            Self::Workflow(error) => error.log_code(),
+            Self::Import(error) => error.log_code(),
+            Self::ImportFileFailed { .. } => "IMPORT_FILE_FAILED",
+            Self::ImportCancelled { .. } => "IMPORT_CANCELLED",
+            Self::CreateFailed { .. } => "CREATE_FAILED",
+            Self::UnexpectedResponse => "UNEXPECTED_RESPONSE",
+        }
+    }
+}
+
+fn core_log_level(error: &veil_core::error::VeilError) -> Option<veil_core::logging::Level> {
+    use veil_core::{error::VeilError, logging::Level};
+    match error {
+        VeilError::Cancelled => None,
+        VeilError::ImportBatchFailed { source, .. } => core_log_level(source),
+        VeilError::FileAlreadyExists(_)
+        | VeilError::VersionConflict(_)
+        | VeilError::LockConflict { .. }
+        | VeilError::FileNotFound(_)
+        | VeilError::VeilNotFound(_)
+        | VeilError::VeilNameAmbiguous(_)
+        | VeilError::VolumeUnavailable(_) => Some(Level::Warn),
+        _ => Some(Level::Error),
+    }
 }
 
 #[derive(Clone)]
@@ -502,6 +633,86 @@ impl VeilService {
 
     /// 接收容器会话请求，执行对应的参数校验和业务流程。
     pub fn execute(&self, request: ServiceRequest<'_>) -> Result<ServiceResponse, ServiceError> {
+        let _request = veil_core::logging::request_scope();
+        let _secrets = veil_core::logging::sensitive_scope(&[]);
+        match &request {
+            ServiceRequest::CreateContainer { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::OpenContainer { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::MoveContainer { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::CreateInSpace { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::ImportPackageInSpace { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::CommitImport { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::CommitContainerPack { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::RegisterContainer { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::ValidateNewPassword { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::CommitCreate { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            ServiceRequest::CommitUnpack { password, .. } => {
+                veil_core::logging::remember_sensitive(password)
+            }
+            _ => {}
+        }
+        let started = std::time::Instant::now();
+        let is_transfer = matches!(
+            &request,
+            ServiceRequest::ImportSessionFiles { .. }
+                | ServiceRequest::StreamSessionImport { .. }
+                | ServiceRequest::StreamSessionExport { .. }
+                | ServiceRequest::ExportSessionFile { .. }
+                | ServiceRequest::ExportSessionPackage { .. }
+                | ServiceRequest::ImportPackageInSpace { .. }
+        );
+        let operation = request.log_operation();
+        let result = self.execute_inner(request);
+        if let Err(error) = &result {
+            if let Some(level) = error.log_level(operation) {
+                use veil_core::logging::{self, Field};
+                let mut context = vec![
+                    ("elapsed_ms", Field::Duration(started.elapsed())),
+                    ("outcome", Field::Label("failed")),
+                ];
+                if is_transfer {
+                    let progress = self.transfer_progress();
+                    context.extend([
+                        ("phase", Field::Label(progress.phase)),
+                        ("completed_files", Field::Count(progress.completed_files)),
+                        ("total_files", Field::Count(progress.total_files)),
+                        ("parallel_workers", Field::Count(progress.parallel_workers)),
+                    ]);
+                }
+                logging::failure(
+                    level,
+                    "service",
+                    operation,
+                    error.log_code(),
+                    error,
+                    &context,
+                );
+            }
+        }
+        result
+    }
+
+    fn execute_inner(&self, request: ServiceRequest<'_>) -> Result<ServiceResponse, ServiceError> {
         let _import = match &request {
             ServiceRequest::ImportSessionFiles { sources, directory }
             | ServiceRequest::StreamSessionImport { sources, directory } => {
@@ -1272,7 +1483,9 @@ impl VeilService {
                 self.remaining.fetch_sub(1, Ordering::Release);
             }
         }
+        let logging_context = veil_core::logging::capture_context();
         std::thread::scope(|scope| {
+            let logging_context = &logging_context;
             // 队列及待提交批次均限制数量，避免长间隔导入时无限累积租约。
             const QUEUE_LIMIT: usize = 8;
             let (sender, receiver) = veil_core::queue::BoundedQueue::new(QUEUE_LIMIT).split();
@@ -1297,6 +1510,7 @@ impl VeilService {
                     owner: owner.clone(),
                 };
                 scope.spawn(move || {
+                    let _logging = logging_context.attach();
                     let _end = WorkerEnd {
                         remaining: remaining_workers,
                         stopped,

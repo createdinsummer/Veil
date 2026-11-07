@@ -107,6 +107,13 @@ pub(crate) fn execute(
 ) -> Result<ContainerOperationResult, VeilError> {
     use ContainerOperation as Op;
     use ContainerOperationResult as Out;
+    match &operation {
+        Op::ChangePassword { old, new, .. } => {
+            veil_core::logging::remember_sensitive(old);
+            veil_core::logging::remember_sensitive(new);
+        }
+        _ => {}
+    }
     Ok(match operation {
         Op::ReadInfo { password } => {
             let metadata = manager.read_meta(password)?;

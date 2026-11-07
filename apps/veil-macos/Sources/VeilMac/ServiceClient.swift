@@ -1,5 +1,5 @@
-import Foundation
 import CVeilBridge
+import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -21,7 +21,6 @@ struct NativeRequest: Encodable, Sendable {
     var seconds: Int? = nil
     var count: Int? = nil
 }
-
 
 struct ImportConflict: Decodable, Identifiable, Sendable {
     let target: String
@@ -50,11 +49,13 @@ struct ImportResolution: Encodable, Sendable {
 
 enum ClientError: LocalizedError {
     case service(String)
+    case local(String)
+    case unsupportedContent(String)
     case invalidResponse
 
     var errorDescription: String? {
         switch self {
-        case .service(let message): message
+        case .service(let message), .local(let message), .unsupportedContent(let message): message
         case .invalidResponse: "服务响应无效，请重试。"
         }
     }
@@ -78,11 +79,16 @@ struct TransferProgress: Decodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case operation, phase
-        case scanComplete = "scan_complete", waitingFiles = "waiting_files", checkedFiles = "checked_files"
-        case processedBytes = "processed_bytes", totalBytes = "total_bytes"
-        case completedFiles = "completed_files", skippedFiles = "skipped_files"
+        case scanComplete = "scan_complete"
+        case waitingFiles = "waiting_files"
+        case checkedFiles = "checked_files"
+        case processedBytes = "processed_bytes"
+        case totalBytes = "total_bytes"
+        case completedFiles = "completed_files"
+        case skippedFiles = "skipped_files"
         case pendingFiles = "pending_files"
-        case totalFiles = "total_files", currentFile = "current_file"
+        case totalFiles = "total_files"
+        case currentFile = "current_file"
         case cancelRequested = "cancel_requested"
         case parallelWorkers = "parallel_workers"
     }
@@ -104,38 +110,59 @@ actor ServiceClient {
         let response = veil_client_progress(handle.pointer)
         defer { veil_buffer_free(response) }
         guard response.kind == 0, let pointer = response.data else { return nil }
-        return try? JSONDecoder().decode(TransferProgress.self, from: Data(bytes: pointer, count: response.length))
+        let data = Data(bytes: pointer, count: response.length)
+        if data == Data("null".utf8) { return nil }
+        do { return try JSONDecoder().decode(TransferProgress.self, from: data) } catch {
+            AppLog.capture(error)
+            return nil
+        }
     }
 
     nonisolated func cancelTransfer() -> Bool { veil_client_cancel_transfer(handle.pointer) }
 
     private func perform(_ request: NativeRequest) async throws -> (UInt32, Data) {
         let handle = self.handle
-        return try await Task.detached {
-        var input = try JSONEncoder().encode(request)
-        defer { input.resetBytes(in: 0..<input.count) }
-        let response = input.withUnsafeBytes { raw in
-            veil_client_call(handle.pointer, raw.bindMemory(to: UInt8.self).baseAddress, input.count)
+        do {
+            return try await Task.detached {
+                var input = try JSONEncoder().encode(request)
+                defer { input.resetBytes(in: 0..<input.count) }
+                let response = input.withUnsafeBytes { raw in
+                    veil_client_call(handle.pointer, raw.bindMemory(to: UInt8.self).baseAddress, input.count)
+                }
+                defer { veil_buffer_free(response) }
+                guard let pointer = response.data else { throw ClientError.invalidResponse }
+                let data = Data(bytes: pointer, count: response.length)
+                if response.kind == 1 {
+                    throw ClientError.service(String(decoding: data, as: UTF8.self))
+                }
+                return (response.kind, data)
+            }.value
+        } catch {
+            throw AppLog.recorded(error)
         }
-        defer { veil_buffer_free(response) }
-        guard let pointer = response.data else { throw ClientError.invalidResponse }
-        let data = Data(bytes: pointer, count: response.length)
-        if response.kind == 1 {
-            throw ClientError.service(String(decoding: data, as: UTF8.self))
-        }
-        return (response.kind, data)
-        }.value
     }
 
-    func json<T: Decodable & Sendable>(_ request: NativeRequest, as type: T.Type = T.self) async throws -> T {
-        let (kind, data) = try await perform(request)
-        guard kind == 0 else { throw ClientError.invalidResponse }
-        return try JSONDecoder().decode(type, from: data)
+    func json<T: Decodable & Sendable>(_ request: NativeRequest, as type: T.Type = T.self)
+        async throws -> T
+    {
+        do {
+            let (kind, data) = try await perform(request)
+            guard kind == 0 else { throw ClientError.invalidResponse }
+            return try JSONDecoder().decode(type, from: data)
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
 
     func execute(_ request: NativeRequest) async throws {
-        let (kind, _) = try await perform(request)
-        guard kind == 0 else { throw ClientError.invalidResponse }
+        do {
+            let (kind, _) = try await perform(request)
+            guard kind == 0 else { throw ClientError.invalidResponse }
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
 
     func preview(name: String) async throws -> Data {
@@ -143,33 +170,57 @@ actor ServiceClient {
     }
 
     func previewWithStatus(name: String) async throws -> (data: Data, unstable: Bool) {
-        let (kind, data) = try await perform(NativeRequest(operation: "preview_file", name: name))
-        guard kind == 2 || kind == 3 else { throw ClientError.invalidResponse }
-        return (data, kind == 3)
+        do {
+            let (kind, data) = try await perform(NativeRequest(operation: "preview_file", name: name))
+            guard kind == 2 || kind == 3 else { throw ClientError.invalidResponse }
+            return (data, kind == 3)
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
 
     func exportWithStatus(name: String, destination: String) async throws -> Bool {
-        let (kind, _) = try await perform(NativeRequest(operation: "export_file", name: name, destination: destination))
-        guard kind == 0 || kind == 4 else { throw ClientError.invalidResponse }
-        return kind == 4
+        do {
+            let (kind, _) = try await perform(
+                NativeRequest(operation: "export_file", name: name, destination: destination))
+            guard kind == 0 || kind == 4 else { throw ClientError.invalidResponse }
+            return kind == 4
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
 
     /// 在后台 actor 中按实际显示尺寸缩小，原图与缩略图均不写入磁盘。
     func thumbnail(name: String) async throws -> Data {
-        let bytes = try await preview(name: name)
-        guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 320,
-                kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else { throw ClientError.service("无法生成图片缩略图") }
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else {
-            throw ClientError.invalidResponse
+        do {
+            let bytes = try await preview(name: name)
+            guard
+                let source = CGImageSourceCreateWithData(
+                    bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                let image = CGImageSourceCreateThumbnailAtIndex(
+                    source, 0,
+                    [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceThumbnailMaxPixelSize: 320,
+                        kCGImageSourceShouldCacheImmediately: true,
+                    ] as CFDictionary)
+            else { throw ClientError.unsupportedContent("无法生成图片缩略图") }
+            let output = NSMutableData()
+            guard
+                let destination = CGImageDestinationCreateWithData(
+                    output, UTType.png.identifier as CFString, 1, nil)
+            else {
+                throw ClientError.invalidResponse
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { throw ClientError.invalidResponse }
+            return output as Data
+
+        } catch {
+            throw AppLog.recorded(error)
         }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { throw ClientError.invalidResponse }
-        return output as Data
     }
 }

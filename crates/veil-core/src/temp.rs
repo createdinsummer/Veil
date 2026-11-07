@@ -29,7 +29,18 @@ impl TempPlaintext {
 impl Drop for TempPlaintext {
     /// 删除临时明文文件；清理失败不会在析构过程中传播 panic。
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            crate::logging::failure(
+                crate::logging::Level::Warn,
+                "storage",
+                "cleanup_plaintext",
+                "PLAINTEXT_CLEANUP_FAILED",
+                &error,
+                &[("temporary_file", crate::logging::Field::Path(&self.path))],
+            );
+        }
     }
 }
 
@@ -50,9 +61,13 @@ pub fn decrypt_to_temp<R: Read>(virtual_path: &str, mut reader: R) -> io::Result
 
     // create_new 防止覆盖已有文件；Unix 模式位进一步限制为仅当前用户读写。
     let mut out = create_private_file(&path)?;
-    io::copy(&mut reader, &mut out)?;
+    // 复制失败时同样清理部分明文。
+    let temporary = TempPlaintext { path };
+    let copied = io::copy(&mut reader, &mut out);
+    drop(out);
+    copied?;
 
-    Ok(TempPlaintext { path })
+    Ok(temporary)
 }
 
 /// 选择临时目录：Linux 上优先 `/dev/shm`，其余平台使用系统临时目录。
@@ -123,4 +138,38 @@ fn unique_temp_name(virtual_path: &str) -> String {
         .and_then(|e| e.to_str())
         .unwrap_or("bin");
     format!("veil_{}_{}.{}", std::process::id(), n, ext)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reader_failure_removes_partial_plaintext() {
+        struct FailsAfterData(bool);
+        impl Read for FailsAfterData {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                if self.0 {
+                    return Err(io::Error::other("注入读取失败"));
+                }
+                self.0 = true;
+                output[..4].copy_from_slice(b"data");
+                Ok(4)
+            }
+        }
+        let matching = || {
+            std::fs::read_dir(preferred_temp_dir())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "veilpartialtest")
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = matching();
+        assert!(decrypt_to_temp("private.veilpartialtest", FailsAfterData(false)).is_err());
+        assert_eq!(matching(), before);
+    }
 }

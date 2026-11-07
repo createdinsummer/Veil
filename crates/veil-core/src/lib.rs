@@ -12,6 +12,7 @@ pub mod fsutil;
 pub mod jsonc;
 pub mod kdf;
 pub mod locking;
+pub mod logging;
 pub mod metadata;
 pub mod mime;
 pub mod progress;

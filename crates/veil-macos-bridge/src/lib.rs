@@ -225,9 +225,15 @@ fn serialize(
         ServiceResponse::PreviewUnstable(bytes) => return Ok(VeilBuffer::new(bytes, 3)),
         ServiceResponse::ExportUnstable => return Ok(VeilBuffer::new(Vec::new(), 4)),
         ServiceResponse::Done | ServiceResponse::Locked => Ok(b"null".to_vec()),
-        _ => return Err("服务返回了不支持的响应".into()),
+        _ => {
+            veil_core::logging::error("bridge", "serialize", "UNSUPPORTED_RESPONSE");
+            return Err("服务返回了不支持的响应".into());
+        }
     }
-    .map_err(|_| "无法编码服务响应".to_owned())?;
+    .map_err(|_| {
+        veil_core::logging::error("bridge", "serialize", "ENCODING_ERROR");
+        "无法编码服务响应".to_owned()
+    })?;
     Ok(VeilBuffer::new(data, 0))
 }
 
@@ -238,17 +244,75 @@ fn serialize(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_configure_app_data_dir(path: *const std::ffi::c_char) -> bool {
     if path.is_null() {
+        veil_core::logging::error("bridge", "configure_directory", "INVALID_ARGUMENTS");
         return false;
     }
     let Ok(path) = unsafe { std::ffi::CStr::from_ptr(path) }.to_str() else {
+        veil_core::logging::error("bridge", "configure_directory", "INVALID_UTF8");
         return false;
     };
-    veil_service::storage::app::configure_app_data_dir(path.into()).is_ok()
+    match veil_service::storage::app::configure_app_data_dir(path.into()) {
+        Ok(()) => true,
+        Err(error) => {
+            veil_core::logging::error_chain("bridge", "configure_directory", &error);
+            false
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn veil_client_new() -> *mut VeilService {
+    veil_core::logging::initialize();
     Box::into_raw(Box::new(VeilService::default()))
+}
+
+/// # Safety
+/// source 和 message 必须为有效的 NUL 结尾 UTF-8 字符串；message 仅由 core 脱敏后持久化。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn veil_log_client_error(
+    category: u32,
+    source: *const std::ffi::c_char,
+    line: u32,
+    native_code: i64,
+    message: *const std::ffi::c_char,
+) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let source = if source.is_null() {
+            "client"
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(source) }
+                .to_str()
+                .unwrap_or("client")
+        };
+        let message = if message.is_null() {
+            "客户端异常"
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_str()
+                .unwrap_or("客户端异常")
+        };
+        veil_core::logging::client_error(category, source, line, native_code, message);
+    }));
+}
+
+/// 生命周期边界的尽力刷新；日志失败不能影响客户端退出或进入后台。
+#[unsafe(no_mangle)]
+pub extern "C" fn veil_logs_flush() {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let _ = veil_core::logging::flush();
+    }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn veil_logs_export() -> VeilBuffer {
+    catch_unwind(AssertUnwindSafe(|| match veil_core::logging::export() {
+        Ok(bytes) => VeilBuffer::new(bytes, 0),
+        Err(error) => {
+            veil_core::logging::error_chain("bridge", "export_logs", &error);
+            VeilBuffer::error("无法读取错误日志")
+        }
+    }))
+    .unwrap_or_else(|_| VeilBuffer::error("无法导出错误日志"))
 }
 
 /// # Safety
@@ -265,12 +329,16 @@ pub unsafe extern "C" fn veil_client_free(client: *mut VeilService) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_progress(client: *const VeilService) -> VeilBuffer {
     if client.is_null() {
+        veil_core::logging::error("bridge", "progress", "INVALID_CLIENT");
         return VeilBuffer::error("客户端无效");
     }
     catch_unwind(AssertUnwindSafe(|| {
         serde_json::to_vec(&unsafe { &*client }.transfer_progress())
             .map(|bytes| VeilBuffer::new(bytes, 0))
-            .unwrap_or_else(|_| VeilBuffer::error("无法编码进度"))
+            .unwrap_or_else(|_| {
+                veil_core::logging::error("bridge", "progress", "ENCODING_ERROR");
+                VeilBuffer::error("无法编码进度")
+            })
     }))
     .unwrap_or_else(|_| VeilBuffer::error("无法读取进度"))
 }
@@ -280,6 +348,7 @@ pub unsafe extern "C" fn veil_client_progress(client: *const VeilService) -> Vei
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_cancel_transfer(client: *const VeilService) -> bool {
     if client.is_null() {
+        veil_core::logging::error("bridge", "cancel_transfer", "INVALID_CLIENT");
         return false;
     }
     catch_unwind(AssertUnwindSafe(|| unsafe { &*client }.cancel_transfer())).unwrap_or(false)
@@ -294,13 +363,16 @@ pub unsafe extern "C" fn veil_client_call(
     length: usize,
 ) -> VeilBuffer {
     if client.is_null() || data.is_null() || length == 0 || length > 1024 * 1024 {
+        veil_core::logging::error("bridge", "call", "INVALID_ARGUMENTS");
         return VeilBuffer::error("请求参数无效");
     }
     catch_unwind(AssertUnwindSafe(|| {
         // 请求副本用完即清零，不保留密码和原始请求正文。
         let input = Zeroizing::new(unsafe { slice::from_raw_parts(data, length) }.to_vec());
-        let request =
-            serde_json::from_slice::<Request>(&input).map_err(|_| "请求格式无效".to_owned())?;
+        let request = serde_json::from_slice::<Request>(&input).map_err(|_| {
+            veil_core::logging::error("bridge", "decode_request", "INVALID_REQUEST");
+            "请求格式无效".to_owned()
+        })?;
         execute(unsafe { &*client }, request)
     }))
     .unwrap_or_else(|_| Err("本次操作未完成，请重新打开容器".into()))
@@ -373,6 +445,12 @@ mod tests {
         #[cfg(debug_assertions)]
         veil_core::kdf::enable_fast_test_kdf();
         let client = veil_client_new();
+        let malformed = br#"{"operation":"unknown","password":"secret-do-not-log"}"#;
+        let buffer = unsafe { veil_client_call(client, malformed.as_ptr(), malformed.len()) };
+        assert_eq!(buffer.kind, 1);
+        unsafe {
+            veil_buffer_free(buffer);
+        }
         let (kind, bytes) = unsafe { call(client, serde_json::json!({"operation":"list_spaces"})) };
         assert_eq!(kind, 0);
         let spaces: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -472,6 +550,27 @@ mod tests {
         );
         assert_eq!(unsafe { call(client, serde_json::json!({"operation":"open_container","path":container["path"],"password":"wrong"})) }.0, 1);
         assert_eq!(unsafe { call(client, serde_json::json!({"operation":"open_container","path":container["path"],"password":"test-password"})) }.0, 0);
+        let exported_logs = veil_logs_export();
+        assert_eq!(exported_logs.kind, 0);
+        let log_bytes = unsafe { slice::from_raw_parts(exported_logs.data, exported_logs.length) };
+        let records: serde_json::Value = serde_json::from_slice(log_bytes).unwrap();
+        let text = String::from_utf8_lossy(log_bytes);
+        assert!(!text.contains("test-password"));
+        assert!(!text.contains("secret-do-not-log"));
+        assert!(!text.contains("说明.txt"));
+        assert!(!text.contains(Path::new(&root).to_str().unwrap()));
+        let records = records.as_array().unwrap();
+        assert!(records.iter().any(|r| r["code"] == "INVALID_REQUEST"));
+        assert!(records.iter().any(|r| {
+            r["operation"] == "ExportSessionFile"
+                && r["code"] == "IO_ALREADY_EXISTS"
+                && r["context"]["phase"].is_string()
+        }));
+        assert!(!records.iter().any(|r| r["code"] == "NOT_OPEN"));
+        assert!(records.iter().any(|r| r["operation"] == "OpenContainer"));
+        unsafe {
+            veil_buffer_free(exported_logs);
+        }
         assert_eq!(
             unsafe {
                 call(

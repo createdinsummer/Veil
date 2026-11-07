@@ -37,7 +37,7 @@ import ImageIO
         busy = true; error = nil
         let ticket = generation
         defer { busy = false }
-        do { try await action(ticket) } catch { if ticket == generation { self.error = error.localizedDescription } }
+        do { try await action(ticket) } catch { AppLog.capture(error); if ticket == generation { self.error = error.localizedDescription } }
     }
     func load() async { await run { _ in
         self.removeStalePreviews()
@@ -58,7 +58,7 @@ import ImageIO
                !spaces.contains(where: { $0.containers.contains(where: { $0.id == container.id }) }) {
                 await lock()
             }
-        } catch { return }
+        } catch { AppLog.capture(error); return }
     }
     /// 先清除界面上的敏感内容，再串行锁定会话并删除应用私有数据。
     func clearLocalData() async {
@@ -73,7 +73,7 @@ import ImageIO
             spaces = []; selectedSpace = ""
             try await reload()
             notice = "本机数据已清理"
-        } catch {
+        } catch { AppLog.capture(error);
             // 清理可能部分完成，重新读取可用状态并如实报告错误。
             spaces = []; selectedSpace = ""
             try? await reload()
@@ -138,7 +138,7 @@ import ImageIO
         case .open: spaceID = nil
         }
         if let spaceID, !spaces.contains(where: { $0.id == spaceID && $0.isAvailable }) {
-            error = "空间当前不可用，请重新连接外置磁盘后再试"
+            error = AppLog.validation("空间当前不可用，请重新连接外置磁盘后再试")
             return false
         }
         var success = false
@@ -159,7 +159,7 @@ import ImageIO
     func lock() async {
         generation += 1; _ = client.cancelTransfer(); completeImportReview(nil); container = nil; preview = nil; export = nil; exportSelection = nil; directory = ""; search = ""; category = nil
         thumbnails.removeAll(); textThumbnails.removeAll(); thumbnailTasks.removeAll(); thumbnailFailures.removeAll()
-        do { try await client.execute(NativeRequest(operation: "lock")) } catch { self.error = error.localizedDescription }
+        do { try await client.execute(NativeRequest(operation: "lock")) } catch { AppLog.capture(error); self.error = error.localizedDescription }
     }
     var importProgressDescription: String? {
         guard let progress = importProgress, progress.total_files > 0 else { return nil }
@@ -197,7 +197,7 @@ import ImageIO
                     guard let resolutions, ticket == generation, !Task.isCancelled else { _ = client.cancelTransfer(); return }
                     try await client.execute(NativeRequest(operation: exporting ? "resolve_export_conflicts" : "resolve_import_conflicts", id: batch.id, resolutions: resolutions))
                 }
-            } catch {
+            } catch { AppLog.capture(error);
                 if ticket == generation, !Task.isCancelled { self.error = error.localizedDescription; _ = client.cancelTransfer() }
                 return
             }
@@ -229,7 +229,7 @@ import ImageIO
                 notice = "导入已中止，已完成 \(progress.completed_files) 个文件（其中跳过 \(progress.skipped_files) 个）"
                 return
             }
-            throw error
+            throw AppLog.recorded(error)
         }
     }
 
@@ -241,7 +241,7 @@ import ImageIO
     /// 相册选择器返回的临时文件在回调结束后可能失效，先复制到受保护的临时目录。
     func importPhotos(_ items: [PhotosPickerItem]) async { await run { ticket in
         var staged: [PhotoImportFile] = []
-        defer { staged.forEach { try? FileManager.default.removeItem(at: $0.url.deletingLastPathComponent()) } }
+        defer { staged.forEach { item in AppLog.attempt({ try FileManager.default.removeItem(at: item.url.deletingLastPathComponent()) }) } }
         for item in items {
             guard ticket == self.generation else { return }
             guard let file = try await item.loadTransferable(type: PhotoImportFile.self) else {
@@ -266,7 +266,7 @@ import ImageIO
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-preview-" + UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
-            defer { try? FileManager.default.removeItem(at: folder) }
+            defer { AppLog.attempt({ try FileManager.default.removeItem(at: folder) }) }
             let url = folder.appendingPathComponent(file.leafName)
             try await client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
             guard ticket == generation, !Task.isCancelled else { return }
@@ -288,7 +288,7 @@ import ImageIO
                 let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
                 generator.appliesPreferredTrackTransform = true
                 generator.maximumSize = CGSize(width: 360, height: 360)
-                if let result = try? await generator.image(at: .zero) { image = UIImage(cgImage: result.image) }
+                if let result = await AppLog.attemptAsync({ try await generator.image(at: .zero) }) { image = UIImage(cgImage: result.image) }
                 else { image = nil }
             }
             guard ticket == generation, !Task.isCancelled else { return }
@@ -296,7 +296,7 @@ import ImageIO
                 if thumbnails.count >= 120, let oldest = thumbnails.keys.first { thumbnails.removeValue(forKey: oldest) }
                 thumbnails[key] = image
             } else { thumbnailFailures.insert(key) }
-        } catch {
+        } catch { AppLog.capture(error);
             if ticket == generation, !Task.isCancelled { thumbnailFailures.insert(key) }
         }
     }
@@ -330,17 +330,26 @@ import ImageIO
                 self.notice = "导出已中止，已导出的文件已保留"
                 return
             }
-            throw error
+            throw AppLog.recorded(error)
         }
         if ticket == self.generation, let progress = self.client.transferProgress() {
             self.notice = "导出完成 \(progress.completed_files - progress.skipped_files) 个文件，跳过 \(progress.skipped_files) 个文件"
         }
     } }
 
+    func prepareErrorLogExport() {
+        do {
+            export = ExportItem(name: "Veil-错误日志.json", document: ExportDocument(data: try AppLog.export()))
+        } catch {
+            AppLog.capture(error)
+            self.error = error.localizedDescription
+        }
+    }
+
     func prepareExport(_ file: FileEntry? = nil) async { await run { ticket in
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-export-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
-        defer { try? FileManager.default.removeItem(at: folder) }
+        defer { AppLog.attempt({ try FileManager.default.removeItem(at: folder) }) }
         let filename = file?.leafName ?? ((self.container?.name ?? "Veil").replacingOccurrences(of: "/", with: "_") + ".veil")
         let destination = folder.appendingPathComponent(filename)
         if let file { try await self.streamExport([file.name], to: destination, ticket: ticket) }
@@ -354,12 +363,12 @@ import ImageIO
         let isImage = file.category == .photo || type?.conforms(to: .image) == true
         let isVideo = file.category == .video || type?.conforms(to: .movie) == true
         if !isImage && !isVideo && file.size > 8 * 1024 * 1024 {
-            throw ClientError.message("文本文件超过 8 MB，请导出后查看。")
+            throw ClientError.unsupportedContent("文本文件超过 8 MB，请导出后查看。")
         }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-preview-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
         var retained = false
-        defer { if !retained { try? FileManager.default.removeItem(at: folder) } }
+        defer { if !retained { AppLog.attempt({ try FileManager.default.removeItem(at: folder) }) } }
         let url = folder.appendingPathComponent(file.leafName)
         try await self.client.execute(NativeRequest(operation: "export_file", name: file.name, destination: url.path))
         guard ticket == self.generation else { return }
@@ -368,7 +377,7 @@ import ImageIO
             retained = true
         } else {
             let data = try Data(contentsOf: url)
-            guard let text = Self.decodeText(data) else { throw ClientError.message("此文件不是支持的文本格式，请导出后使用其他应用打开。") }
+            guard let text = Self.decodeText(data) else { throw ClientError.unsupportedContent("此文件不是支持的文本格式，请导出后使用其他应用打开。") }
             self.preview = PreviewItem(file: file, content: .text(text), temporaryFolder: nil)
         }
     } }
@@ -384,8 +393,8 @@ import ImageIO
     }
     private func removeStalePreviews() {
         let manager = FileManager.default
-        guard let items = try? manager.contentsOfDirectory(at: manager.temporaryDirectory, includingPropertiesForKeys: nil) else { return }
-        for item in items where item.lastPathComponent.hasPrefix("veil-preview-") { try? manager.removeItem(at: item) }
+        guard let items = AppLog.attempt({ try manager.contentsOfDirectory(at: manager.temporaryDirectory, includingPropertiesForKeys: nil) }) else { return }
+        for item in items where item.lastPathComponent.hasPrefix("veil-preview-") { AppLog.attempt({ try manager.removeItem(at: item) }) }
     }
 }
 struct PreviewItem: Identifiable {
@@ -394,7 +403,7 @@ struct PreviewItem: Identifiable {
     let file: FileEntry
     let content: Content
     let temporaryFolder: URL?
-    func removeTemporaryFiles() { if let temporaryFolder { try? FileManager.default.removeItem(at: temporaryFolder) } }
+    func removeTemporaryFiles() { if let temporaryFolder { AppLog.attempt({ try FileManager.default.removeItem(at: temporaryFolder) }) } }
 }
 
 struct ExportItem: Identifiable { let id = UUID(); let name: String; let document: ExportDocument }
@@ -421,8 +430,8 @@ private struct PhotoImportFile: Transferable {
             try manager.copyItem(at: received.file, to: destination)
             return PhotoImportFile(url: destination)
         } catch {
-            try? manager.removeItem(at: folder)
-            throw error
+            AppLog.attempt({ try manager.removeItem(at: folder) })
+            throw AppLog.recorded(error)
         }
     }
 }

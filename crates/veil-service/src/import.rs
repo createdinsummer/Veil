@@ -17,6 +17,18 @@ pub enum ImportError {
     DirectoryRead { path: PathBuf, error: String },
 }
 
+impl ImportError {
+    pub(crate) fn log_code(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "CANCELLED",
+            Self::SourceNotFound(..) => "SOURCE_NOT_FOUND",
+            Self::NotFile(..) => "NOT_FILE",
+            Self::InvalidDestination(..) => "INVALID_DESTINATION",
+            Self::DirectoryRead { .. } => "DIRECTORY_READ",
+        }
+    }
+}
+
 /// 将文件或目录展开为工作区添加请求。
 pub fn collect_add_specs(
     source: &Path,

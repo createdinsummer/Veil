@@ -38,6 +38,17 @@ fn ensure_stdout_fd_open() -> io::Result<()> {
 
 /// 输出失败时报告稳定 I/O 错误并以非零状态退出。
 pub fn exit_for_output_error(error: io::Error) -> ! {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        veil_core::logging::record(
+            veil_core::logging::Level::Info,
+            "cli",
+            "write_output",
+            "OUTPUT_CLOSED",
+        );
+    } else {
+        veil_core::logging::error_chain("cli", "write_output", &error);
+    }
+    let _ = veil_core::logging::flush();
     let stderr = io::stderr();
     let mut output = stderr.lock();
     let _ = writeln!(output, "❌ 错误 [9001]: I/O 错误: {error}");

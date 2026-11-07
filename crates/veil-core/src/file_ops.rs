@@ -587,7 +587,19 @@ fn publish_atomic_output(
                 .map_err(|error| VeilError::Io(error.error))?;
         }
     }
-    let _ = crate::fsutil::sync_directory(parent);
+    if let Err(error) = crate::fsutil::sync_directory(parent) {
+        crate::logging::failure(
+            crate::logging::Level::Warn,
+            "storage",
+            "sync_published_content",
+            "PUBLISHED_DIRECTORY_SYNC_FAILED",
+            &error,
+            &[
+                ("destination", crate::logging::Field::Path(destination_path)),
+                ("published", crate::logging::Field::Label("true")),
+            ],
+        );
+    }
     Ok(())
 }
 

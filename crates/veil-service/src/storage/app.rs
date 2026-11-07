@@ -28,8 +28,11 @@ pub fn configure_app_data_dir(path: PathBuf) -> Result<()> {
         return Err(invalid("应用目录必须是绝对路径"));
     }
     PLATFORM_DIRECTORY
-        .set(path)
-        .map_err(|_| invalid("应用目录已初始化"))
+        .set(path.clone())
+        .map_err(|_| invalid("应用目录已初始化"))?;
+    // 日志不可用不能阻止应用目录初始化；日志后端通过 health 暴露失败。
+    let _ = veil_core::logging::set_directory(path.join("logs"));
+    Ok(())
 }
 pub fn app_data_dir() -> Result<PathBuf> {
     if let Some(path) = PLATFORM_DIRECTORY.get() {
@@ -225,15 +228,103 @@ impl AppStore {
 
         let mut files = Vec::with_capacity(overlapping.len());
         for identity in overlapping {
-            let file = self.open_space_lock_file(identity)?;
-            if exclusive {
-                file.lock()?;
-            } else {
-                file.lock_shared()?;
-            }
+            let file = self.open_space_lock_file(identity).map_err(|error| {
+                veil_core::logging::failure(
+                    veil_core::logging::Level::Error,
+                    "storage",
+                    "space_lock",
+                    "SPACE_LOCK_OPEN_FAILED",
+                    &error,
+                    &[
+                        ("resource", veil_core::logging::Field::Resource(identity)),
+                        (
+                            "mode",
+                            veil_core::logging::Field::Label(if exclusive {
+                                "exclusive"
+                            } else {
+                                "shared"
+                            }),
+                        ),
+                        ("phase", veil_core::logging::Field::Label("open_lock_file")),
+                    ],
+                );
+                error
+            })?;
+            Self::lock_space_file(&file, identity, exclusive)?;
             files.push(file);
         }
         Ok(files)
+    }
+
+    fn lock_space_file(file: &std::fs::File, identity: &str, exclusive: bool) -> Result<()> {
+        use veil_core::logging::{self, Field, Level};
+        let mode = if exclusive { "exclusive" } else { "shared" };
+        let initial = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        let (result, waiting) = match initial {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::Error(error)) => (Err(error), None),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let started = std::time::Instant::now();
+                logging::event(
+                    Level::Warn,
+                    "storage",
+                    "space_lock",
+                    "SPACE_LOCK_WAITING",
+                    "空间锁被其他操作持有，开始等待",
+                    &[
+                        ("resource", Field::Resource(identity)),
+                        ("mode", Field::Label(mode)),
+                        ("phase", Field::Label("acquire_os_lock")),
+                        ("outcome", Field::Label("waiting")),
+                    ],
+                );
+                // 保留原协议的阻塞等待和锁顺序；日志不引入业务超时。
+                (
+                    if exclusive {
+                        file.lock()
+                    } else {
+                        file.lock_shared()
+                    },
+                    Some(started),
+                )
+            }
+        };
+        if let Err(error) = &result {
+            logging::failure(
+                Level::Error,
+                "storage",
+                "space_lock",
+                "SPACE_LOCK_ACQUIRE_FAILED",
+                error,
+                &[
+                    ("resource", Field::Resource(identity)),
+                    ("mode", Field::Label(mode)),
+                    ("phase", Field::Label("acquire_os_lock")),
+                    ("outcome", Field::Label("not_acquired")),
+                ],
+            );
+        } else if let Some(started) = waiting {
+            if started.elapsed() >= std::time::Duration::from_secs(1) {
+                logging::event(
+                    Level::Warn,
+                    "storage",
+                    "space_lock",
+                    "SPACE_LOCK_RECOVERED",
+                    "空间锁等待结束，已取得锁",
+                    &[
+                        ("resource", Field::Resource(identity)),
+                        ("mode", Field::Label(mode)),
+                        ("elapsed_ms", Field::Duration(started.elapsed())),
+                        ("outcome", Field::Label("acquired")),
+                    ],
+                );
+            }
+        }
+        result.map_err(Into::into)
     }
 
     fn open_space_lock_file(&self, identity: &str) -> Result<std::fs::File> {

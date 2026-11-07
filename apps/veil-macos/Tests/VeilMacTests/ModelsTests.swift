@@ -5,6 +5,54 @@ import UniformTypeIdentifiers
 @testable import VeilMac
 
 final class ModelsTests: XCTestCase {
+    func testClientErrorsKeepCodesWithoutPersistingUserText() throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil else {
+            throw XCTSkip("日志集成测试需要独立的测试目录")
+        }
+        func records() throws -> [[String: Any]] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: AppLog.export()) as? [[String: Any]])
+        }
+        let initialCount = try records().count
+        let secret = "文件读取失败 password=secret-password /Users/private/confidential.txt"
+        let underlying = NSError(domain: NSPOSIXErrorDomain, code: 13,
+                                 userInfo: [NSLocalizedDescriptionKey: "原始文档内容及私人账号"])
+        AppLog.capture(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError,
+                               userInfo: [NSLocalizedDescriptionKey: secret,
+                                          NSUnderlyingErrorKey: underlying]))
+        XCTAssertEqual(AppLog.validation(secret), secret)
+        let captured = AppLog.recorded(ClientError.local(secret))
+        AppLog.capture(captured)
+        AppLog.capture(CancellationError())
+        AppLog.capture(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+        AppLog.capture(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        AppLog.capture(ClientError.service(secret))
+        AppLog.capture(ClientError.unsupportedContent(secret))
+        let result = try records()
+        XCTAssertEqual(result.count - initialCount, 2)
+        XCTAssertEqual(result.last?["source_file"] as? String, "ModelsTests.swift")
+        let text = String(decoding: try AppLog.export(), as: UTF8.self)
+        XCTAssertFalse(text.contains("secret-password"))
+        XCTAssertFalse(text.contains("/Users/private"))
+        XCTAssertFalse(text.contains("文件读取失败"))
+        XCTAssertFalse(text.contains("原始文档内容及私人账号"))
+        XCTAssertTrue(text.contains("Cocoa code=260"))
+        XCTAssertTrue(text.contains("POSIX code=13"))
+        XCTAssertTrue(result.contains { ($0["native_code"] as? Int) == NSFileReadNoSuchFileError })
+    }
+
+    func testDecodingDiagnosticsOmitPayloadAndFieldNames() throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil else {
+            throw XCTSkip("日志集成测试需要独立的测试目录")
+        }
+        let secret = "客户完整私人数据无扩展名"
+        let error = DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: secret))
+        AppLog.capture(error)
+        let data = try AppLog.export()
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains(secret))
+        XCTAssertTrue(text.contains("corrupted_data"))
+    }
+
     private func file(_ path: String, category: FileCategory = .document) -> FileEntry {
         FileEntry(id: path, name: path, size: 32, version: 1, encryptedAt: "2026-11-04T12:00:00Z", category: category, previewMime: "text/plain")
     }
@@ -122,8 +170,9 @@ final class NativeClientTests: XCTestCase {
         await store.submit(.create(space: originalSpace.id), name: "导航测试 " + UUID().uuidString,
                            password: "navigation-test-password", confirmation: "navigation-test-password")
         let previous = try XCTUnwrap(store.container)
-        await store.createSpace(name: "目标空间 " + UUID().uuidString)
-        let target = try XCTUnwrap(store.spaces.first { $0.id != originalSpace.id })
+        let targetName = "目标空间 " + UUID().uuidString
+        await store.createSpace(name: targetName)
+        let target = try XCTUnwrap(store.spaces.first { $0.name == targetName })
         await store.newContainer(in: target.id)
         XCTAssertNil(store.container)
         XCTAssertEqual(store.activeSpace?.id, target.id)

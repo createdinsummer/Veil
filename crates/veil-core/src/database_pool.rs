@@ -106,11 +106,20 @@ struct Manager {
     invalid: Arc<AtomicBool>,
     seed: Mutex<Option<NativeConnection>>,
     failure: Arc<Mutex<Option<PoolFailure>>>,
+    reported_failure: AtomicBool,
 }
 impl ManageConnection for Manager {
     type Connection = NativeConnection;
     type Error = VeilError;
     fn connect(&self) -> Result<NativeConnection> {
+        let _secrets = crate::logging::sensitive_scope(
+            &self
+                .password
+                .as_deref()
+                .map(|value| value.as_str())
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
         if self.invalid.load(Ordering::Acquire) {
             return Err(VeilError::DatabasePool("连接池已关闭".into()));
         }
@@ -124,6 +133,16 @@ impl ManageConnection for Manager {
             database::BUSY_TIMEOUT,
         );
         if let Err(error) = &result {
+            if !self.reported_failure.swap(true, Ordering::Relaxed) {
+                crate::logging::failure(
+                    crate::logging::Level::Warn,
+                    "database",
+                    "pool_connect",
+                    "DB_CONNECT_FAILED",
+                    error,
+                    &[("database", crate::logging::Field::Path(&self.path))],
+                );
+            }
             let failure = match error {
                 VeilError::DecryptionError(message) => {
                     Some(PoolFailure::Decryption(message.clone()))
@@ -135,6 +154,8 @@ impl ManageConnection for Manager {
                 *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(failure);
                 self.invalid.store(true, Ordering::Release);
             }
+        } else {
+            self.reported_failure.store(false, Ordering::Relaxed);
         }
         result
     }
@@ -184,7 +205,9 @@ impl Drop for Connection {
     fn drop(&mut self) {
         // 手动 BEGIN 的错误路径不能将未结束事务交给下一位借用者。
         if !self.inner.is_autocommit() {
-            let _ = self.inner.execute_batch("ROLLBACK");
+            if let Err(error) = self.inner.execute_batch("ROLLBACK") {
+                crate::logging::error_with_code("database", "rollback", "ROLLBACK_FAILED", &error);
+            }
         }
     }
 }
@@ -245,6 +268,7 @@ pub(crate) fn open(
                 invalid: slot.invalid.clone(),
                 seed: Mutex::new(Some(seed)),
                 failure: slot.failure.clone(),
+                reported_failure: AtomicBool::new(false),
             };
             *pool = Some(
                 Pool::builder()
@@ -256,6 +280,7 @@ pub(crate) fn open(
         }
         pool.as_ref().unwrap().clone()
     };
+    let checkout_started = Instant::now();
     let inner = pool
         .get_timeout(timeout.max(Duration::from_millis(1)))
         .map_err(|_| {
@@ -275,6 +300,41 @@ pub(crate) fn open(
                     Some("数据库连接池忙，请重试".into()),
                 )),
             }
+        })
+        .inspect_err(|error| {
+            let state = pool.state();
+            crate::logging::failure(
+                // 目录锁的短轮询会重试 BUSY，最终结果由操作边界记录。
+                if matches!(error, VeilError::Database(error) if busy(error)) {
+                    crate::logging::Level::Debug
+                } else {
+                    crate::logging::Level::Error
+                },
+                "database",
+                "checkout",
+                "POOL_CHECKOUT_FAILED",
+                error,
+                &[
+                    ("database", crate::logging::Field::Path(path)),
+                    (
+                        "elapsed_ms",
+                        crate::logging::Field::Duration(checkout_started.elapsed()),
+                    ),
+                    ("timeout_ms", crate::logging::Field::Duration(timeout)),
+                    (
+                        "pool_connections",
+                        crate::logging::Field::Count(state.connections as u64),
+                    ),
+                    (
+                        "pool_idle",
+                        crate::logging::Field::Count(state.idle_connections as u64),
+                    ),
+                    (
+                        "pool_limit",
+                        crate::logging::Field::Count(MAX_CONNECTIONS as u64),
+                    ),
+                ],
+            );
         })?;
     let connection = Connection { inner };
     connection.busy_timeout(timeout)?;

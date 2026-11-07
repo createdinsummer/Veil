@@ -317,6 +317,12 @@ enum Commands {
         output: Option<String>,
     },
 
+    /// 将本地诊断日志导出为 JSON 文件（不发送网络请求）。
+    Logs {
+        #[arg(short, long, value_name = "输出文件")]
+        output: Option<std::path::PathBuf>,
+    },
+
     /// 显示命令或文件类型帮助
     Help {
         // 可选的帮助主题，例如 `files`。
@@ -669,7 +675,7 @@ fn build_localized_command() -> clap::Command {
     // clap 的内置 help 参数无法本地化；先禁用，再为每个子命令注入当前语言版本。
     for command in [
         "init", "add", "rm", "mv", "free", "ex", "info", "list", "exists", "passwd", "shell",
-        "pack", "unpack", "config", "link", "help",
+        "pack", "unpack", "config", "link", "logs", "help",
     ] {
         cmd = cmd.mut_subcommand(command, |sub| {
             sub.disable_help_flag(true).arg(localized_help_arg())
@@ -764,7 +770,7 @@ fn print_all_help(command: &clap::Command) -> crate::error::Result<()> {
 /// 该函数用于 clap 解析完成后的必填参数校验；固定以状态码 1 退出。
 fn exit_with_help(code: crate::error::ErrorCode, cmd_name: &str) -> ! {
     let error = crate::error::CommandError::coded(code);
-    eprintln!("{}", error.render());
+    eprintln!("{}", error.report());
     eprintln!("\n{}:", i18n::t("label.usage"));
     eprintln!("  {}", cmd_usage(cmd_name));
     eprintln!("  {}", cmd_usage_opt(cmd_name));
@@ -782,6 +788,17 @@ fn parse_matches(mut command: clap::Command) -> clap::ArgMatches {
 /// 将 clap 的解析错误转换为本地化提示。
 fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if !matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        veil_core::logging::record(
+            veil_core::logging::Level::Info,
+            "cli",
+            "parse_arguments",
+            "INVALID_ARGUMENTS",
+        );
+    }
 
     /// 读取 clap 上下文字段，并转换为可直接显示的用户文本。
     fn context_text(value: Option<&ContextValue>) -> Option<String> {
@@ -822,7 +839,7 @@ fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "?".to_string());
             let error = crate::cli_error!(UnknownArgument, "arg" => argument);
-            eprintln!("{}", error.render());
+            eprintln!("{}", error.report());
             print_usage_and_exit(command, error.exit_code().into());
         }
         ErrorKind::ArgumentConflict => {
@@ -839,12 +856,12 @@ fn handle_clap_error(error: clap::Error, command: &mut clap::Command) -> ! {
                 (Some(arg), None) => crate::cli_error!(ArgumentConflictSingle, "arg" => arg),
                 _ => crate::cli_error!(InvalidArguments),
             };
-            eprintln!("{}", mapped.render());
+            eprintln!("{}", mapped.report());
             print_usage_and_exit(command, mapped.exit_code().into());
         }
         _ => {
             let error = crate::cli_error!(InvalidArguments);
-            eprintln!("{}", error.render());
+            eprintln!("{}", error.report());
             print_usage_and_exit(command, error.exit_code().into());
         }
     }
@@ -881,6 +898,7 @@ fn show_version_banner() {
 ///
 /// 子命令错误会转换为本地化消息并按失败状态退出；成功路径返回状态码 0。
 fn main() {
+    veil_core::logging::initialize();
     // Windows: 启用 UTF-8 控制台模式（Windows 10+ 支持）
     #[cfg(target_os = "windows")]
     {
@@ -904,6 +922,8 @@ fn main() {
     let cmd = build_localized_command();
     let matches = parse_matches(cmd.clone());
     let cli = Cli::from_arg_matches(&matches).expect("参数解析失败");
+    let _request = veil_core::logging::request_scope();
+    let _secrets = veil_core::logging::sensitive_scope(&[]);
 
     // clap 已完成类型解析；这里只负责把位置参数和选项参数合并成命令层输入。
     let result = match cli.command {
@@ -1124,6 +1144,8 @@ fn main() {
         // link 根据目标解析结果复制或重新生成链接文件。
         Commands::Link { target, output } => commands::link::run(&target, output.as_deref()),
 
+        Commands::Logs { output } => commands::logs::run(output),
+
         // help 支持专门的文件类型主题，未给主题则打印顶层帮助。
         Commands::Help { topic, all } => {
             if all {
@@ -1161,7 +1183,9 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{}", e.render());
+        eprintln!("{}", e.report());
+        let _ = veil_core::logging::flush();
         std::process::exit(e.exit_code().into());
     }
+    let _ = veil_core::logging::flush();
 }

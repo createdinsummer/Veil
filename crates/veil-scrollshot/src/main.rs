@@ -130,9 +130,11 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn main() -> std::process::ExitCode {
+    veil_core::logging::initialize();
     match run(Args::parse()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
+            veil_core::logging::error_chain("scrollshot", "capture", error.as_ref());
             eprintln!("错误：{error:#}");
             std::process::ExitCode::FAILURE
         }

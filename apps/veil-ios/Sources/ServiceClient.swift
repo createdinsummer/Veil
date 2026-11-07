@@ -14,7 +14,6 @@ struct NativeRequest: Encodable, Sendable {
     var destination: String? = nil
 }
 
-
 struct ImportConflict: Decodable, Identifiable, Sendable {
     let target: String
     let sameContent: Bool
@@ -42,7 +41,15 @@ struct ImportResolution: Encodable, Sendable {
 
 enum ClientError: LocalizedError {
     case message(String)
-    var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
+    case service(String)
+    case unsupportedContent(String)
+    case invalidResponse
+    var errorDescription: String? {
+        switch self {
+        case .message(let text), .service(let text), .unsupportedContent(let text): return text
+        case .invalidResponse: return "服务响应无效"
+        }
+    }
 }
 
 struct ImportTransferProgress: Decodable {
@@ -59,8 +66,11 @@ struct ImportTransferProgress: Decodable {
 private final class RustHandle: @unchecked Sendable {
     let pointer: OpaquePointer?
     init() {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Veil", isDirectory: true)
-        pointer = directory.path.withCString({ veil_configure_app_data_dir($0) }) ? veil_client_new() : nil
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent(
+                "Veil", isDirectory: true)
+        pointer =
+            directory.path.withCString({ veil_configure_app_data_dir($0) }) ? veil_client_new() : nil
     }
     deinit { if let pointer { veil_client_free(pointer) } }
 }
@@ -76,40 +86,75 @@ actor ServiceClient {
         let response = veil_client_progress(pointer)
         defer { veil_buffer_free(response) }
         guard response.kind == 0, let data = response.data else { return nil }
-        return try? JSONDecoder().decode(ImportTransferProgress.self, from: Data(bytes: data, count: response.length))
+        let bytes = Data(bytes: data, count: response.length)
+        if bytes == Data("null".utf8) { return nil }
+        do { return try JSONDecoder().decode(ImportTransferProgress.self, from: bytes) } catch {
+            AppLog.capture(error)
+            return nil
+        }
     }
     private func perform(_ request: NativeRequest) async throws -> (UInt32, Data) {
         let rust = self.rust
-        return try await Task.detached {
-        guard let handle = rust.pointer else { throw ClientError.message("无法初始化服务") }
-        var input = try JSONEncoder().encode(request)
-        defer { input.resetBytes(in: 0..<input.count) }
-        let result = input.withUnsafeBytes { veil_client_call(handle, $0.bindMemory(to: UInt8.self).baseAddress, input.count) }
-        defer { veil_buffer_free(result) }
-        guard let bytes = result.data else { throw ClientError.message("服务响应无效") }
-        let data = Data(bytes: bytes, count: result.length)
-        if result.kind == 1 { throw ClientError.message(String(decoding: data, as: UTF8.self)) }
-        return (result.kind, data)
-        }.value
+        do {
+            return try await Task.detached {
+                guard let handle = rust.pointer else { throw ClientError.message("无法初始化服务") }
+                var input = try JSONEncoder().encode(request)
+                defer { input.resetBytes(in: 0..<input.count) }
+                let result = input.withUnsafeBytes {
+                    veil_client_call(handle, $0.bindMemory(to: UInt8.self).baseAddress, input.count)
+                }
+                defer { veil_buffer_free(result) }
+                guard let bytes = result.data else { throw ClientError.invalidResponse }
+                let data = Data(bytes: bytes, count: result.length)
+                if result.kind == 1 { throw ClientError.service(String(decoding: data, as: UTF8.self)) }
+                return (result.kind, data)
+            }.value
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
     func json<T: Decodable>(_ request: NativeRequest, as: T.Type = T.self) async throws -> T {
-        let (kind, data) = try await perform(request)
-        guard kind == 0 else { throw ClientError.message("服务响应无效") }
-        return try JSONDecoder().decode(T.self, from: data)
+        do {
+            let (kind, data) = try await perform(request)
+            guard kind == 0 else { throw ClientError.invalidResponse }
+            return try JSONDecoder().decode(T.self, from: data)
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
-    func execute(_ request: NativeRequest) async throws { _ = try await perform(request) }
+    func execute(_ request: NativeRequest) async throws {
+        do {
+            let (kind, _) = try await perform(request)
+            guard kind == 0 || (kind == 4 && request.operation == "export_file") else {
+                throw ClientError.invalidResponse
+            }
+        } catch {
+            throw AppLog.recorded(error)
+        }
+    }
     /// 在服务调用队列中锁定容器，再清除应用私有数据。
     func clearLocalData() async throws {
-        try await execute(NativeRequest(operation: "lock"))
-        let files = FileManager.default
-        let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let caches = files.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        try clearVeilLocalData(support: support, caches: caches, temporary: files.temporaryDirectory)
+        do {
+            try await execute(NativeRequest(operation: "lock"))
+            let files = FileManager.default
+            let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let caches = files.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            try clearVeilLocalData(support: support, caches: caches, temporary: files.temporaryDirectory)
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
     func preview(_ name: String) async throws -> Data {
-        let (kind, data) = try await perform(NativeRequest(operation: "preview_file", name: name))
-        guard kind == 2 || kind == 3 else { throw ClientError.message("服务响应无效") }
-        return data
+        do {
+            let (kind, data) = try await perform(NativeRequest(operation: "preview_file", name: name))
+            guard kind == 2 || kind == 3 else { throw ClientError.invalidResponse }
+            return data
+
+        } catch {
+            throw AppLog.recorded(error)
+        }
     }
 }
 

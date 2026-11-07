@@ -33,9 +33,11 @@ fn drive<W: Send, R: Send>(
 ) -> Result<R, ServiceError> {
     let _scope = progress.begin(operation);
     report(progress.snapshot());
+    let logging_context = veil_core::logging::capture_context();
     let result = std::thread::scope(|scope| {
         let _cancel_on_unwind = CancelOnUnwind(progress);
         let worker = scope.spawn(|| {
+            let _logging = logging_context.attach();
             let _attachment = progress.attach();
             work()
         });

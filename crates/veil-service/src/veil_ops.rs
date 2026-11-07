@@ -258,6 +258,20 @@ impl VeilManager {
         Ok(db)
     }
     fn refresh_local_cache(&self, db: &ContainerDb) -> Result<()> {
+        let result = self.refresh_local_cache_inner(db);
+        if let Err(error) = &result {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "service",
+                "refresh_local_cache",
+                "REFRESH_LOCAL_CACHE_FAILED",
+                error,
+                &[("database", veil_core::logging::Field::Path(&self.veil_dir))],
+            );
+        }
+        result
+    }
+    fn refresh_local_cache_inner(&self, db: &ContainerDb) -> Result<()> {
         use crate::storage::app::{AppStore, RecentContainer, app_data_dir};
         let directory = app_data_dir()?;
         if !directory.join(veil_core::database::APP_DB).try_exists()? {
@@ -991,10 +1005,15 @@ impl VeilManager {
                 Ok(true)
             });
             if !matches!(confirmed, Ok(true)) {
+                log_commit_confirmation(&self.veil_dir, pending.len(), false);
                 return Err(VeilError::CommitUncertain(std::io::Error::other(
                     "无法确认文件写入事务结果，请重新读取容器状态",
                 )));
             }
+            log_commit_confirmation(&self.veil_dir, pending.len(), true);
+        }
+        if let Some(guard) = &own_guard {
+            guard.released_in_transaction();
         }
         fault("after_metadata_commit");
         // 本次写入的临时目录通常已空；仅尝试删除空目录，不碰其他任务的文件。
@@ -1025,7 +1044,7 @@ impl VeilManager {
                         .credentials()
                         .map_err(|error| VeilError::ImportBatchFailed {
                             file: item.target().to_owned(),
-                            message: error.to_string(),
+                            source: Box::new(error),
                         })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1064,7 +1083,7 @@ impl VeilManager {
                             .map_err(|error| {
                                 VeilError::ImportBatchFailed {
                                     file: file.spec.target.clone(),
-                                    message: error.to_string(),
+                                    source: Box::new(error),
                                 }
                             })?;
                         }
@@ -1111,11 +1130,19 @@ impl VeilManager {
                         }
                         Ok(true)
                     });
+                    let files = batch.iter().map(|item| item.pending.len()).sum();
                     if !matches!(confirmed, Ok(true)) {
+                        log_commit_confirmation(&self.veil_dir, files, false);
                         return Err(VeilError::CommitUncertain(error));
                     }
+                    log_commit_confirmation(&self.veil_dir, files, true);
                 }
                 other => other?,
+            }
+            for item in &batch {
+                if item.release_owned {
+                    item.guard.released_in_transaction();
+                }
             }
             fault("after_metadata_commit");
             Ok(())
@@ -1460,6 +1487,7 @@ impl VeilManager {
         }
         tx.execute("WITH RECURSIVE tree(id) AS (SELECT id FROM file_info WHERE id=?1 UNION ALL SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.id) DELETE FROM file_info WHERE id IN (SELECT id FROM tree)",[&node.id])?;
         tx.commit()?;
+        guard.released_in_transaction();
         drop(db);
         drop(guard);
         let _ = self.cleanup(password);
@@ -1534,6 +1562,20 @@ impl VeilManager {
     }
     /// 仅清理由本协议命名的无引用对象；删除前持写事务重新核对运行锁及引用。
     pub fn cleanup(&self, password: &str) -> Result<usize> {
+        let result = self.cleanup_inner(password);
+        if let Err(error) = &result {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "service",
+                "cleanup",
+                "CLEANUP_FAILED",
+                error,
+                &[("database", veil_core::logging::Field::Path(&self.veil_dir))],
+            );
+        }
+        result
+    }
+    fn cleanup_inner(&self, password: &str) -> Result<usize> {
         let mut db = self.open_db(password)?;
         let dead = locks::dead_locks(&db.conn)?;
         // 初始快照中仍被引用的密文可以直接保留；未引用候选仍须在写事务内复核。
@@ -1734,6 +1776,7 @@ impl VeilManager {
             tx.execute("UPDATE file_info SET cipher_name=?1,key_id=?2,nonce=?3,encrypted_at=?4 WHERE id=?5",params![cipher,active_id,nonce.as_slice(),now(),identity])?;
             locks::release_in(&tx, &c)?;
             tx.commit()?;
+            guard.released_in_transaction();
             drop(guard);
             fault("after_rotation_file");
         }
@@ -1941,6 +1984,30 @@ pub fn normalize_veil_dir(path: &str) -> Result<String> {
     }
     Ok(parts.join("/"))
 }
+fn log_commit_confirmation(directory: &Path, files: usize, confirmed: bool) {
+    use veil_core::logging::{self, Field, Level};
+    logging::event(
+        if confirmed { Level::Warn } else { Level::Error },
+        "service",
+        "confirm_file_commit",
+        if confirmed {
+            "FILE_COMMIT_RECOVERED"
+        } else {
+            "FILE_COMMIT_UNCONFIRMED"
+        },
+        "文件写入提交异常后的状态核对",
+        &[
+            ("database", Field::Path(directory)),
+            ("file_count", Field::Count(files as u64)),
+            ("phase", Field::Label("verify_metadata_references")),
+            (
+                "outcome",
+                Field::Label(if confirmed { "committed" } else { "unknown" }),
+            ),
+        ],
+    );
+}
+
 fn fault(stage: &str) {
     #[cfg(any(test, feature = "fault-injection"))]
     {

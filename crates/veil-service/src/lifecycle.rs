@@ -81,10 +81,61 @@ pub(crate) fn create_registered_container(
             .map_err(CreationError::Link)?;
         Ok(())
     })();
-    if result.is_err() && !initialized {
-        let _ = std::fs::remove_dir_all(veil_dir);
-        if !work_root_existed && work_root != veil_dir {
-            let _ = std::fs::remove_dir(work_root);
+    if let Err(error) = &result {
+        use veil_core::logging::{self, Field, Level};
+        if initialized {
+            logging::event(
+                Level::Error,
+                "service",
+                "create_container",
+                "CONTAINER_CREATE_PARTIAL",
+                "容器已初始化，但本机登记未完成；已保留容器数据",
+                &[
+                    ("database", Field::Path(veil_dir)),
+                    (
+                        "phase",
+                        Field::Label(if matches!(error, CreationError::Link(_)) {
+                            "register_link"
+                        } else {
+                            "register_container"
+                        }),
+                    ),
+                    ("outcome", Field::Label("initialized_data_preserved")),
+                ],
+            );
+        } else {
+            if let Err(cleanup) = std::fs::remove_dir_all(veil_dir) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    logging::failure(
+                        Level::Warn,
+                        "service",
+                        "create_rollback",
+                        "CREATE_CLEANUP_FAILED",
+                        &cleanup,
+                        &[
+                            ("resource", Field::Path(veil_dir)),
+                            ("outcome", Field::Label("directory_preserved")),
+                        ],
+                    );
+                }
+            }
+            if !work_root_existed && work_root != veil_dir {
+                if let Err(cleanup) = std::fs::remove_dir(work_root) {
+                    if !matches!(
+                        cleanup.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) {
+                        logging::failure(
+                            Level::Warn,
+                            "service",
+                            "create_rollback",
+                            "WORK_ROOT_CLEANUP_FAILED",
+                            &cleanup,
+                            &[("resource", Field::Path(work_root))],
+                        );
+                    }
+                }
+            }
         }
     }
     result

@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
     @Environment(\.scenePhase) private var phase
     var body: some Scene {
         WindowGroup { RootView().environmentObject(store).task { await store.load() } }
-            .onChange(of: phase) { _, value in if value == .background { Task { await store.lock() } } }
+            .onChange(of: phase) { _, value in if value == .background { Task { await store.lock(); AppLog.flush() } } }
     }
 }
 
@@ -70,6 +70,7 @@ struct RootView: View {
                             Button("导入加密备份", systemImage: "square.and.arrow.down") { importingPackage = true }
                                 .disabled(store.space?.isAvailable != true)
                             Divider()
+                            Button("导出错误日志", systemImage: "doc.text") { store.prepareErrorLogExport() }
                             Button("清理数据", systemImage: "trash", role: .destructive) { confirmClearData = true }
                         } else {
                             Button("从文件添加", systemImage: "folder") { importing = true }
@@ -120,9 +121,10 @@ struct RootView: View {
             let entry = store.exportSelection
             store.exportSelection = nil
             if case .success(let url) = result, let entry { Task { await store.exportToDirectory(entry, destination: url) } }
+            if case .failure(let error) = result { AppLog.capture(error); store.error = error.localizedDescription }
         }
         .fileExporter(isPresented: Binding(get: { store.export != nil }, set: { if !$0 { store.export = nil } }), document: store.export?.document, contentType: .data, defaultFilename: store.export?.name ?? "Veil") { result in
-            if case .failure(let error) = result { store.error = error.localizedDescription }; store.export = nil
+            if case .failure(let error) = result { AppLog.capture(error); store.error = error.localizedDescription }; store.export = nil
         }
         .sheet(item: $store.importInspection) { inspection in
             ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
@@ -162,14 +164,14 @@ struct RootView: View {
             Task { await store.importPhotos(items) }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-            switch result { case .success(let urls): Task { await store.importFiles(urls) }; case .failure(let error): store.error = error.localizedDescription }
+            switch result { case .success(let urls): Task { await store.importFiles(urls) }; case .failure(let error): AppLog.capture(error); store.error = error.localizedDescription }
         }
         .fileImporter(isPresented: $importingPackage, allowedContentTypes: [.data]) { result in
             switch result { case .success(let url):
-                guard let space = store.space else { store.error = "请先创建空间"; return }
+                guard let space = store.space else { store.error = AppLog.validation("请先创建空间"); return }
                 _ = url.startAccessingSecurityScopedResource(); pendingPackage = url
                 form = .importPackage(path: url.path, space: space.id)
-            case .failure(let error): store.error = error.localizedDescription }
+            case .failure(let error): AppLog.capture(error); store.error = error.localizedDescription }
         }
     }
     var home: some View {
@@ -197,6 +199,7 @@ struct RootView: View {
                         }
                         Section("其他操作") {
                             Button("导入加密备份", systemImage: "square.and.arrow.down") { importingPackage = true }
+                            Button("导出错误日志", systemImage: "doc.text") { store.prepareErrorLogExport() }
                             Button("清理数据", systemImage: "trash", role: .destructive) { confirmClearData = true }
                         }
                     } label: { HStack { Text(store.space?.name ?? "选择空间").lineLimit(1); Image(systemName: "chevron.down") }.font(.subheadline.weight(.medium)) }
@@ -583,7 +586,7 @@ private struct VideoPreview: View {
                 guard !Task.isCancelled else { return }
                 if playable { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) }
                 else { failed = true }
-            } catch { if !Task.isCancelled { failed = true } }
+            } catch { AppLog.capture(error); if !Task.isCancelled { failed = true } }
         }
         .onDisappear { player?.pause(); player?.replaceCurrentItem(with: nil); player = nil }
     }

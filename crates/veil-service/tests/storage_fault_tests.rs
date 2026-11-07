@@ -17,6 +17,7 @@ fn fault_worker() {
         return;
     };
     let root = Path::new(&root);
+    veil_core::logging::configure(veil_core::logging::Config::new(root.join("logs"))).unwrap();
     let m = manager(root);
     match std::env::var("VEIL_SQL_FAULT_OPERATION").unwrap().as_str() {
         "write" => {
@@ -237,6 +238,21 @@ fn uncertain_commit_is_confirmed_before_returning_success() {
         .status()
         .unwrap();
     assert!(status.success());
+    let logs = fs::read_dir(root.path().join("logs"))
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.unwrap().path();
+            (path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
+                .then(|| fs::read_to_string(path).unwrap())
+        })
+        .collect::<String>();
+    let recovered = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str::<veil_core::logging::Record>(line).ok())
+        .find(|record| record.event == "FILE_COMMIT_RECOVERED")
+        .expect("提交核对恢复必须留下结果");
+    assert_eq!(recovered.context["phase"], "verify_metadata_references");
+    assert_eq!(recovered.context["outcome"], "committed");
     let m = manager(root.path());
     assert_eq!(m.read_file_bytes("a.txt", "old", 1024).unwrap(), b"changed");
     assert_eq!(m.list_files("old").unwrap()[0].version_history.len(), 2);

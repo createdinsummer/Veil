@@ -12,8 +12,8 @@ enum VeilDesign {
 
     static let tokens: Tokens = {
         guard let url = Bundle.module.url(forResource: "DesignTokens", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let tokens = try? JSONDecoder().decode(Tokens.self, from: data) else {
+              let data = AppLog.attempt({ try Data(contentsOf: url) }),
+              let tokens = AppLog.attempt({ try JSONDecoder().decode(Tokens.self, from: data) }) else {
             preconditionFailure("缺少有效的 DesignTokens.json，请同步 ui/tokens.json 后构建")
         }
         return tokens

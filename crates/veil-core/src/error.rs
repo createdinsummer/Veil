@@ -23,7 +23,7 @@ pub enum VeilError {
 
     /// 无法确认提交结果或持久化状态，调用方应重新读取权威状态。
     #[error("提交结果或持久化状态不确定: {0}")]
-    CommitUncertain(std::io::Error),
+    CommitUncertain(#[source] std::io::Error),
 
     /// 容器字节格式不符合预期。
     #[error("容器格式错误: {0}")]
@@ -37,8 +37,12 @@ pub enum VeilError {
     #[error("锁冲突：级别 {level}，范围 {scope}")]
     LockConflict { level: String, scope: String },
 
-    #[error("导入文件 {file} 失败: {message}")]
-    ImportBatchFailed { file: String, message: String },
+    #[error("导入文件 {file} 失败: {source}")]
+    ImportBatchFailed {
+        file: String,
+        #[source]
+        source: Box<VeilError>,
+    },
 
     /// 全局配置读写或解析失败。
     #[error("配置错误: {0}")]
@@ -91,6 +95,36 @@ pub enum VeilError {
     /// 链接所依赖的磁盘卷当前不可用。
     #[error("卷不可用: {0}")]
     VolumeUnavailable(String),
+}
+
+impl VeilError {
+    /// 用于日志的稳定分类，不包含错误携带的数据。
+    pub const fn log_code(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "CANCELLED",
+            Self::Database(..) => "DATABASE",
+            Self::DatabasePool(..) => "DATABASE_POOL",
+            Self::Io(..) => "IO",
+            Self::CommitUncertain(..) => "COMMIT_UNCERTAIN",
+            Self::Format(..) => "FORMAT",
+            Self::WorkError(..) => "WORK_ERROR",
+            Self::LockConflict { .. } => "LOCK_CONFLICT",
+            Self::ImportBatchFailed { .. } => "IMPORT_BATCH_FAILED",
+            Self::ConfigError(..) => "CONFIG_ERROR",
+            Self::VeilNotFound(..) => "VEIL_NOT_FOUND",
+            Self::VeilIdConflict(..) => "VEIL_ID_CONFLICT",
+            Self::VeilNameAmbiguous(..) => "VEIL_NAME_AMBIGUOUS",
+            Self::InvalidFormat(..) => "INVALID_FORMAT",
+            Self::SerializationError(..) => "SERIALIZATION_ERROR",
+            Self::EncryptionError(..) => "ENCRYPTION_ERROR",
+            Self::DecryptionError(..) => "DECRYPTION_ERROR",
+            Self::KeyDerivationError(..) => "KEY_DERIVATION_ERROR",
+            Self::FileNotFound(..) => "FILE_NOT_FOUND",
+            Self::FileAlreadyExists(..) => "FILE_ALREADY_EXISTS",
+            Self::VersionConflict(..) => "VERSION_CONFLICT",
+            Self::VolumeUnavailable(..) => "VOLUME_UNAVAILABLE",
+        }
+    }
 }
 
 /// `veil-core` 内部统一使用的结果类型别名。

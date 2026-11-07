@@ -18,6 +18,36 @@ pub struct CreateOptions<'a> {
     pub portable: bool,
 }
 
+impl WorkflowError {
+    pub(crate) fn log_code(&self) -> &'static str {
+        match self {
+            Self::ConflictingWorkOptions => "CONFLICTING_WORK_OPTIONS",
+            Self::DedicatedRequiresPath => "DEDICATED_REQUIRES_PATH",
+            Self::PortableConflictsWork => "PORTABLE_CONFLICTS_WORK",
+            Self::InvalidLinkName => "INVALID_LINK_NAME",
+            Self::InvalidName => "INVALID_NAME",
+            Self::InvalidLinkExtension(..) => "INVALID_LINK_EXTENSION",
+            Self::LinkExists(..) => "LINK_EXISTS",
+            Self::ContainerExists(..) => "CONTAINER_EXISTS",
+            Self::DedicatedNotEmpty(..) => "DEDICATED_NOT_EMPTY",
+            Self::PackageNotFound(..) => "PACKAGE_NOT_FOUND",
+            Self::UnpackNameInvalid => "UNPACK_NAME_INVALID",
+            Self::UnpackMissingId => "UNPACK_MISSING_ID",
+            Self::UnpackDirectoryExists(..) => "UNPACK_DIRECTORY_EXISTS",
+            Self::UnpackInvalidLinkExtension(..) => "UNPACK_INVALID_LINK_EXTENSION",
+            Self::LinkMissingId => "LINK_MISSING_ID",
+            Self::LinkInvalidExtension(..) => "LINK_INVALID_EXTENSION",
+            Self::PackOutputExists(..) => "PACK_OUTPUT_EXISTS",
+            Self::PasswordEmpty => "PASSWORD_EMPTY",
+            Self::InvalidHintLevel => "INVALID_HINT_LEVEL",
+            Self::Core(..) => "CORE",
+            Self::Io(..) => "IO",
+            Self::CreateFailed { .. } => "CREATE_FAILED",
+            Self::LinkRegistrationFailed { .. } => "LINK_REGISTRATION_FAILED",
+        }
+    }
+}
+
 /// 解包使用的原始参数。
 pub struct UnpackOptions<'a> {
     pub package_path: &'a str,

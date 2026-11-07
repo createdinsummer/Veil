@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub use veil_core::locking::{LockMode, LockOptions};
+use veil_core::logging::{self, Field, Level};
 use zeroize::Zeroizing;
 
 pub const LEASE: Duration = Duration::from_secs(30);
@@ -31,7 +32,20 @@ pub fn default_options() -> LockOptions {
 static SERVER: OnceLock<ExecutionServer> = OnceLock::new();
 fn endpoint(execution: &ExecutionService) -> Option<ExecutionEndpoint> {
     if SERVER.get().is_none() {
-        let server = execution.listen().ok()?;
+        let server = match execution.listen() {
+            Ok(server) => server,
+            Err(error) => {
+                logging::failure(
+                    Level::Warn,
+                    "locks",
+                    "owner_probe",
+                    "OWNER_PROBE_UNAVAILABLE",
+                    &error,
+                    &[],
+                );
+                return None;
+            }
+        };
         let _ = SERVER.set(server);
     }
     SERVER.get().map(|server| server.endpoint().clone())
@@ -291,6 +305,59 @@ impl LockManager {
         owner: ExecutionOwner,
         endpoint: Option<ExecutionEndpoint>,
     ) -> Result<LeaseGuard> {
+        let started = Instant::now();
+        logging::remember_sensitive(self.password.as_str());
+        let mut attempts = 0;
+        let result = self.acquire_for_inner(resources, mode, owner, endpoint, &mut attempts);
+        let context = [
+            ("database", Field::Path(&self.directory)),
+            (
+                "resource",
+                Field::Resource(resources.first().map(String::as_str).unwrap_or("container")),
+            ),
+            ("lock_count", Field::Count(resources.len() as u64)),
+            ("mode", Field::Label(diagnostic_mode(mode))),
+            ("elapsed_ms", Field::Duration(started.elapsed())),
+            ("attempts", Field::Count(attempts)),
+            (
+                "timeout_ms",
+                Field::Duration(self.options.timeout.unwrap_or(Duration::MAX)),
+            ),
+        ];
+        match &result {
+            Err(VeilError::WorkError(message)) if message == "锁等待已取消" => {}
+            Err(error) => logging::failure(
+                if matches!(error, VeilError::LockConflict { .. }) {
+                    Level::Warn
+                } else {
+                    Level::Error
+                },
+                "locks",
+                "acquire",
+                "LOCK_ACQUIRE_FAILED",
+                error,
+                &context,
+            ),
+            Ok(_) if started.elapsed() >= Duration::from_secs(1) => logging::event(
+                Level::Warn,
+                "locks",
+                "acquire",
+                "LOCK_WAIT_RECOVERED",
+                "锁等待结束，已取得租约",
+                &context,
+            ),
+            _ => {}
+        }
+        result
+    }
+    fn acquire_for_inner(
+        &self,
+        resources: &[String],
+        mode: LockMode,
+        owner: ExecutionOwner,
+        endpoint: Option<ExecutionEndpoint>,
+        attempts: &mut u64,
+    ) -> Result<LeaseGuard> {
         let mut resources = resources.to_vec();
         resources.sort();
         resources.dedup();
@@ -301,6 +368,7 @@ impl LockManager {
         }
         let start = Instant::now();
         let mut last_conflict = None;
+        let mut reported_wait = false;
         loop {
             if let Err(error) = self.check_wait(start) {
                 return Err(
@@ -318,7 +386,34 @@ impl LockManager {
                 .map(|d| d.saturating_sub(start.elapsed()))
                 .unwrap_or(Duration::from_millis(100))
                 .min(Duration::from_millis(100));
-            match self.try_acquire(&resources, mode, &owner, endpoint.as_ref(), timeout, start) {
+            *attempts += 1;
+            let result =
+                self.try_acquire(&resources, mode, &owner, endpoint.as_ref(), timeout, start);
+            if !reported_wait && start.elapsed() >= Duration::from_secs(1) {
+                if let Err(error) = &result {
+                    logging::failure(
+                        Level::Warn,
+                        "locks",
+                        "acquire",
+                        "LOCK_WAITING",
+                        error,
+                        &[
+                            ("database", Field::Path(&self.directory)),
+                            (
+                                "resource",
+                                Field::Resource(
+                                    resources.first().map(String::as_str).unwrap_or("container"),
+                                ),
+                            ),
+                            ("elapsed_ms", Field::Duration(start.elapsed())),
+                            ("attempts", Field::Count(*attempts)),
+                            ("mode", Field::Label(diagnostic_mode(mode))),
+                        ],
+                    );
+                    reported_wait = true;
+                }
+            }
+            match result {
                 Ok(credentials) => return LeaseGuard::start(self.clone(), credentials),
                 Err(VeilError::Database(ref e)) if busy(e) => {}
                 Err(error @ VeilError::LockConflict { .. }) => last_conflict = Some(error),
@@ -463,6 +558,62 @@ impl LockManager {
         Ok(credentials)
     }
     pub fn renew(&self, credentials: &mut [Credential]) -> Result<()> {
+        let started = Instant::now();
+        logging::remember_sensitive(self.password.as_str());
+        let remaining = credentials
+            .iter()
+            .map(|c| c.valid_until.saturating_duration_since(Instant::now()))
+            .min()
+            .unwrap_or_default();
+        let result = self.renew_inner(credentials);
+        let context = [
+            ("database", Field::Path(&self.directory)),
+            (
+                "resource",
+                Field::Resource(
+                    credentials
+                        .first()
+                        .map(|c| c.resource_id.as_str())
+                        .unwrap_or("none"),
+                ),
+            ),
+            (
+                "lock_id",
+                Field::Resource(
+                    credentials
+                        .first()
+                        .map(|c| c.lock_id.as_str())
+                        .unwrap_or("none"),
+                ),
+            ),
+            ("lock_count", Field::Count(credentials.len() as u64)),
+            ("remaining_lease_ms", Field::Duration(remaining)),
+            ("lease_ms", Field::Duration(LEASE)),
+            ("renew_interval_ms", Field::Duration(RENEW_INTERVAL)),
+            ("elapsed_ms", Field::Duration(started.elapsed())),
+        ];
+        if let Err(error) = &result {
+            logging::failure(
+                Level::Error,
+                "locks",
+                "renew",
+                "LEASE_RENEW_FAILED",
+                error,
+                &context,
+            );
+        } else if started.elapsed() >= Duration::from_secs(1) {
+            logging::event(
+                Level::Warn,
+                "locks",
+                "renew",
+                "LEASE_RENEW_SLOW",
+                "租约续租耗时过长",
+                &context,
+            );
+        }
+        result
+    }
+    fn renew_inner(&self, credentials: &mut [Credential]) -> Result<()> {
         if credentials.iter().all(Credential::is_read_only) {
             return Ok(());
         }
@@ -490,6 +641,53 @@ impl LockManager {
         Ok(())
     }
     pub fn release(&self, credentials: &[Credential]) -> Result<()> {
+        let started = Instant::now();
+        logging::remember_sensitive(self.password.as_str());
+        let remaining = credentials
+            .iter()
+            .map(|c| c.valid_until.saturating_duration_since(Instant::now()))
+            .min()
+            .unwrap_or_default();
+        let result = self.release_inner(credentials);
+        let context = [
+            ("database", Field::Path(&self.directory)),
+            (
+                "resource",
+                Field::Resource(
+                    credentials
+                        .first()
+                        .map(|c| c.resource_id.as_str())
+                        .unwrap_or("none"),
+                ),
+            ),
+            (
+                "lock_id",
+                Field::Resource(
+                    credentials
+                        .first()
+                        .map(|c| c.lock_id.as_str())
+                        .unwrap_or("none"),
+                ),
+            ),
+            ("lock_count", Field::Count(credentials.len() as u64)),
+            ("remaining_lease_ms", Field::Duration(remaining)),
+            ("lease_ms", Field::Duration(LEASE)),
+            ("renew_interval_ms", Field::Duration(RENEW_INTERVAL)),
+            ("elapsed_ms", Field::Duration(started.elapsed())),
+        ];
+        if let Err(error) = &result {
+            logging::failure(
+                Level::Error,
+                "locks",
+                "release",
+                "LEASE_RELEASE_FAILED",
+                error,
+                &context,
+            );
+        }
+        result
+    }
+    fn release_inner(&self, credentials: &[Credential]) -> Result<()> {
         if credentials.iter().all(Credential::is_read_only) {
             return Ok(());
         }
@@ -711,6 +909,20 @@ fn dead_locks_until(
             dead.push((identity, token));
         }
     }
+    if !dead.is_empty() {
+        logging::event(
+            Level::Warn,
+            "locks",
+            "owner_probe",
+            "STALE_OWNER_DETECTED",
+            "检测到已退出执行者遗留的租约，等待事务回收",
+            &[
+                ("dead_owner_lock_count", Field::Count(dead.len() as u64)),
+                ("elapsed_ms", Field::Duration(start.elapsed())),
+                ("outcome", Field::Label("eligible_for_recovery")),
+            ],
+        );
+    }
     Ok(dead)
 }
 pub(crate) fn reap(conn: &Connection, dead: &[(String, String)]) -> Result<()> {
@@ -722,6 +934,14 @@ pub(crate) fn reap(conn: &Connection, dead: &[(String, String)]) -> Result<()> {
         )?;
     }
     Ok(())
+}
+fn diagnostic_mode(mode: LockMode) -> &'static str {
+    match mode {
+        LockMode::Read => "SR",
+        LockMode::ReadOnly => "RO",
+        LockMode::SharedWrite => "SW",
+        LockMode::Write => "EW",
+    }
 }
 fn busy(e: &rusqlite::Error) -> bool {
     matches!(
@@ -755,6 +975,14 @@ impl LeaseGuard {
                                 break;
                             }
                         } else {
+                            logging::event(
+                                Level::Error,
+                                "locks",
+                                "renew",
+                                "LEASE_STATE_POISONED",
+                                "续租线程无法访问租约状态，已停止续租",
+                                &[("database", Field::Path(&renewal.directory))],
+                            );
                             break;
                         }
                         last = Instant::now();
@@ -777,15 +1005,24 @@ impl LeaseGuard {
     }
     pub fn release(mut self) -> Result<()> {
         self.stop_worker();
-        self.manager.release(&self.credentials()?)
+        let result = self.manager.release(&self.credentials()?);
+        if result.is_ok() {
+            self.released_in_transaction();
+        }
+        result
+    }
+    /// 仅在释放租约的事务已确认提交后调用，避免析构重复释放并制造虚假异常。
+    pub(crate) fn released_in_transaction(&self) {
+        if let Ok(mut owned) = self.credentials.lock() {
+            owned.clear();
+        }
     }
     /// 数据库改密成功后，使用新密码释放同一组租约。
     pub(crate) fn release_after_rekey(mut self, password: &str) -> Result<()> {
         self.stop_worker();
         let credentials = self.credentials()?;
-        let mut manager = self.manager.clone();
-        manager.password = Arc::new(Zeroizing::new(password.to_owned()));
-        let result = manager.release(&credentials);
+        self.manager.password = Arc::new(Zeroizing::new(password.to_owned()));
+        let result = self.manager.release(&credentials);
         if result.is_ok() {
             if let Ok(mut owned) = self.credentials.lock() {
                 owned.clear();
@@ -811,7 +1048,16 @@ impl LeaseGuard {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
-            let _ = worker.join();
+            if worker.join().is_err() {
+                logging::event(
+                    Level::Error,
+                    "locks",
+                    "renew_worker",
+                    "LEASE_WORKER_PANICKED",
+                    "租约续租线程异常退出",
+                    &[("database", Field::Path(&self.manager.directory))],
+                );
+            }
         }
     }
 }
@@ -820,8 +1066,11 @@ impl Drop for LeaseGuard {
         self.stop_worker();
         if let Ok(c) = self.credentials.lock() {
             if !c.is_empty() {
+                // release 已统一记录失败，析构不能覆盖原业务结果。
                 let _ = self.manager.release(&c);
             }
+        } else {
+            logging::error("locks", "release", "LEASE_STATE_POISONED");
         }
     }
 }

@@ -14,12 +14,47 @@ pub fn commit_batch<T>(
     apply: impl FnOnce(&Transaction<'_>) -> Result<T>,
     before_commit: impl FnOnce(),
 ) -> Result<T> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let output = apply(&tx)?;
-    before_commit();
-    tx.commit()
-        .map_err(|error| VeilError::CommitUncertain(std::io::Error::other(error)))?;
-    Ok(output)
+    let mut phase = "begin_transaction";
+    let result = (|| {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        phase = "apply_transaction";
+        let output = apply(&tx)?;
+        before_commit();
+        phase = "commit_transaction";
+        tx.commit()
+            .map_err(|error| VeilError::CommitUncertain(std::io::Error::other(error)))?;
+        Ok(output)
+    })();
+    // 事务已释放后才记录错误，避免日志 I/O 延长数据库临界区。
+    if let Err(error) = &result {
+        let event = match phase {
+            "begin_transaction" => "TRANSACTION_BEGIN_FAILED",
+            "apply_transaction" => "TRANSACTION_APPLY_FAILED",
+            _ => "TRANSACTION_COMMIT_FAILED",
+        };
+        let mut cause = error;
+        while let VeilError::ImportBatchFailed { source, .. } = cause {
+            cause = source;
+        }
+        let level = match cause {
+            VeilError::Cancelled
+            | VeilError::LockConflict { .. }
+            | VeilError::VersionConflict(_)
+            | VeilError::FileAlreadyExists(_)
+            | VeilError::FileNotFound(_) => crate::logging::Level::Info,
+            VeilError::Database(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                crate::logging::Level::Warn
+            }
+            _ => crate::logging::Level::Error,
+        };
+        crate::logging::failure(level, "database", phase, event, error, &[]);
+    }
+    result
 }
 
 pub fn open(path: &Path, password: Option<&str>, create: bool) -> Result<Connection> {
@@ -31,6 +66,9 @@ pub fn open_with_timeout(
     create: bool,
     timeout: Duration,
 ) -> Result<Connection> {
+    if let Some(password) = password {
+        crate::logging::remember_sensitive(password);
+    }
     if !create && (!path.is_file() || path.metadata()?.len() == 0) {
         return Err(VeilError::InvalidFormat(
             "数据库不存在或为空；不支持旧容器格式".into(),
@@ -99,6 +137,7 @@ pub(crate) fn verify_readable(conn: &NativeConnection) -> Result<()> {
 }
 
 pub fn rekey(conn: &NativeConnection, password: &str) -> Result<()> {
+    crate::logging::remember_sensitive(password);
     if password.is_empty() {
         return Err(VeilError::InvalidFormat("密码不能为空".into()));
     }

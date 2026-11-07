@@ -89,14 +89,19 @@ pub(super) fn listen(service: ExecutionService) -> io::Result<ExecutionServer> {
         while !worker_stop.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((mut stream, peer)) if peer.ip().is_loopback() => {
-                    let _ = serve(&service, &worker_endpoint, &mut stream);
+                    if let Err(error) = serve(&service, &worker_endpoint, &mut stream) {
+                        veil_core::logging::error_chain("service", "execution_probe", &error);
+                    }
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => break,
+                Err(error) => {
+                    veil_core::logging::error_chain("service", "execution_accept", &error);
+                    break;
+                }
             }
         }
     })?;

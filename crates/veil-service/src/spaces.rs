@@ -7,7 +7,6 @@ use crate::{
 };
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use std::time::Duration;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpaceView {
@@ -125,6 +124,17 @@ pub fn delete_space_record(identity: &str) -> Result<(), VeilError> {
 }
 
 fn delete_space_inner(identity: &str, delete_files: bool) -> Result<(), VeilError> {
+    let mut phase = None;
+    let result = delete_space_staged(identity, delete_files, &mut phase);
+    diagnose_partial_mutation("delete_space", identity, phase, &result);
+    result
+}
+
+fn delete_space_staged(
+    identity: &str,
+    delete_files: bool,
+    phase: &mut Option<&'static str>,
+) -> Result<(), VeilError> {
     let mut store = AppStore::global()?;
     let space_lock = store.acquire_space_exclusive_lock(identity)?;
     let tx = store
@@ -182,7 +192,9 @@ fn delete_space_inner(identity: &str, delete_files: bool) -> Result<(), VeilErro
         return Err(VeilError::WorkError("空间目录登记无效".into()));
     }
     if delete_files {
+        *phase = Some("remove_files");
         std::fs::remove_dir_all(&stored_path)?;
+        *phase = Some("commit_registration");
     }
     let default_id: Option<String> = tx
         .query_row(
@@ -235,6 +247,16 @@ fn delete_space_inner(identity: &str, delete_files: bool) -> Result<(), VeilErro
 
 /// 删除已登记容器的加密目录，并清除本机登记和最近记录。
 pub fn delete_container(identity: &str) -> Result<(), VeilError> {
+    let mut phase = None;
+    let result = delete_container_staged(identity, &mut phase);
+    diagnose_partial_mutation("delete_container", identity, phase, &result);
+    result
+}
+
+fn delete_container_staged(
+    identity: &str,
+    phase: &mut Option<&'static str>,
+) -> Result<(), VeilError> {
     crate::work::validate_veil_id(identity)?;
     let mut store = AppStore::global()?;
     let registration = store
@@ -294,23 +316,27 @@ pub fn delete_container(identity: &str) -> Result<(), VeilError> {
         "DELETE FROM local_record WHERE record_type='link_cache' AND json_extract(value_json,'$.link.veil.veil_id')=?1",
         [identity],
     )?;
+    *phase = Some("publish_tombstone");
     veil_core::fsutil::rename_no_replace(&container_path, &tombstone)?;
     if let Err(error) = veil_core::fsutil::sync_directory(&root) {
         let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
         return Err(error.into());
     }
+    *phase = Some("commit_registration");
     if let Err(error) = tx.commit() {
         let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
         let _ = veil_core::fsutil::sync_directory(&root);
         return Err(error.into());
     }
 
+    *phase = Some("remove_tombstone");
     std::fs::remove_dir_all(&tombstone).map_err(|error| {
         VeilError::WorkError(format!(
             "容器已从空间移除，但临时数据清理失败（{}）：{error}",
             tombstone.display()
         ))
     })?;
+    *phase = Some("sync_removed_directory");
     veil_core::fsutil::sync_directory(&root)?;
     Ok(())
 }
@@ -346,6 +372,18 @@ pub(crate) fn create_container(
 /// 同设备原子移动；意图保存在本机库，进程中断后可用同一请求恢复登记。
 /// 跨文件系统由系统明确拒绝，调用方可使用一致打包和独立导入。
 pub fn move_container(identity: &str, target_space: &str, password: &str) -> Result<(), VeilError> {
+    let mut phase = None;
+    let result = move_container_staged(identity, target_space, password, &mut phase);
+    diagnose_partial_mutation("move_container", identity, phase, &result);
+    result
+}
+
+fn move_container_staged(
+    identity: &str,
+    target_space: &str,
+    password: &str,
+    phase: &mut Option<&'static str>,
+) -> Result<(), VeilError> {
     use crate::storage::{container::ContainerDb, invalid, json, now};
     use rusqlite::{TransactionBehavior, params};
     let mut store = AppStore::global()?;
@@ -381,6 +419,7 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     let mut state: serde_json::Value = store
         .record("div_state", identity)?
         .ok_or_else(|| invalid("请先解锁登记容器身份"))?;
+    let recovering = state.get("movement").is_some();
     if let Some(movement) = state.get("movement") {
         if movement["source"] != source.to_string_lossy().as_ref()
             || movement["destination"] != destination.to_string_lossy().as_ref()
@@ -394,6 +433,16 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
         (true, true) => return Err(VeilError::VeilIdConflict("原位置与目标位置同时存在".into())),
         _ => return Err(invalid("无法确认容器实际位置")),
     };
+    if recovering {
+        veil_core::logging::event(
+            veil_core::logging::Level::Warn,
+            "service",
+            "move_container",
+            "CONTAINER_MOVE_RESUMED",
+            "检测到未完成的移动意图，继续核对并恢复登记",
+            &[("resource", veil_core::logging::Field::Resource(identity))],
+        );
+    }
     let mut db = ContainerDb::open(actual, password, Some(identity))?;
     let container_tx = db
         .conn
@@ -425,7 +474,9 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     }
     state["movement"] = serde_json::json!({"source":source,"destination":destination});
     app_tx.execute("UPDATE local_record SET value_json=?1,updated_at=?2 WHERE record_type='div_state' AND record_key=?3",params![json(&state)?,now(),identity])?;
+    *phase = Some("commit_move_intent");
     app_tx.commit()?;
+    *phase = Some("publish_directory");
     if actual == &source {
         if let Err(error) = crate::fsutil::rename_no_replace(&source, &destination) {
             if source.is_dir() && !destination.exists() {
@@ -440,6 +491,7 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     #[cfg(feature = "fault-injection")]
     veil_core::fsutil::fault_point("after_container_move");
     // 无业务更新的容器事务在移动后结束；不清空其他进程的锁。
+    *phase = Some("verify_destination");
     container_tx.commit()?;
     drop(db);
     ContainerDb::open(&destination, password, Some(identity))?;
@@ -455,6 +507,7 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     {
         return Err(invalid("目标专属空间发生登记竞争，请恢复移动"));
     }
+    *phase = Some("commit_registration");
     tx.execute(
         "UPDATE space_div SET space_id=?1,updated_at=?2 WHERE div_id=?3 AND space_id=?4",
         params![target_space, now(), identity, source_space.id],
@@ -468,5 +521,39 @@ pub fn move_container(identity: &str, target_space: &str, password: &str) -> Res
     };
     tx.execute("INSERT INTO local_record VALUES ('recent_div',?1,?2,?3) ON CONFLICT(record_type,record_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![identity,json(&recent)?,now()])?;
     tx.commit()?;
+    if recovering {
+        veil_core::logging::event(
+            veil_core::logging::Level::Warn,
+            "service",
+            "move_container",
+            "CONTAINER_MOVE_RECOVERED",
+            "未完成的移动已恢复登记",
+            &[("resource", veil_core::logging::Field::Resource(identity))],
+        );
+    }
     Ok(())
+}
+
+/// 在事务和空间锁释放后记录跨存储操作的部分结果，避免延长临界区。
+fn diagnose_partial_mutation(
+    operation: &'static str,
+    identity: &str,
+    phase: Option<&'static str>,
+    result: &Result<(), VeilError>,
+) {
+    if let (Some(phase), Err(error)) = (phase, result) {
+        use veil_core::logging::{self, Field, Level};
+        logging::failure(
+            Level::Error,
+            "service",
+            operation,
+            "STORAGE_MUTATION_INCOMPLETE",
+            error,
+            &[
+                ("resource", Field::Resource(identity)),
+                ("phase", Field::Label(phase)),
+                ("outcome", Field::Label("verify_storage_and_registration")),
+            ],
+        );
+    }
 }

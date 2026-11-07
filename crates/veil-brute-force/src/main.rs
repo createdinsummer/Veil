@@ -20,8 +20,8 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -71,7 +71,16 @@ fn get_history_file_path(veil_path: &Path) -> std::path::PathBuf {
     // 历史目录固定放在用户目录下，文件内容不参与容器身份计算。
     let history_dir = Path::new(&home_dir).join(HISTORY_DIR);
 
-    std::fs::create_dir_all(&history_dir).ok();
+    if let Err(error) = std::fs::create_dir_all(&history_dir) {
+        veil_core::logging::failure(
+            veil_core::logging::Level::Warn,
+            "brute_force",
+            "create_history",
+            "HISTORY_UNAVAILABLE",
+            &error,
+            &[],
+        );
+    }
 
     let filename = veil_path_to_history_filename(veil_path);
     history_dir.join(filename)
@@ -90,13 +99,36 @@ fn load_history(veil_path: &Path) -> HashSet<String> {
 
     let file = match File::open(&history_file) {
         Ok(f) => f,
-        Err(_) => return HashSet::new(),
+        Err(error) => {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "brute_force",
+                "read_history",
+                "HISTORY_UNAVAILABLE",
+                &error,
+                &[],
+            );
+            return HashSet::new();
+        }
     };
 
     // 逐行读取并去掉空白；不可读取的行直接跳过，避免历史损坏中断攻击。
     BufReader::new(file)
         .lines()
-        .map_while(Result::ok)
+        .map_while(|line| match line {
+            Ok(line) => Some(line),
+            Err(error) => {
+                veil_core::logging::failure(
+                    veil_core::logging::Level::Warn,
+                    "brute_force",
+                    "read_history",
+                    "HISTORY_PARTIALLY_READ",
+                    &error,
+                    &[],
+                );
+                None
+            }
+        })
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
@@ -116,6 +148,14 @@ fn save_to_history(veil_path: &Path, passwords: &[String]) {
     {
         Ok(f) => f,
         Err(e) => {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "brute_force",
+                "open_history",
+                "HISTORY_NOT_SAVED",
+                &e,
+                &[],
+            );
             eprintln!("⚠️  无法保存历史: {}", e);
             return;
         }
@@ -124,6 +164,14 @@ fn save_to_history(veil_path: &Path, passwords: &[String]) {
     // 单条写入失败后停止，但仍保留此前成功写入的记录。
     for password in passwords {
         if let Err(e) = writeln!(file, "{}", password) {
+            veil_core::logging::failure(
+                veil_core::logging::Level::Warn,
+                "brute_force",
+                "write_history",
+                "HISTORY_PARTIALLY_SAVED",
+                &e,
+                &[],
+            );
             eprintln!("⚠️  写入历史失败: {}", e);
             break;
         }
@@ -337,6 +385,7 @@ fn dictionary_attack(
     let file = match File::open(wordlist_path) {
         Ok(f) => f,
         Err(e) => {
+            veil_core::logging::error_chain("brute_force", "read_wordlist", &e);
             eprintln!("❌ 无法打开单词表: {e}");
             return None;
         }
@@ -655,11 +704,7 @@ fn get_wordlist_path() -> Option<String> {
     io::stdin().read_line(&mut input).ok();
     let path = input.trim().to_string();
 
-    if path.is_empty() {
-        None
-    } else {
-        Some(path)
-    }
+    if path.is_empty() { None } else { Some(path) }
 }
 
 /// 交互式构造自定义字符集及最小、最大密码长度。
@@ -1172,6 +1217,7 @@ fn configure_threads() {
 ///
 /// 程序会持续接受攻击模式选择，切换容器时重新读取包内元数据，退出或输入 `q` 时结束。
 fn main() {
+    veil_core::logging::initialize();
     let args: Vec<String> = std::env::args().collect();
 
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1221,6 +1267,12 @@ fn main() {
 
         let veil_path = Path::new(&veil_path_str);
         if !veil_path.exists() {
+            veil_core::logging::record(
+                veil_core::logging::Level::Info,
+                "brute_force",
+                "open_container",
+                "FILE_NOT_FOUND",
+            );
             eprintln!("\n❌ 容器文件不存在: {}", veil_path.display());
             eprintln!();
             eprintln!("提示:");
@@ -1243,6 +1295,7 @@ fn main() {
                 Arc::new(verifier)
             }
             Err(error) => {
+                veil_core::logging::error_chain("brute_force", "read_package", &error);
                 eprintln!("❌ 读取打包文件失败: {error}");
                 eprintln!("提示: 仅支持 veil pack 生成的 .veil 文件");
                 veil_path_str.clear();
