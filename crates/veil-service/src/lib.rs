@@ -6,6 +6,7 @@ pub mod commands;
 pub mod comparison;
 pub mod config;
 mod directory_cache;
+mod deletion_queue;
 pub mod execution;
 mod export_pipeline;
 pub mod hints;

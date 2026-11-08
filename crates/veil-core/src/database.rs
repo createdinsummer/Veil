@@ -1,12 +1,73 @@
 //! 所有平台共用的 SQLite / SQLCipher 连接及固定磁盘格式。
-pub use crate::database_pool::{Connection, PoolScope, invalidate};
+pub use crate::database_pool::{invalidate, Connection, PoolScope};
 use crate::error::{Result, VeilError};
 use rusqlite::{Connection as NativeConnection, OpenFlags, Transaction, TransactionBehavior};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub const CONTAINER_DB: &str = "veil.db";
 pub const APP_DB: &str = "app.db";
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 调用方定义的 SQLite 临时繁忙重试边界。
+///
+/// 仅用于可安全重新执行的数据库操作。提交结果未知或带有外部副作用的操作，
+/// 必须由调用方先确认结果，不能使用此策略直接重放。
+#[derive(Debug, Clone, Copy)]
+pub struct BusyRetryPolicy {
+    /// 首次尝试失败后，最多再执行多少次。
+    pub max_retries: u32,
+    /// 不再开始下一次尝试的绝对时间。
+    pub deadline: Instant,
+    /// 相邻两次尝试之间的等待时间。
+    pub retry_interval: Duration,
+}
+
+/// 对可安全重放的操作，仅在 SQLite 临时繁忙时按调用方策略重试。
+pub fn retry_busy<T>(
+    policy: BusyRetryPolicy,
+    mut operation: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut retries = 0;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if !is_busy_error(&error)
+                    || retries >= policy.max_retries
+                    || Instant::now() >= policy.deadline
+                {
+                    return Err(error);
+                }
+                let remaining = policy.deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                let delay = policy.retry_interval.min(remaining);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                retries += 1;
+                if Instant::now() >= policy.deadline {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+fn is_busy_error(error: &VeilError) -> bool {
+    matches!(
+        error,
+        VeilError::Database(error)
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+    )
+}
 
 /// 在同一个写事务中执行一批更新。提交开始后的错误需要由调用方核对实际结果。
 pub fn commit_batch<T>(
@@ -160,6 +221,46 @@ pub fn rekey(conn: &NativeConnection, password: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn retry_busy_retries_only_transient_database_busy() {
+        let attempts = Cell::new(0);
+        let result = retry_busy(
+            BusyRetryPolicy {
+                max_retries: 2,
+                deadline: Instant::now() + Duration::from_secs(1),
+                retry_interval: Duration::ZERO,
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 3 {
+                    Err(VeilError::Database(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        None,
+                    )))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), 3);
+
+        let attempts = Cell::new(0);
+        let result = retry_busy(
+            BusyRetryPolicy {
+                max_retries: 2,
+                deadline: Instant::now() + Duration::from_secs(1),
+                retry_interval: Duration::ZERO,
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(VeilError::InvalidFormat("不可重试".into()))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
 
     #[test]
     fn batch_is_atomic_and_only_signals_when_commit_starts() {

@@ -1,9 +1,13 @@
-//! 一致快照与导入业务；不复制运行中的单个数据库文件。
+//! 加密容器包的流式导出与导入；运行锁在导入暂存区内清理。
 use crate::{
     config::AppConfig,
     error::Result,
     metadata::MetaData,
-    storage::{container::ContainerDb, invalid},
+    storage::{
+        container::ContainerDb,
+        invalid,
+        locks::{self, LockMode},
+    },
     veil_ops::VeilManager,
 };
 use std::path::{Path, PathBuf};
@@ -38,6 +42,8 @@ impl VeilUnpacker {
     pub fn unpack_verified(&self, directory: &Path, password: &str) -> Result<MetaData> {
         RawUnpacker::new(&self.path).unpack(directory)?;
         let db = ContainerDb::open(directory, password, None)?;
+        // 运行锁只对源容器及其执行者有效；恢复副本不得继承这些瞬时状态。
+        db.conn.execute("DELETE FROM operation_locks", [])?;
         let metadata = db.metadata()?;
         let expected: std::collections::HashSet<_> = metadata
             .files
@@ -51,15 +57,6 @@ impl VeilUnpacker {
             || expected.iter().any(|name| !directory.join(name).is_file())
         {
             return Err(invalid("打包密文与数据库引用不一致"));
-        }
-        if db
-            .conn
-            .query_row("SELECT count(*) FROM operation_locks", [], |r| {
-                r.get::<_, i64>(0)
-            })?
-            != 0
-        {
-            return Err(invalid("导出副本包含运行锁"));
         }
         // 全部密文都验证分块认证，但不落盘明文。
         let total = metadata
@@ -141,16 +138,27 @@ impl VeilPacker {
         self
     }
     pub fn pack_container(&self, manager: &VeilManager, password: &str) -> Result<usize> {
-        let temporary = tempfile::TempDir::new()?;
-        let _connections = veil_core::database::PoolScope::new(temporary.path().join(CONTAINER_DB));
         let manager =
             VeilManager::new(manager.veil_dir.clone()).with_lock_options(self.options.clone());
-        let count = manager.snapshot_to(temporary.path(), password)?;
-        let database = std::fs::read(temporary.path().join(CONTAINER_DB))?;
-        let metadata = ContainerDb::open(temporary.path(), password, None)?.metadata()?;
+        // 容器级读租约固定数据库与密文文件的同一版本；密文直接流式写入包，
+        // 不再复制整个容器到临时目录。
+        let guard = manager
+            .lock_manager(password)
+            .acquire_container(LockMode::Read)?;
+        let db = manager.open_db(password)?;
+        let credentials = guard.credentials()?;
+        locks::validate_many(
+            &db.conn,
+            &credentials
+                .iter()
+                .map(|credential| (credential, Some(LockMode::Read)))
+                .collect::<Vec<_>>(),
+        )?;
+        let database = std::fs::read(manager.veil_dir.join(CONTAINER_DB))?;
+        let metadata = db.metadata()?;
         let total = metadata.files.iter().try_fold(0u64, |total, file| {
             total.checked_add(
-                std::fs::metadata(temporary.path().join(&file.encrypted_name))
+                std::fs::metadata(manager.veil_dir.join(&file.encrypted_name))
                     .ok()?
                     .len(),
             )
@@ -158,14 +166,22 @@ impl VeilPacker {
         veil_core::progress::stage("packing", total);
         let mut writer = VeilPackageWriter::new(&self.output_path, &database)?;
         for f in &metadata.files {
-            writer.add_file(&f.encrypted_name, &temporary.path().join(&f.encrypted_name))?;
+            writer.add_file(&f.encrypted_name, &manager.veil_dir.join(&f.encrypted_name))?;
         }
+        let credentials = guard.credentials()?;
+        locks::validate_many(
+            &db.conn,
+            &credentials
+                .iter()
+                .map(|credential| (credential, Some(LockMode::Read)))
+                .collect::<Vec<_>>(),
+        )?;
         veil_core::progress::finalizing();
         if self.overwrite {
             writer.finish()?;
         } else {
             writer.finish_without_overwrite()?;
         }
-        Ok(count)
+        Ok(metadata.files.len())
     }
 }

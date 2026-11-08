@@ -2,6 +2,7 @@
 
 use crate::veil_ops::VeilManager;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::{
     collections::HashSet,
@@ -11,7 +12,7 @@ use veil_core::metadata::{MetaData, generate_veil_id};
 use zeroize::Zeroizing;
 
 /// 接收来自命令行、桌面端或移动端的业务请求。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct VeilService(
     Arc<Mutex<Option<Session>>>,
     veil_core::progress::Progress,
@@ -20,7 +21,26 @@ pub struct VeilService(
     Arc<Mutex<Option<Arc<crate::import_pipeline::ImportConflictQueue>>>>,
     Arc<Mutex<Option<Arc<crate::transfer_conflicts::ConflictQueue<crate::export_pipeline::Work>>>>>,
     Arc<Mutex<Option<Vec<std::fs::File>>>>,
+    Arc<crate::deletion_queue::PhysicalDeletionQueue>,
+    Arc<GarbageCollectionQueue>,
 );
+
+impl Default for VeilService {
+    fn default() -> Self {
+        let session = Arc::new(Mutex::new(None));
+        Self(
+            Arc::clone(&session),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Arc::new(GarbageCollectionQueue::new(session)),
+        )
+    }
+}
 
 impl Drop for VeilService {
     fn drop(&mut self) {
@@ -488,6 +508,67 @@ struct Session {
     path: PathBuf,
     veil_id: String,
     password: Zeroizing<String>,
+}
+
+const GARBAGE_QUEUE_CAPACITY: usize = 64;
+const GARBAGE_BATCH_COUNT: usize = 16;
+const GARBAGE_BATCH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// 只保存清理信号；密码仅由消费者从当前已解锁会话中短暂读取。
+struct GarbageCollectionQueue {
+    sender: veil_core::queue::Sender<()>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl GarbageCollectionQueue {
+    fn new(session: Arc<Mutex<Option<Session>>>) -> Self {
+        let (sender, receiver) = veil_core::queue::BoundedQueue::new(GARBAGE_QUEUE_CAPACITY).split();
+        let recurring = sender.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = receiver.listen_batches(
+                veil_core::queue::BatchPolicy {
+                    count: GARBAGE_BATCH_COUNT,
+                    interval: GARBAGE_BATCH_INTERVAL,
+                },
+                |_| 1,
+                |state| {
+                    Ok::<_, ()>(veil_core::queue::ListenControl::new(
+                        GARBAGE_BATCH_COUNT,
+                        state.closed,
+                    ))
+                },
+                |_| {
+                    let session = session.lock().ok().and_then(|session| session.clone());
+                    if let Some(session) = session {
+                        let manager = VeilManager::for_veil(session.path, session.veil_id);
+                        let _ = manager.cleanup(session.password.as_str());
+                        // 会话保持解锁时，周期性发送下一轮低优先级扫描。
+                        let _ = recurring.try_send(());
+                    }
+                    Ok(())
+                },
+            );
+        });
+        Self {
+            sender,
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+
+    fn schedule(&self) {
+        let _ = self.sender.try_send(());
+    }
+}
+
+impl Drop for GarbageCollectionQueue {
+    fn drop(&mut self) {
+        self.sender.close();
+        if let Ok(worker) = self.worker.get_mut() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
 }
 
 fn import_one_file(
@@ -1261,6 +1342,7 @@ impl VeilService {
             veil_id: id,
             password,
         });
+        self.8.schedule();
         Ok(view)
     }
 
@@ -1299,6 +1381,7 @@ impl VeilService {
             veil_id: metadata.veil_id.clone(),
             password,
         });
+        self.8.schedule();
         Ok(view)
     }
 
@@ -1651,7 +1734,6 @@ impl VeilService {
         let skipped = progress.skipped_files;
         if let Some((name, source)) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
             drop(directory_guard);
-            let _ = manager.cleanup(session.password.as_str());
             return Err(ServiceError::ImportFileFailed {
                 name,
                 completed,
@@ -1663,7 +1745,6 @@ impl VeilService {
             return Err(ServiceError::ImportCancelled { completed, skipped });
         }
         veil_core::progress::finalizing();
-        let _ = manager.cleanup(session.password.as_str());
         Ok(container_view(
             &session.path,
             &manager.read_meta(session.password.as_str())?,
@@ -1709,7 +1790,9 @@ impl VeilService {
             .map(|registration| app_store.acquire_space_shared_lock(&registration.space_id))
             .transpose()?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
-        manager.remove_path(name, session.password.as_str())?;
+        let (_, ciphers) = manager.remove_path_deferred(name, session.password.as_str())?;
+        self.7.enqueue(ciphers);
+        self.8.schedule();
         Ok(container_view(
             &session.path,
             &manager.read_meta(session.password.as_str())?,

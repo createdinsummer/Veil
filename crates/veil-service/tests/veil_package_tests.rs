@@ -54,9 +54,37 @@ fn corruption_truncation_and_old_format_are_rejected() {
     fs::write(&package, old).unwrap();
     assert!(RawUnpacker::new(&package).read_password_verifier().is_err());
     fs::write(&package, [before, b"extra".to_vec()].concat()).unwrap();
+    assert!(VeilUnpacker::new(&package)
+        .unpack_verified(&root.path().join("out"), "1")
+        .is_err());
+}
+
+#[test]
+fn unpack_discards_runtime_locks_from_package() {
+    let root = TempDir::new().unwrap();
+    let package = fixture(&root);
+    let raw = root.path().join("raw");
+    RawUnpacker::new(&package).unpack(&raw).unwrap();
+    let raw_db = veil_core::database::open(&raw.join("veil.db"), Some("1"), false).unwrap();
     assert!(
-        VeilUnpacker::new(&package)
-            .unpack_verified(&root.path().join("out"), "1")
-            .is_err()
+        raw_db
+            .query_row("SELECT count(*) FROM operation_locks", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap()
+            > 0
+    );
+
+    let restored = root.path().join("restored");
+    VeilUnpacker::new(&package)
+        .unpack_verified(&restored, "1")
+        .unwrap();
+    let restored_db =
+        veil_core::database::open(&restored.join("veil.db"), Some("1"), false).unwrap();
+    assert_eq!(
+        restored_db
+            .query_row("SELECT count(*) FROM operation_locks", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }

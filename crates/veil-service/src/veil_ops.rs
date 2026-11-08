@@ -9,17 +9,19 @@ use crate::storage::{
     now,
 };
 use crate::version::VersionSnapshot;
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{params, TransactionBehavior};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 use zeroize::Zeroizing;
+
+const CLEANUP_QUERY_BATCH_SIZE: usize = 256;
 
 /// 一次批量添加中的单个源文件和 Veil 内目标路径。
 #[derive(Debug, Clone)]
@@ -272,7 +274,7 @@ impl VeilManager {
         result
     }
     fn refresh_local_cache_inner(&self, db: &ContainerDb) -> Result<()> {
-        use crate::storage::app::{AppStore, RecentContainer, app_data_dir};
+        use crate::storage::app::{app_data_dir, AppStore, RecentContainer};
         let directory = app_data_dir()?;
         if !directory.join(veil_core::database::APP_DB).try_exists()? {
             return Ok(());
@@ -342,18 +344,30 @@ impl VeilManager {
         result
     }
     pub fn read_meta_snapshot(&self, password: &str) -> Result<(MetaData, Vec<u8>)> {
-        let temporary = tempfile::TempDir::new()?;
-        let count = self.snapshot_to(temporary.path(), password)?;
-        let metadata =
-            ContainerDb::open(temporary.path(), password, self.expected_veil_id.as_deref())?
-                .metadata()?;
-        if count != metadata.files.len() {
-            return Err(invalid("快照文件数量不一致"));
-        }
-        Ok((
-            metadata,
-            fs::read(temporary.path().join(veil_core::database::CONTAINER_DB))?,
-        ))
+        // 这是元数据快照，不是容器备份：只需在共享读租约内读取数据库文件。
+        let guard = self
+            .lock_manager(password)
+            .acquire_container(LockMode::Read)?;
+        let db = self.open_db(password)?;
+        let credentials = guard.credentials()?;
+        locks::validate_many(
+            &db.conn,
+            &credentials
+                .iter()
+                .map(|credential| (credential, Some(LockMode::Read)))
+                .collect::<Vec<_>>(),
+        )?;
+        let metadata = db.metadata()?;
+        let database = fs::read(self.veil_dir.join(veil_core::database::CONTAINER_DB))?;
+        let credentials = guard.credentials()?;
+        locks::validate_many(
+            &db.conn,
+            &credentials
+                .iter()
+                .map(|credential| (credential, Some(LockMode::Read)))
+                .collect::<Vec<_>>(),
+        )?;
+        Ok((metadata, database))
     }
     pub fn update_meta<F: FnOnce(&mut MetaData)>(&self, password: &str, update: F) -> Result<()> {
         let mut metadata = self.read_meta(password)?;
@@ -585,7 +599,7 @@ impl VeilManager {
         &self,
         files: &[AddFileSpec],
         password: &str,
-        cleanup: bool,
+        _cleanup: bool,
         directory_guard: Option<(&LeaseGuard, &LockedDirectory)>,
         transaction_gate: Option<&std::sync::Mutex<()>>,
         file_guard: Option<&LeaseGuard>,
@@ -892,7 +906,7 @@ impl VeilManager {
                         version_history: base.versions()?.to_vec(),
                     };
                     use crate::comparison::{
-                        ComparisonChecks, ComparisonState, FileInput, compare_files,
+                        compare_files, ComparisonChecks, ComparisonState, FileInput,
                     };
                     p.unchanged = compare_files(
                         FileInput::ContainerMetadata {
@@ -1021,9 +1035,6 @@ impl VeilManager {
             let _ = fs::remove_dir(directory);
         }
         drop(own_guard);
-        if cleanup {
-            let _ = self.cleanup(password);
-        }
         Ok(pending.into_iter().map(|p| p.cipher).collect())
     }
     pub(crate) fn commit_import_batch(
@@ -1456,6 +1467,18 @@ impl VeilManager {
         self.remove_path(name, password).map(|_| ())
     }
     pub fn remove_path(&self, path: &str, password: &str) -> Result<RemovedPathKind> {
+        let (kind, ciphers) = self.remove_path_deferred(path, password)?;
+        for cipher in ciphers {
+            let _ = fs::remove_file(cipher);
+        }
+        Ok(kind)
+    }
+    /// 仅提交逻辑删除；调用方负责异步回收已知密文。
+    pub(crate) fn remove_path_deferred(
+        &self,
+        path: &str,
+        password: &str,
+    ) -> Result<(RemovedPathKind, Vec<PathBuf>)> {
         let execution = crate::ExecutionService::global()?;
         let _scope = execution.enter_task("删除路径");
         let path = normalize_veil_dir(path)?;
@@ -1463,7 +1486,6 @@ impl VeilManager {
         let node = db
             .resolve(&path)?
             .ok_or_else(|| VeilError::FileNotFound(path.clone()))?;
-        let before = db.subtree(&node.id)?;
         drop(db);
         let guard = if node.kind == "directory" {
             self.lock_manager(password)
@@ -1473,29 +1495,42 @@ impl VeilManager {
                 .acquire(std::slice::from_ref(&node.id), LockMode::Write)?
         };
         let credentials = guard.credentials()?;
-        let mut db = self.open_db(password)?;
-        let tx = db
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if container::subtree(&tx, &node.id)? != before {
+        let db = self.open_db(password)?;
+        for credential in &credentials {
+            locks::validate(&db.conn, credential, Some(LockMode::Write))?;
+        }
+        let current = db.resolve(&path)?;
+        if current.as_ref().map(|current| &current.id) != Some(&node.id) {
             return Err(VeilError::VersionConflict(
-                "删除前子树已变化，请重试".into(),
+                "删除前目标路径已变化，请重试".into(),
             ));
         }
-        for c in credentials {
-            locks::release_in(&tx, &c)?;
+        // 写租约已覆盖目标资源；扫描不需要占用 SQLite 写事务。
+        let ciphers = db
+            .subtree(&node.id)?
+            .into_iter()
+            .filter(|node| node.kind == "file")
+            .map(|node| node.cipher().map(str::to_owned))
+            .collect::<Result<Vec<_>>>()?;
+        // 单条递归 DELETE 自带 SQLite 隐式事务，无需手工 BEGIN IMMEDIATE。
+        db.conn.execute("WITH RECURSIVE tree(id) AS (SELECT id FROM file_info WHERE id=?1 UNION ALL SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.id) DELETE FROM file_info WHERE id IN (SELECT id FROM tree)",[&node.id])?;
+        for credential in &credentials {
+            locks::release_in(&db.conn, credential)?;
         }
-        tx.execute("WITH RECURSIVE tree(id) AS (SELECT id FROM file_info WHERE id=?1 UNION ALL SELECT f.id FROM file_info f JOIN tree t ON f.parent_id=t.id) DELETE FROM file_info WHERE id IN (SELECT id FROM tree)",[&node.id])?;
-        tx.commit()?;
         guard.released_in_transaction();
         drop(db);
         drop(guard);
-        let _ = self.cleanup(password);
-        Ok(if node.kind == "file" {
-            RemovedPathKind::File
-        } else {
-            RemovedPathKind::Directory
-        })
+        Ok((
+            if node.kind == "file" {
+                RemovedPathKind::File
+            } else {
+                RemovedPathKind::Directory
+            },
+            ciphers
+                .into_iter()
+                .map(|cipher| self.veil_dir.join(cipher))
+                .collect(),
+        ))
     }
     pub fn rename_file(&self, from: &str, to: &str, password: &str) -> Result<()> {
         self.move_path(from, to, password).map(|_| ())
@@ -1560,7 +1595,7 @@ impl VeilManager {
             to,
         ))
     }
-    /// 仅清理由本协议命名的无引用对象；删除前持写事务重新核对运行锁及引用。
+    /// 低优先级垃圾回收：只读核对后删除；数据库繁忙时直接跳过，留待下一轮。
     pub fn cleanup(&self, password: &str) -> Result<usize> {
         let result = self.cleanup_inner(password);
         if let Err(error) = &result {
@@ -1576,9 +1611,24 @@ impl VeilManager {
         result
     }
     fn cleanup_inner(&self, password: &str) -> Result<usize> {
-        let mut db = self.open_db(password)?;
-        let dead = locks::dead_locks(&db.conn)?;
-        // 初始快照中仍被引用的密文可以直接保留；未引用候选仍须在写事务内复核。
+        let db = match ContainerDb::open_with_timeout(
+            &self.veil_dir,
+            password,
+            self.expected_veil_id.as_deref(),
+            std::time::Duration::ZERO,
+        ) {
+            Ok(db) => db,
+            Err(VeilError::Database(error))
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                return Ok(0);
+            }
+            Err(error) => return Err(error),
+        };
+        // 初始快照中仍被引用的密文可以直接保留；候选项还会逐个只读复核。
         let referenced: HashSet<String> = {
             let mut query = db
                 .conn
@@ -1587,14 +1637,7 @@ impl VeilManager {
                 .query_map([], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
-        {
-            let tx = db
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            locks::reap(&tx, &dead)?;
-            tx.commit()?;
-        }
-        let mut removed = 0;
+        let mut orphaned_files = Vec::new();
         for entry in fs::read_dir(&self.veil_dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1604,18 +1647,10 @@ impl VeilManager {
             if referenced.contains(&name) {
                 continue;
             }
-            let lock_id = name.split('_').next().unwrap();
-            let tx = db
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            locks::reap(&tx, &dead)?;
-            let referenced:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM file_info WHERE cipher_name=?1) OR EXISTS(SELECT 1 FROM operation_locks WHERE lock_id=?2)",params![name,lock_id],|r|r.get(0))?;
-            if !referenced {
-                fs::remove_file(entry.path())?;
-                removed += 1;
-            }
-            tx.commit()?;
+            let lock_id = name.split('_').next().unwrap().to_owned();
+            orphaned_files.push((entry.path(), name, lock_id));
         }
+        let mut staging_directories = Vec::new();
         let staging = self.veil_dir.join(".staging");
         if staging.is_dir() {
             for entry in fs::read_dir(&staging)? {
@@ -1624,20 +1659,82 @@ impl VeilManager {
                 if !entry.file_type()?.is_dir() || !crate::metadata::is_uuid_v4(&name) {
                     continue;
                 }
-                let tx = db
-                    .conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                locks::reap(&tx, &dead)?;
-                let active: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM operation_locks WHERE lock_id=?1)",
-                    [&name],
-                    |r| r.get(0),
+                staging_directories.push((entry.path(), name));
+            }
+        }
+        let mut removed = 0;
+        for candidates in orphaned_files.chunks(CLEANUP_QUERY_BATCH_SIZE) {
+            let names = candidates
+                .iter()
+                .map(|(_, name, _)| name)
+                .collect::<Vec<_>>();
+            let lock_ids = candidates
+                .iter()
+                .map(|(_, _, lock_id)| lock_id)
+                .collect::<Vec<_>>();
+            let names = json(&names)?;
+            let lock_ids = json(&lock_ids)?;
+            let protected = match (|| -> rusqlite::Result<Vec<(String, String)>> {
+                let mut query = db.conn.prepare(
+                    "SELECT 'file',cipher_name FROM file_info WHERE cipher_name IN (SELECT value FROM json_each(?1)) UNION ALL SELECT 'lock',lock_id FROM operation_locks WHERE lock_id IN (SELECT value FROM json_each(?2)) AND expires_at>?3",
                 )?;
-                if !active {
-                    fs::remove_dir_all(entry.path())?;
+                query
+                    .query_map(params![names, lock_ids, now()], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                    .collect()
+            })() {
+                Ok(protected) => protected,
+                Err(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let protected = protected.into_iter().collect::<HashSet<_>>();
+            for (path, name, lock_id) in candidates {
+                if !protected.contains(&("file".to_owned(), name.clone()))
+                    && !protected.contains(&("lock".to_owned(), lock_id.clone()))
+                {
+                    fs::remove_file(path)?;
                     removed += 1;
                 }
-                tx.commit()?;
+            }
+        }
+        for candidates in staging_directories.chunks(CLEANUP_QUERY_BATCH_SIZE) {
+            let lock_ids = candidates
+                .iter()
+                .map(|(_, lock_id)| lock_id)
+                .collect::<Vec<_>>();
+            let lock_ids = json(&lock_ids)?;
+            let active = match (|| -> rusqlite::Result<HashSet<String>> {
+                let mut query = db.conn.prepare(
+                    "SELECT lock_id FROM operation_locks WHERE lock_id IN (SELECT value FROM json_each(?1)) AND expires_at>?2",
+                )?;
+                query
+                    .query_map(params![lock_ids, now()], |row| row.get(0))?
+                    .collect()
+            })() {
+                Ok(active) => active,
+                Err(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            for (path, lock_id) in candidates {
+                if !active.contains(lock_id) {
+                    fs::remove_dir_all(path)?;
+                    removed += 1;
+                }
             }
         }
         Ok(removed)
@@ -1684,7 +1781,6 @@ impl VeilManager {
             Err(e) => return Err(e),
         };
         if already_rekeyed && self.open_db(new)?.keys()?.len() == 1 {
-            let _ = self.cleanup(new);
             return Ok(());
         }
         let mut db = self.open_db(password)?;
@@ -1810,130 +1906,14 @@ impl VeilManager {
         tx.commit()?;
         drop(db);
         fault("after_retiring_key_removal");
-        let _ = self.cleanup(new);
         Ok(())
     }
-    /// 所有文件读锁与数据库快照保持到密文复制结束；源锁记录保持原样。
-    pub fn snapshot_to(&self, destination: &Path, password: &str) -> Result<usize> {
-        let execution = crate::ExecutionService::global()?;
-        let _scope = execution.enter_task("导出一致快照");
-        let db = self.open_db(password)?;
-        let before = db.subtree(&db.root()?.id)?;
-        let files = before
-            .iter()
-            .filter(|n| n.kind == "file")
-            .map(|n| n.id.clone())
-            .collect::<Vec<_>>();
-        drop(db);
-        let root_id = &before
-            .iter()
-            .find(|node| node.parent_id.is_none())
-            .ok_or_else(|| invalid("根目录缺失"))?
-            .id;
-        let guard = self
-            .lock_manager(password)
-            .acquire_directory(root_id, LockMode::Read)?;
-        if guard
-            .credentials()?
-            .iter()
-            .any(|credential| credential.is_read_only())
-        {
-            return Err(invalid("容器正在写入，无法创建一致的备份"));
-        }
-        let mut source = self.open_db(password)?;
-        let reader = self.open_db(password)?;
-        let tx = source
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if container::subtree(
-            &tx,
-            &before.iter().find(|n| n.parent_id.is_none()).unwrap().id,
-        )? != before
-        {
-            return Err(VeilError::VersionConflict(
-                "快照准备期间目录树已变化".into(),
-            ));
-        }
-        // backup 从另一连接读取已确认快照；当前短事务仅保护初始化快照与数据库复制。
-        crate::fsutil::create_dir_all_durable(destination)?;
-        if fs::read_dir(destination)?.next().transpose()?.is_some() {
-            return Err(invalid("快照目标必须为空目录"));
-        }
-        let path = destination.join(veil_core::database::CONTAINER_DB);
-        if path.exists() {
-            return Err(invalid("快照目标已存在"));
-        }
-        let mut target = veil_core::database::open(&path, Some(password), true)?;
-        let backup = rusqlite::backup::Backup::new(&reader.conn, &mut target)?;
-        backup.run_to_completion(128, Duration::from_millis(5), None)?;
-        drop(backup);
-        tx.commit()?;
-        target.execute("DELETE FROM operation_locks", [])?;
-        drop(target);
-        // 数据库引用的文件受读租约保护；新增文件属于之后的数据库版本。
-        let names: Vec<String> = before
-            .iter()
-            .filter(|n| n.kind == "file")
-            .map(|node| node.cipher().map(str::to_owned))
-            .collect::<Result<_>>()?;
-        let total = names.iter().try_fold(0u64, |total, name| {
-            total.checked_add(fs::metadata(self.veil_dir.join(name)).ok()?.len())
-        });
-        veil_core::progress::stage("snapshot", total);
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        let count = veil_core::progress::worker_count(names.len());
-        veil_core::progress::set_parallel_workers(count);
-        let next = AtomicUsize::new(0);
-        let stopped = AtomicBool::new(false);
-        let failure = std::sync::Mutex::new(None);
-        let progress = veil_core::progress::current();
-        std::thread::scope(|scope| {
-            for _ in 0..count {
-                let names = &names;
-                let next = &next;
-                let stopped = &stopped;
-                let failure = &failure;
-                let progress = &progress;
-                scope.spawn(move || {
-                    let _attachment = progress.as_ref().map(|progress| progress.attach());
-                    loop {
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(name) = names.get(index) else { break };
-                        if let Err(error) = crate::fsutil::copy_file_new_with_progress(
-                            &self.veil_dir.join(name),
-                            &destination.join(name),
-                        ) {
-                            stopped.store(true, Ordering::Release);
-                            let mut failure = failure.lock().unwrap_or_else(|e| e.into_inner());
-                            if failure.is_none() {
-                                *failure = Some(error);
-                            }
-                            break;
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(error) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
-            return Err(error.into());
-        }
-        let db = self.open_db(password)?;
-        for c in guard.credentials()? {
-            locks::validate(&db.conn, &c, Some(LockMode::Read))?;
-        }
-        crate::fsutil::sync_directory(destination)?;
-        Ok(files.len())
-    }
 }
-use std::time::Duration;
 fn verify_base(identity: &str, node: Option<&Node>, base: &VersionSnapshot) -> Result<()> {
     let Some(node) = node else {
         return Err(VeilError::VersionConflict("基础文件已删除".into()));
     };
-    use crate::comparison::{ComparisonChecks, ComparisonState, FileInput, compare_files};
+    use crate::comparison::{compare_files, ComparisonChecks, ComparisonState, FileInput};
     let current = VersionSnapshot {
         veil_id: identity.to_owned(),
         file_id: node.id.clone(),

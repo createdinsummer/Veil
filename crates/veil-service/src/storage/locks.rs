@@ -4,12 +4,12 @@ use crate::{
     error::{Result, VeilError},
     execution::{ExecutionEndpoint, ExecutionOwner, ExecutionServer, ExecutionService, Liveness},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -20,6 +20,9 @@ use zeroize::Zeroizing;
 
 pub const LEASE: Duration = Duration::from_secs(30);
 pub const RENEW_INTERVAL: Duration = Duration::from_secs(5);
+/// SQLite 写锁短暂竞争时，在租约尚未失效前继续尝试续租。
+const RENEW_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const RENEW_MAX_RETRIES: u32 = 16;
 pub const BACKOFF: Duration = Duration::from_millis(20);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 const PROBE_BATCH_BUDGET: Duration = Duration::from_millis(250);
@@ -558,6 +561,20 @@ impl LockManager {
         Ok(credentials)
     }
     pub fn renew(&self, credentials: &mut [Credential]) -> Result<()> {
+        self.renew_with_retry(
+            credentials,
+            veil_core::database::BusyRetryPolicy {
+                max_retries: 0,
+                deadline: Instant::now(),
+                retry_interval: Duration::ZERO,
+            },
+        )
+    }
+    fn renew_with_retry(
+        &self,
+        credentials: &mut [Credential],
+        retry: veil_core::database::BusyRetryPolicy,
+    ) -> Result<()> {
         let started = Instant::now();
         logging::remember_sensitive(self.password.as_str());
         let remaining = credentials
@@ -565,7 +582,7 @@ impl LockManager {
             .map(|c| c.valid_until.saturating_duration_since(Instant::now()))
             .min()
             .unwrap_or_default();
-        let result = self.renew_inner(credentials);
+        let result = veil_core::database::retry_busy(retry, || self.renew_inner(credentials));
         let context = [
             ("database", Field::Path(&self.directory)),
             (
@@ -870,9 +887,6 @@ pub(crate) fn release_in(conn: &Connection, c: &Credential) -> Result<()> {
     )?;
     Ok(())
 }
-pub(crate) fn dead_locks(conn: &Connection) -> Result<Vec<(String, String)>> {
-    dead_locks_until(conn, None, None, None)
-}
 fn dead_locks_until(
     conn: &Connection,
     resources: Option<&[String]>,
@@ -966,13 +980,26 @@ impl LeaseGuard {
         let renewal = manager.clone();
         let worker = ExecutionService::global()?
             .spawn_thread("文件租约续租", move |_| {
-                let mut last = Instant::now();
+                let mut next_renewal = Instant::now() + RENEW_INTERVAL;
                 while !stopped.load(Ordering::Acquire) {
                     std::thread::park_timeout(Duration::from_millis(100));
-                    if last.elapsed() >= RENEW_INTERVAL {
+                    if Instant::now() >= next_renewal {
                         if let Ok(mut c) = shared.lock() {
-                            if renewal.renew(&mut c).is_err() {
-                                break;
+                            let deadline = c
+                                .iter()
+                                .map(|credential| credential.valid_until)
+                                .min()
+                                .unwrap_or_else(Instant::now);
+                            match renewal.renew_with_retry(
+                                &mut c,
+                                veil_core::database::BusyRetryPolicy {
+                                    max_retries: RENEW_MAX_RETRIES,
+                                    deadline,
+                                    retry_interval: RENEW_RETRY_INTERVAL,
+                                },
+                            ) {
+                                Ok(()) => next_renewal = Instant::now() + RENEW_INTERVAL,
+                                Err(_) => break,
                             }
                         } else {
                             logging::event(
@@ -985,7 +1012,6 @@ impl LeaseGuard {
                             );
                             break;
                         }
-                        last = Instant::now();
                     }
                 }
             })?

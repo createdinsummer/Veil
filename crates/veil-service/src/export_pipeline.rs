@@ -436,25 +436,30 @@ fn publish(
     progress::check_cancelled()?;
     // 在事务之前取凭据，避免与续约线程形成相反的加锁顺序。
     let credentials = guard.credentials()?;
-    let tx = db.conn.transaction()?;
-    locks::validate_many(
-        &tx,
-        &credentials
-            .iter()
-            .map(|c| (c, Some(LockMode::Read)))
-            .collect::<Vec<_>>(),
-    )?;
-    let nodes = container::nodes_batch(
-        &tx,
-        &batch
-            .iter()
-            .map(|s| s.ready.node.id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    for staged in &batch {
-        if nodes.get(&staged.ready.node.id) != Some(&staged.ready.node) {
-            return Err(VeilError::VersionConflict("导出源在发布前已变化".into()));
+    {
+        // 读租约保护整个导出过程；数据库事务只用于取得发布前的一致元数据快照。
+        // 不能将明文发布或目录同步置于事务内，否则会长时间阻塞写事务提交。
+        let tx = db.conn.transaction()?;
+        locks::validate_many(
+            &tx,
+            &credentials
+                .iter()
+                .map(|c| (c, Some(LockMode::Read)))
+                .collect::<Vec<_>>(),
+        )?;
+        let nodes = container::nodes_batch(
+            &tx,
+            &batch
+                .iter()
+                .map(|s| s.ready.node.id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        for staged in &batch {
+            if nodes.get(&staged.ready.node.id) != Some(&staged.ready.node) {
+                return Err(VeilError::VersionConflict("导出源在发布前已变化".into()));
+            }
         }
+        tx.commit()?;
     }
     // 文件系统发布逐项完成；错误不会回滚已发布文件，进度仅在发布成功后增加。
     for staged in batch {
@@ -489,7 +494,14 @@ fn publish(
             }
         }
     }
-    tx.commit()?;
+    let credentials = guard.credentials()?;
+    locks::validate_many(
+        &db.conn,
+        &credentials
+            .iter()
+            .map(|c| (c, Some(LockMode::Read)))
+            .collect::<Vec<_>>(),
+    )?;
     Ok(())
 }
 

@@ -82,28 +82,30 @@ fn error_logging_worker() {
     )
     .unwrap();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    // 真实占用 SQLite 写锁，等待实际续租线程失败；不注入伪造错误。
-    let deadline = Instant::now() + Duration::from_secs(12);
-    let failure = loop {
+    // 真实占用 SQLite 写锁，确认续租会在临时繁忙后等待并恢复；不注入伪造错误。
+    std::thread::sleep(Duration::from_secs(8));
+    db.execute_batch("ROLLBACK").unwrap();
+    drop(db);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let recovered = loop {
         if let Some(record) = logging::snapshot()
             .unwrap()
             .into_iter()
-            .find(|r| r.event == "LEASE_RENEW_FAILED")
+            .find(|r| r.event == "LEASE_RENEW_SLOW")
         {
             break record;
         }
-        assert!(Instant::now() < deadline, "续租线程失败必须留下诊断记录");
+        assert!(
+            Instant::now() < deadline,
+            "续租线程应在 SQLite 临时繁忙后恢复"
+        );
         std::thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(failure.code, "SQLITE_BUSY");
-    assert_eq!(failure.native_code, Some(5));
-    assert_eq!(failure.request_id, logging::request_id());
-    assert_eq!(failure.context["lock_count"], 1);
-    assert!(failure.context["elapsed_ms"].as_u64().unwrap() >= 1000);
-    assert!(failure.context["remaining_lease_ms"].as_u64().unwrap() > 0);
-    assert!(failure.backtrace.is_none(), "常规故障默认不采集堆栈");
-    db.execute_batch("ROLLBACK").unwrap();
-    drop(db);
+    assert_eq!(recovered.request_id, logging::request_id());
+    assert_eq!(recovered.context["lock_count"], 1);
+    assert!(recovered.context["elapsed_ms"].as_u64().unwrap() >= 1000);
+    assert!(recovered.context["remaining_lease_ms"].as_u64().unwrap() > 0);
+    assert!(recovered.backtrace.is_none(), "常规故障默认不采集堆栈");
     drop(lease);
 
     let lease = locks.acquire_container(LockMode::Write).unwrap();

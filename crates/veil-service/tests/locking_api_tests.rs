@@ -2,9 +2,9 @@
 use std::time::Duration;
 use tempfile::TempDir;
 use veil_service::{
-    ExecutionService,
     storage::locks::{LockManager, LockMode, LockOptions},
     veil_ops::{AddFileSpec, VeilManager},
+    ExecutionService,
 };
 
 #[test]
@@ -62,11 +62,9 @@ fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
     assert!(direct.credentials().unwrap()[0].is_read_only());
     let read = locks.acquire(&[file.clone()], LockMode::Read).unwrap();
     assert!(!read.credentials().unwrap()[0].is_read_only());
-    assert!(
-        locks
-            .acquire_directory(&directory, LockMode::SharedWrite)
-            .is_err()
-    );
+    assert!(locks
+        .acquire_directory(&directory, LockMode::SharedWrite)
+        .is_err());
     drop(read);
     let write = locks
         .acquire_directory(&directory, LockMode::SharedWrite)
@@ -79,15 +77,14 @@ fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
         &write,
     )
     .unwrap();
-    assert!(
-        veil.add_files_with_shared_directory_lock(
+    assert!(veil
+        .add_files_with_shared_directory_lock(
             &[AddFileSpec::new(&source, "outside")],
             "password",
             "dir",
             &write
         )
-        .is_err()
-    );
+        .is_err());
     assert_eq!(
         veil.read_file_bytes("dir/file", "password", 100).unwrap(),
         b"content"
@@ -97,41 +94,33 @@ fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
         .unwrap();
     assert_eq!(bytes, b"content");
     assert!(unstable);
-    assert!(
-        veil.extract_file_without_overwrite_with_status(
+    assert!(veil
+        .extract_file_without_overwrite_with_status(
             "dir/file",
             &root.path().join("export"),
             "password"
         )
-        .is_err()
-    );
-    assert!(
-        veil_service::comparison::compare_files(
-            veil_service::comparison::FileInput::ContainerCiphertext {
-                manager: &veil,
-                path: "dir/file",
-                password: "password",
-            },
-            veil_service::comparison::FileInput::External {
-                path: &source,
-                version: None
-            },
-            veil_service::comparison::ComparisonChecks {
-                content: true,
-                ..Default::default()
-            },
-        )
-        .is_err()
-    );
-    assert!(
-        veil.snapshot_to(&root.path().join("backup"), "password")
-            .is_err()
-    );
-    assert!(
-        locks
-            .acquire(&[file.clone()], LockMode::SharedWrite)
-            .is_err()
-    );
+        .is_err());
+    assert!(veil_service::comparison::compare_files(
+        veil_service::comparison::FileInput::ContainerCiphertext {
+            manager: &veil,
+            path: "dir/file",
+            password: "password",
+        },
+        veil_service::comparison::FileInput::External {
+            path: &source,
+            version: None
+        },
+        veil_service::comparison::ComparisonChecks {
+            content: true,
+            ..Default::default()
+        },
+    )
+    .is_err());
+    assert!(veil.read_meta_snapshot("password").is_err());
+    assert!(locks
+        .acquire(&[file.clone()], LockMode::SharedWrite)
+        .is_err());
     assert!(locks.acquire(&[file.clone()], LockMode::Write).is_err());
     drop(write);
     let file_write = locks
@@ -270,49 +259,35 @@ fn directory_lock_blocks_mutations_and_allows_unrelated_directory() {
         .with_options(options)
         .acquire_directory(&locked, LockMode::Write)
         .unwrap();
-    assert!(
-        manager
-            .create_directory("locked/sub/new", "password")
-            .is_err()
-    );
-    assert!(
-        manager
-            .add_files(
-                &[AddFileSpec::new(&source, "locked/sub/new-file")],
-                "password"
-            )
-            .is_err()
-    );
-    assert!(
-        manager
-            .read_file_bytes("locked/sub/existing", "password", 100)
-            .is_err()
-    );
-    assert!(
-        manager
-            .remove_path("locked/sub/existing", "password")
-            .is_err()
-    );
-    assert!(
-        manager
-            .move_path("locked", "other/locked", "password")
-            .is_err()
-    );
+    assert!(manager
+        .create_directory("locked/sub/new", "password")
+        .is_err());
+    assert!(manager
+        .add_files(
+            &[AddFileSpec::new(&source, "locked/sub/new-file")],
+            "password"
+        )
+        .is_err());
+    assert!(manager
+        .read_file_bytes("locked/sub/existing", "password", 100)
+        .is_err());
+    assert!(manager
+        .remove_path("locked/sub/existing", "password")
+        .is_err());
+    assert!(manager
+        .move_path("locked", "other/locked", "password")
+        .is_err());
     manager.create_directory("other/child", "password").unwrap();
     manager
         .add_files(&[AddFileSpec::new(&source, "other/child/new")], "password")
         .unwrap();
-    assert!(
-        manager
-            .move_path("other/child/new", "locked/sub/new", "password")
-            .is_err()
-    );
+    assert!(manager
+        .move_path("other/child/new", "locked/sub/new", "password")
+        .is_err());
     assert!(manager.change_password("password", "new-password").is_err());
-    assert!(
-        manager
-            .change_password_full("password", "new-password")
-            .is_err()
-    );
+    assert!(manager
+        .change_password_full("password", "new-password")
+        .is_err());
     drop(lock);
     assert_eq!(
         manager
@@ -333,24 +308,18 @@ fn directory_lock_process_worker() {
         cancellation: None,
     });
     assert!(manager.create_directory("locked/new", "password").is_err());
-    assert!(
-        manager
-            .read_file_bytes("locked/existing", "password", 100)
-            .is_err()
-    );
-    assert!(
-        manager
-            .add_files(
-                &[AddFileSpec::new(root.join("source"), "locked/new-file")],
-                "password"
-            )
-            .is_err()
-    );
-    assert!(
-        manager
-            .move_path("locked/existing", "other/moved", "password")
-            .is_err()
-    );
+    assert!(manager
+        .read_file_bytes("locked/existing", "password", 100)
+        .is_err());
+    assert!(manager
+        .add_files(
+            &[AddFileSpec::new(root.join("source"), "locked/new-file")],
+            "password"
+        )
+        .is_err());
+    assert!(manager
+        .move_path("locked/existing", "other/moved", "password")
+        .is_err());
     manager
         .create_directory("other/allowed", "password")
         .unwrap();
@@ -474,19 +443,15 @@ fn reads_share_writes_exclude_and_batch_failure_leaves_no_partial_locks() {
     let second = manager
         .acquire(&[identity.clone()], LockMode::Read)
         .unwrap();
-    assert!(
-        manager
-            .acquire(&["other".into(), identity.clone()], LockMode::Write)
-            .is_err()
-    );
+    assert!(manager
+        .acquire(&["other".into(), identity.clone()], LockMode::Write)
+        .is_err());
     let independent = manager.acquire(&["other".into()], LockMode::Write).unwrap();
     drop(independent);
-    assert!(
-        VeilManager::new(m.veil_dir.clone())
-            .with_lock_options(options.clone())
-            .add_files(&[AddFileSpec::new(&source, "a")], "password")
-            .is_err()
-    );
+    assert!(VeilManager::new(m.veil_dir.clone())
+        .with_lock_options(options.clone())
+        .add_files(&[AddFileSpec::new(&source, "a")], "password")
+        .is_err());
     drop(read);
     drop(second);
     let exclusive = manager
@@ -510,26 +475,22 @@ fn handoff_rejects_old_credentials_and_cancellation_is_observed() {
     manager.renew(&mut renewed).unwrap();
     let execution = ExecutionService::global().unwrap();
     let scope = execution.enter_task("接收锁");
-    assert!(
-        manager
-            .handoff(&old[..1], scope.owner().clone(), None)
-            .is_err()
-    );
+    assert!(manager
+        .handoff(&old[..1], scope.owner().clone(), None)
+        .is_err());
     let replacement = guard.handoff(scope.owner().clone(), None).unwrap();
     let mut stale = old.clone();
     assert!(manager.renew(&mut stale).is_err());
     assert!(manager.release(&old).is_err());
     replacement.release().unwrap();
     let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    assert!(
-        manager
-            .with_options(LockOptions {
-                timeout: None,
-                cancellation: Some(cancelled)
-            })
-            .acquire(&["a".into()], LockMode::Read)
-            .is_err()
-    );
+    assert!(manager
+        .with_options(LockOptions {
+            timeout: None,
+            cancellation: Some(cancelled)
+        })
+        .acquire(&["a".into()], LockMode::Read)
+        .is_err());
 }
 
 #[test]

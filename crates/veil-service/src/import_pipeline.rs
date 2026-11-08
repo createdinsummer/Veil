@@ -782,7 +782,6 @@ pub(crate) fn run_mapped(
     });
     let snapshot = progress_state.snapshot();
     drop(directory_locks);
-    let _ = manager.cleanup(password);
     if let Some((name, source)) = shared
         .failure
         .into_inner()
