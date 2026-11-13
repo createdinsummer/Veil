@@ -75,12 +75,25 @@ private struct PDFPreview: NSViewRepresentable {
     func updateNSView(_ view: PDFView, context: Context) { }
 }
 
-private struct VideoPreview: View {
+private struct VideoPreview: NSViewRepresentable {
+    // 使用 AppKit 的 AVPlayerView 而不是 SwiftUI 的 VideoPlayer：
+    // VideoPlayer 经由 _AVKit_SwiftUI 在 macOS 27 上创建视图时会触发
+    // getSuperclassMetadata 崩溃（SIGABRT），AVPlayerView 不经过该框架。
     let url: URL
-    @State private var player = AVPlayer()
-    var body: some View {
-        VideoPlayer(player: player)
-            .onAppear { player.replaceCurrentItem(with: AVPlayerItem(url: url)) }
-            .onDisappear { player.pause(); player.replaceCurrentItem(with: nil) }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.allowsPictureInPicturePlayback = false
+        view.player = AVPlayer(url: url)
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) { }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) {
+        view.player?.pause()
+        view.player = nil
     }
 }

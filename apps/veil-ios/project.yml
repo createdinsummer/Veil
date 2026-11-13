@@ -33,3 +33,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: Veil
+
+schemes:
+  VeilIOS:
+    build:
+      targets:
+        VeilIOS: all

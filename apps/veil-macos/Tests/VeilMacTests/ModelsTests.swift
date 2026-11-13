@@ -80,6 +80,28 @@ final class ModelsTests: XCTestCase {
 
 @MainActor
 final class NativeClientTests: XCTestCase {
+    func testDeleteContainerClearsDirectoryRegistrationAndSession() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("删除集成测试需要独立的测试目录")
+        }
+        let store = AppStore()
+        await store.load()
+        let space = try XCTUnwrap(store.activeSpace)
+        let password = "delete-test-password"
+        await store.submit(.create(space: space.id), name: "删除兼容性 " + UUID().uuidString,
+                           password: password, confirmation: password)
+        let container = try XCTUnwrap(store.container)
+        let item = ContainerSummary(id: container.id, name: container.name, path: container.path)
+        let deleted = await store.deleteContainer(item)
+        XCTAssertTrue(deleted)
+        XCTAssertNil(store.error)
+        XCTAssertNil(store.container)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path))
+        XCTAssertFalse(store.spaces.flatMap(\.containers).contains { $0.id == container.id })
+        XCTAssertFalse(store.recents.contains { $0.id == container.id })
+    }
+
     func testCustomSpaceDirectoryIsPersistedAndUsedForNewContainers() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {

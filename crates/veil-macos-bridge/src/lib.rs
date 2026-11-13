@@ -581,6 +581,37 @@ mod tests {
             .0,
             0
         );
+        let (kind, bytes) = unsafe {
+            call(
+                client,
+                serde_json::json!({"operation":"delete_container","id":container["id"]}),
+            )
+        };
+        assert_eq!(kind, 0, "{}", String::from_utf8_lossy(&bytes));
+        let spaces: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(spaces.as_array().unwrap().iter().all(|space| {
+            space["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["id"] != container["id"])
+        }));
+        assert!(!Path::new(container["path"].as_str().unwrap()).exists());
+        assert_eq!(
+            unsafe { call(client, serde_json::json!({"operation":"refresh"})) }.0,
+            1
+        );
+        let (kind, bytes) =
+            unsafe { call(client, serde_json::json!({"operation":"list_recents"})) };
+        assert_eq!(kind, 0);
+        let recents: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            recents
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["id"] != container["id"])
+        );
         unsafe {
             veil_client_free(client);
         }
