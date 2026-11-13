@@ -1,7 +1,6 @@
 //! 容器创建的事务编排。
 
 use crate::config::AppConfig;
-use crate::veil_ops::VeilManager;
 use std::path::Path;
 use veil_core::error::VeilError;
 
@@ -36,6 +35,7 @@ pub(crate) fn create_registered_container(
     work_root: &Path,
     work_root_existed: bool,
     link_path: &Path,
+    initialize: impl FnOnce(&Path, &str, &str, &str) -> Result<veil_core::metadata::MetaData, VeilError>,
 ) -> Result<(), CreationError> {
     crate::work::validate_veil_id(veil_id).map_err(CreationError::Register)?;
     if veil_dir != work_root.join(veil_id) || veil_name.trim().is_empty() || password.is_empty() {
@@ -43,6 +43,9 @@ pub(crate) fn create_registered_container(
             "容器参数无效".into(),
         )));
     }
+    let _container_lock = config
+        .container_lifecycle_lock(veil_id)
+        .map_err(CreationError::Register)?;
     config
         .ensure_veil_id_available(veil_id)
         .map_err(CreationError::Register)?;
@@ -62,10 +65,8 @@ pub(crate) fn create_registered_container(
         }
     })?;
     let mut initialized = false;
-    let manager = VeilManager::for_veil(veil_dir.to_path_buf(), veil_id.to_owned());
     let result = (|| {
-        let metadata = manager
-            .init_veil_with_id(veil_id, veil_name, password)
+        let metadata = initialize(veil_dir, veil_id, veil_name, password)
             .map_err(CreationError::Initialize)?;
         initialized = true;
         #[cfg(feature = "fault-injection")]

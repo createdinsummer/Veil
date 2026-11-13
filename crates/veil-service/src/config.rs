@@ -282,6 +282,10 @@ impl AppConfig {
         }
         Ok(())
     }
+    pub(crate) fn container_lifecycle_lock(&self, identity: &str) -> Result<std::fs::File> {
+        self.store()?.acquire_container_shared_lock(identity)
+    }
+
     pub fn register_directory(
         &mut self,
         directory: &Path,
@@ -289,6 +293,7 @@ impl AppConfig {
         name: &str,
         created: &str,
     ) -> Result<()> {
+        let _container_lock = self.container_lifecycle_lock(identity)?;
         let directory = std::fs::canonicalize(directory)?;
         if directory.file_name().and_then(|n| n.to_str()) != Some(identity) {
             return Err(invalid("容器目录名称必须与真实 ID 一致"));

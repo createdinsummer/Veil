@@ -283,8 +283,20 @@ pub(crate) fn prepare_create(options: CreateOptions<'_>) -> Result<CreatePlan, W
 
 /// 创建前重新校验路径，随后创建并登记容器。
 pub(crate) fn commit_create(
+    plan: CreatePlan,
+    password: &str,
+) -> Result<CreatedContainer, WorkflowError> {
+    commit_create_with_initializer(plan, password, |directory, id, name, password| {
+        crate::veil_ops::VeilManager::for_veil(directory.into(), id)
+            .init_veil_with_id(id, name, password)
+    })
+}
+
+/// 共用创建计划、目录占位和登记流程，允许复制流程直接初始化目标数据库。
+pub(crate) fn commit_create_with_initializer(
     mut plan: CreatePlan,
     password: &str,
+    initialize: impl FnOnce(&Path, &str, &str, &str) -> Result<veil_core::metadata::MetaData, VeilError>,
 ) -> Result<CreatedContainer, WorkflowError> {
     if password.is_empty() {
         return Err(WorkflowError::PasswordEmpty);
@@ -300,6 +312,7 @@ pub(crate) fn commit_create(
         &plan.work_root,
         existed,
         &plan.link_path,
+        initialize,
     )
     .map_err(|error| match error {
         CreationError::ContainerExists(path) => WorkflowError::ContainerExists(path),

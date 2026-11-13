@@ -4,12 +4,12 @@ use crate::{
     error::{Result, VeilError},
     execution::{ExecutionEndpoint, ExecutionOwner, ExecutionServer, ExecutionService, Liveness},
 };
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -1042,6 +1042,11 @@ impl LeaseGuard {
         if let Ok(mut owned) = self.credentials.lock() {
             owned.clear();
         }
+    }
+    /// 容器目录即将整体删除时，停止续租并丢弃凭据，不再尝试访问已删除的数据库。
+    pub(crate) fn abandon(mut self) {
+        self.stop_worker();
+        self.released_in_transaction();
     }
     /// 数据库改密成功后，使用新密码释放同一组租约。
     pub(crate) fn release_after_rekey(mut self, password: &str) -> Result<()> {

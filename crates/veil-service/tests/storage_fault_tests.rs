@@ -178,7 +178,7 @@ fn move_worker() {
         .unwrap();
 }
 #[test]
-fn moving_container_recovers_after_directory_publish() {
+fn failed_container_copy_cleans_target_and_preserves_source() {
     use veil_service::{config::AppConfig, storage::app::AppStore};
     let root = TempDir::new().unwrap();
     let app = root.path().join("app");
@@ -198,33 +198,25 @@ fn moving_container_recovers_after_directory_publish() {
         serde_json::to_vec(&[&identity, &target.id]).unwrap(),
     )
     .unwrap();
-    let mut first = Command::new(std::env::current_exe().unwrap());
-    first
-        .args(["--exact", "move_worker", "--nocapture"])
-        .env("VEIL_SQL_MOVE_ROOT", root.path())
-        .env("VEIL_APP_DATA_DIR", &app)
-        .env("VEIL_TEST_FAILPOINT", "after_container_move");
-    assert_eq!(first.status().unwrap().code(), Some(86));
-    assert!(!directory.exists());
-    let destination = target.local_path.unwrap().join(&identity);
-    assert!(destination.join("veil.db").exists());
-    assert_eq!(store.registrations().unwrap()[0].space_id, source.id);
+    let missing = root.path().join("plain.txt");
+    fs::write(&missing, b"payload").unwrap();
+    m.add_file(&missing, "pw").unwrap();
+    let cipher = m.list_files("pw").unwrap()[0].encrypted_name.clone();
+    fs::remove_file(directory.join(cipher)).unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "move_worker", "--nocapture"])
         .env("VEIL_SQL_MOVE_ROOT", root.path())
         .env("VEIL_APP_DATA_DIR", &app)
         .status()
         .unwrap();
-    assert!(status.success());
-    assert_eq!(store.registrations().unwrap()[0].space_id, target.id);
-    assert_eq!(
-        ContainerDb::open(&destination, "pw", Some(&identity))
-            .unwrap()
-            .info()
-            .unwrap()
-            .0,
-        identity
-    );
+    assert!(!status.success());
+    assert!(directory.join("veil.db").exists());
+    let registrations = store.registrations().unwrap();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].space_id, source.id);
+    assert_eq!(fs::read_dir(target.local_path.unwrap()).unwrap().count(), 0);
+    let state: serde_json::Value = store.record("div_state", &identity).unwrap().unwrap();
+    assert!(state.get("movement").is_none());
 }
 
 #[test]

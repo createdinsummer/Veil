@@ -191,6 +191,11 @@ fn delete_space_staged(
     if !space_ids.iter().any(|id| id == identity) {
         return Err(VeilError::WorkError("空间目录登记无效".into()));
     }
+    if space_has_active_movement(&tx, &space_ids, &stored_path)? {
+        return Err(VeilError::WorkError(
+            "空间中有容器正在移动，不能删除空间".into(),
+        ));
+    }
     if delete_files {
         *phase = Some("remove_files");
         std::fs::remove_dir_all(&stored_path)?;
@@ -245,6 +250,38 @@ fn delete_space_staged(
     Ok(())
 }
 
+fn space_has_active_movement(
+    tx: &rusqlite::Transaction<'_>,
+    space_ids: &[String],
+    root: &std::path::Path,
+) -> Result<bool, VeilError> {
+    let mut statement = tx.prepare(
+        "SELECT value_json FROM local_record WHERE record_type='div_state' AND json_type(value_json,'$.movement') IS NOT NULL",
+    )?;
+    let states = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for raw in states {
+        let state: serde_json::Value = crate::storage::parse(&raw)?;
+        let Some(movement) = state.get("movement") else {
+            continue;
+        };
+        let references_space = ["source_space_id", "target_space_id"]
+            .into_iter()
+            .filter_map(|key| movement.get(key).and_then(serde_json::Value::as_str))
+            .any(|id| space_ids.iter().any(|space| space == id));
+        let includes_path = ["source", "destination"]
+            .into_iter()
+            .filter_map(|key| movement.get(key).and_then(serde_json::Value::as_str))
+            .map(std::path::Path::new)
+            .any(|path| path.starts_with(root));
+        if references_space || includes_path {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// 删除已登记容器的加密目录，并清除本机登记和最近记录。
 pub fn delete_container(identity: &str) -> Result<(), VeilError> {
     let mut phase = None;
@@ -257,8 +294,17 @@ fn delete_container_staged(
     identity: &str,
     phase: &mut Option<&'static str>,
 ) -> Result<(), VeilError> {
-    crate::work::validate_veil_id(identity)?;
     let mut store = AppStore::global()?;
+    delete_container_in_store(&mut store, identity, phase)
+}
+
+fn delete_container_in_store(
+    store: &mut AppStore,
+    identity: &str,
+    phase: &mut Option<&'static str>,
+) -> Result<(), VeilError> {
+    crate::work::validate_veil_id(identity)?;
+    let _container_lock = store.acquire_container_delete_lock(identity)?;
     let registration = store
         .registrations()?
         .into_iter()
@@ -287,59 +333,57 @@ fn delete_container_staged(
         return Err(VeilError::WorkError("容器目录超出空间范围".into()));
     }
 
-    // 删除容器只依据空间登记和目录路径，不读取加密库，也不验证容器版本或密码。
-    let tombstone = root.join(format!(
-        ".veil-deleting-{}-{}",
-        identity,
-        crate::storage::id()
-    ));
+    // 排他锁保护整个删除过程；事务只清除 app.db 记录。
+    *phase = Some("commit_registration");
     let tx = store
         .conn
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current_space: Option<String> = tx
-        .query_row(
-            "SELECT space_id FROM space_div WHERE div_id=?1",
-            [identity],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if current_space.as_deref() != Some(registration.space_id.as_str()) {
-        return Err(VeilError::WorkError("容器归属已变化，请刷新后重试".into()));
-    }
-
+    check_container_delete_registration(&tx, identity, &registration.space_id)?;
     tx.execute("DELETE FROM space_div WHERE div_id=?1", [identity])?;
-    tx.execute(
-        "DELETE FROM local_record WHERE record_key=?1 AND record_type IN ('recent_div','div_state')",
-        [identity],
-    )?;
-    tx.execute(
-        "DELETE FROM local_record WHERE record_type='link_cache' AND json_extract(value_json,'$.link.veil.veil_id')=?1",
-        [identity],
-    )?;
-    *phase = Some("publish_tombstone");
-    veil_core::fsutil::rename_no_replace(&container_path, &tombstone)?;
-    if let Err(error) = veil_core::fsutil::sync_directory(&root) {
-        let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
-        return Err(error.into());
-    }
-    *phase = Some("commit_registration");
-    if let Err(error) = tx.commit() {
-        let _ = veil_core::fsutil::rename_no_replace(&tombstone, &container_path);
-        let _ = veil_core::fsutil::sync_directory(&root);
-        return Err(error.into());
-    }
+    tx.execute("DELETE FROM local_record WHERE record_key=?1 AND record_type IN ('recent_div','div_state')", [identity])?;
+    tx.execute("DELETE FROM local_record WHERE record_type='link_cache' AND json_extract(value_json,'$.link.veil.veil_id')=?1", [identity])?;
+    tx.commit()?;
 
-    *phase = Some("remove_tombstone");
-    std::fs::remove_dir_all(&tombstone).map_err(|error| {
+    // 直接删除整个目录，容器 DB 和密文文件一起移除，不改名、不恢复目录。
+    debug_assert!(store.conn.is_autocommit());
+    veil_core::database::invalidate(&container_path.join(veil_core::database::CONTAINER_DB));
+    *phase = Some("remove_files");
+    std::fs::remove_dir_all(&container_path).map_err(|error| {
         VeilError::WorkError(format!(
-            "容器已从空间移除，但临时数据清理失败（{}）：{error}",
-            tombstone.display()
+            "容器登记已删除，但容器目录删除失败（{}）：{error}",
+            container_path.display()
         ))
     })?;
     *phase = Some("sync_removed_directory");
     veil_core::fsutil::sync_directory(&root)?;
     Ok(())
 }
+fn check_container_delete_registration(
+    conn: &rusqlite::Connection,
+    identity: &str,
+    expected_space: &str,
+) -> Result<(), VeilError> {
+    use crate::storage::invalid;
+    let moving: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_record WHERE record_type='div_state' AND record_key=?1 AND json_type(value_json,'$.movement') IS NOT NULL)",
+        [identity], |row| row.get(0),
+    )?;
+    if moving {
+        return Err(invalid("容器正在移动，不能删除"));
+    }
+    let current_space: Option<String> = conn
+        .query_row(
+            "SELECT space_id FROM space_div WHERE div_id=?1",
+            [identity],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current_space.as_deref() != Some(expected_space) {
+        return Err(invalid("容器归属已变化，请刷新后重试"));
+    }
+    Ok(())
+}
+
 pub(crate) fn create_container(
     space: &str,
     name: &str,
@@ -369,24 +413,15 @@ pub(crate) fn create_container(
     workflow::commit_create(plan, password)
 }
 
-/// 同设备原子移动；意图保存在本机库，进程中断后可用同一请求恢复登记。
-/// 跨文件系统由系统明确拒绝，调用方可使用一致打包和独立导入。
+/// 复制为独立的新容器；源登记、文件和当前会话保持不变。
 pub fn move_container(identity: &str, target_space: &str, password: &str) -> Result<(), VeilError> {
-    let mut phase = None;
-    let result = move_container_staged(identity, target_space, password, &mut phase);
-    diagnose_partial_mutation("move_container", identity, phase, &result);
-    result
-}
-
-fn move_container_staged(
-    identity: &str,
-    target_space: &str,
-    password: &str,
-    phase: &mut Option<&'static str>,
-) -> Result<(), VeilError> {
-    use crate::storage::{container::ContainerDb, invalid, json, now};
-    use rusqlite::{TransactionBehavior, params};
-    let mut store = AppStore::global()?;
+    use crate::storage::{
+        container::ContainerDb,
+        invalid,
+        locks::{self, LockManager, LockMode},
+    };
+    crate::work::validate_veil_id(identity)?;
+    let store = AppStore::global()?;
     let registration = store
         .registrations()?
         .into_iter()
@@ -397,149 +432,287 @@ fn move_container_staged(
         .iter()
         .find(|s| s.id == registration.space_id)
         .ok_or_else(|| invalid("原空间不存在"))?;
-    let target = spaces
-        .iter()
-        .find(|s| s.id == target_space)
-        .ok_or_else(|| invalid("目标空间不存在"))?;
-    if source_space.id == target.id {
-        return Ok(());
-    }
     let _source_space_lock = store.acquire_space_shared_lock(&source_space.id)?;
-    let _target_space_lock = store.acquire_space_shared_lock(&target.id)?;
+    let _target_space_lock = store.acquire_space_shared_lock(target_space)?;
+    ensure_space_available(target_space)?;
     let source = source_space
         .local_path
         .as_ref()
         .ok_or_else(|| invalid("原空间未绑定"))?
         .join(identity);
-    let destination = target
-        .local_path
-        .as_ref()
-        .ok_or_else(|| invalid("目标空间未绑定"))?
-        .join(identity);
-    let mut state: serde_json::Value = store
-        .record("div_state", identity)?
-        .ok_or_else(|| invalid("请先解锁登记容器身份"))?;
-    let recovering = state.get("movement").is_some();
-    if let Some(movement) = state.get("movement") {
-        if movement["source"] != source.to_string_lossy().as_ref()
-            || movement["destination"] != destination.to_string_lossy().as_ref()
-        {
-            return Err(invalid("存在待恢复的移动，请先恢复原移动请求"));
-        }
-    }
-    let actual = match (source.is_dir(), destination.is_dir()) {
-        (true, false) => &source,
-        (false, true) if state.get("movement").is_some() => &destination,
-        (true, true) => return Err(VeilError::VeilIdConflict("原位置与目标位置同时存在".into())),
-        _ => return Err(invalid("无法确认容器实际位置")),
-    };
-    if recovering {
-        veil_core::logging::event(
-            veil_core::logging::Level::Warn,
-            "service",
-            "move_container",
-            "CONTAINER_MOVE_RESUMED",
-            "检测到未完成的移动意图，继续核对并恢复登记",
-            &[("resource", veil_core::logging::Field::Resource(identity))],
-        );
-    }
-    let mut db = ContainerDb::open(actual, password, Some(identity))?;
-    let container_tx = db
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let count: i64 =
-        container_tx.query_row("SELECT count(*) FROM operation_locks", [], |r| r.get(0))?;
-    if count != 0 {
-        return Err(invalid("容器存在文件操作，请结束操作或清理失效锁后再移动"));
-    }
-    let app_tx = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current: String = app_tx.query_row(
-        "SELECT space_id FROM space_div WHERE div_id=?1",
-        [identity],
-        |r| r.get(0),
-    )?;
-    if current != source_space.id {
-        return Err(invalid("容器归属已变化"));
-    }
-    if target.storage_mode == "dedicated"
-        && app_tx.query_row(
-            "SELECT count(*) FROM space_div WHERE space_id=?1",
-            [target_space],
-            |r| r.get::<_, i64>(0),
-        )? > 0
-    {
-        return Err(invalid("专属空间已有容器"));
-    }
-    state["movement"] = serde_json::json!({"source":source,"destination":destination});
-    app_tx.execute("UPDATE local_record SET value_json=?1,updated_at=?2 WHERE record_type='div_state' AND record_key=?3",params![json(&state)?,now(),identity])?;
-    *phase = Some("commit_move_intent");
-    app_tx.commit()?;
-    *phase = Some("publish_directory");
-    if actual == &source {
-        if let Err(error) = crate::fsutil::rename_no_replace(&source, &destination) {
-            if source.is_dir() && !destination.exists() {
-                state.as_object_mut().unwrap().remove("movement");
-                store.set_record("div_state", identity, &state)?;
+    ensure_regular_container_database(&source)?;
+    let source_db = ContainerDb::open(&source, password, Some(identity))?;
+    let name = source_db.info()?.1;
+    let link = AppConfig::config_path()?
+        .parent()
+        .unwrap()
+        .join("links")
+        .join(format!("{}.veil-link", crate::storage::id()));
+    // 创建计划生成新 ID，并检查目标容器不存在；此时不创建空数据库或登记。
+    let plan = workflow::prepare_create(CreateOptions {
+        target: &name,
+        link_output: link.to_str(),
+        work_name: Some(target_space),
+        work_root: None,
+        dedicated: false,
+        portable: false,
+    })
+    .map_err(|error| invalid(&error.to_string()))?;
+    let destination = plan.directory().to_path_buf();
+    let _source_lifecycle_lock = store.acquire_container_shared_lock(identity)?;
+    let source_guard = LockManager::new(&source, password).acquire_container(LockMode::Read)?;
+    let mut target_guard = None;
+    let mut owned_target = false;
+    let result = workflow::commit_create_with_initializer(
+        plan,
+        password,
+        |directory, id, name, password| {
+            owned_target = true;
+            for credential in source_guard.credentials()? {
+                locks::validate(&source_db.conn, &credential, Some(LockMode::Read))?;
             }
-            return Err(error.into());
+            // 先复制 DB 并修正新身份、清除源锁，再对该目标 DB 加锁。
+            copy_container_database(&source_db, directory, id, name, password)?;
+            let guard = LockManager::new(directory, password).acquire_container(LockMode::Write)?;
+            copy_container_tree(&source, directory)?;
+            verify_container_copy(directory, password, id)?;
+            let target = ContainerDb::open(directory, password, Some(id))?;
+            for credential in source_guard.credentials()? {
+                locks::validate(&source_db.conn, &credential, Some(LockMode::Read))?;
+            }
+            for credential in guard.credentials()? {
+                locks::validate(&target.conn, &credential, Some(LockMode::Write))?;
+            }
+            let metadata = target.metadata()?;
+            target_guard = Some(guard);
+            Ok(metadata)
+        },
+    );
+    if let Err(error) = result {
+        drop(target_guard.take());
+        // 初始化失败由创建流程回收；登记阶段失败则清理本次已拥有的目标。
+        if owned_target && destination.try_exists()? {
+            let target_id = destination.file_name().unwrap().to_string_lossy();
+            let cleanup = if store.registrations()?.iter().any(|r| r.div_id == target_id) {
+                delete_container(&target_id)
+            } else {
+                veil_core::database::invalidate(
+                    &destination.join(veil_core::database::CONTAINER_DB),
+                );
+                std::fs::remove_dir_all(&destination).map_err(VeilError::from)
+            };
+            if let Err(cleanup) = cleanup {
+                return Err(invalid(&format!(
+                    "复制失败：{error}；目标残留 {} 清理失败：{cleanup}",
+                    destination.display()
+                )));
+            }
         }
-        crate::fsutil::sync_directory(source.parent().unwrap())?;
-        crate::fsutil::sync_directory(destination.parent().unwrap())?;
+        return Err(invalid(&error.to_string()));
     }
-    #[cfg(feature = "fault-injection")]
-    veil_core::fsutil::fault_point("after_container_move");
-    // 无业务更新的容器事务在移动后结束；不清空其他进程的锁。
-    *phase = Some("verify_destination");
-    container_tx.commit()?;
-    drop(db);
-    ContainerDb::open(&destination, password, Some(identity))?;
-    let tx = store
-        .conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if target.storage_mode == "dedicated"
-        && tx.query_row(
-            "SELECT count(*) FROM space_div WHERE space_id=?1",
-            [target_space],
-            |r| r.get::<_, i64>(0),
-        )? > 0
-    {
-        return Err(invalid("目标专属空间发生登记竞争，请恢复移动"));
+    if let Some(guard) = target_guard {
+        guard.release()?;
     }
-    *phase = Some("commit_registration");
+    source_guard.release()?;
+    Ok(())
+}
+
+/// 先直接复制文件，再修改目标身份和清除源操作锁；调用方随后获取目标排他锁。
+fn copy_container_database(
+    source: &crate::storage::container::ContainerDb,
+    destination: &std::path::Path,
+    identity: &str,
+    name: &str,
+    password: &str,
+) -> Result<(), VeilError> {
+    use crate::storage::{invalid, now};
+    crate::work::validate_veil_id(identity)?;
+    let path = destination.join(veil_core::database::CONTAINER_DB);
+    // 禁止覆盖任何已有目标 DB；目录由创建流程原子占位。
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    drop(file);
+    copy_database_file(source, &path)?;
+    let mut target = veil_core::database::open(&path, Some(password), false)?;
+    let integrity: String = target.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(invalid("容器数据库文件副本完整性校验失败"));
+    }
+    let tx = target.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute(
-        "UPDATE space_div SET space_id=?1,updated_at=?2 WHERE div_id=?3 AND space_id=?4",
-        params![target_space, now(), identity, source_space.id],
+        "UPDATE div_info SET veil_id=?1,name=?2,created_at=?3 WHERE id=1",
+        rusqlite::params![identity, name, now()],
     )?;
-    state.as_object_mut().unwrap().remove("movement");
-    tx.execute("UPDATE local_record SET value_json=?1,updated_at=?2 WHERE record_type='div_state' AND record_key=?3",params![json(&state)?,now(),identity])?;
-    let recent = crate::storage::app::RecentContainer {
-        id: identity.into(),
-        name: registration.cached_name,
-        path: destination.to_string_lossy().into_owned(),
-    };
-    tx.execute("INSERT INTO local_record VALUES ('recent_div',?1,?2,?3) ON CONFLICT(record_type,record_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",params![identity,json(&recent)?,now()])?;
+    tx.execute("DELETE FROM operation_locks", [])?;
     tx.commit()?;
-    if recovering {
-        veil_core::logging::event(
-            veil_core::logging::Level::Warn,
-            "service",
-            "move_container",
-            "CONTAINER_MOVE_RECOVERED",
-            "未完成的移动已恢复登记",
-            &[("resource", veil_core::logging::Field::Resource(identity))],
-        );
+    drop(target);
+    veil_core::database::invalidate(&path);
+    veil_core::fsutil::sync_file(&std::fs::File::open(&path)?)?;
+    veil_core::fsutil::sync_directory(destination)?;
+    Ok(())
+}
+
+/// 调用方持有源容器读锁；直接复制文件，不开启数据库事务。
+fn copy_database_file(
+    source: &crate::storage::container::ContainerDb,
+    destination: &std::path::Path,
+) -> Result<(), VeilError> {
+    let source_path = source.directory.join(veil_core::database::CONTAINER_DB);
+    let expected = std::fs::metadata(&source_path)?.len();
+    let copied = std::fs::copy(&source_path, destination)?;
+    if copied != expected {
+        return Err(crate::storage::invalid("容器数据库文件复制长度不一致"));
+    }
+    veil_core::fsutil::sync_file(&std::fs::File::open(destination)?)?;
+    Ok(())
+}
+
+fn ensure_regular_container_database(directory: &std::path::Path) -> Result<(), VeilError> {
+    let metadata = std::fs::symlink_metadata(directory.join(veil_core::database::CONTAINER_DB))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(crate::storage::invalid("容器数据库文件无效"));
     }
     Ok(())
 }
 
+fn copy_container_tree(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), VeilError> {
+    use crate::storage::invalid;
+    use std::fs;
+
+    fn copy_directory(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        root: bool,
+    ) -> Result<(), VeilError> {
+        use crate::storage::invalid;
+        use std::{fs, io};
+        let mut entries = fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let source_path = entry.path();
+            let name = entry.file_name();
+            if root && name == veil_core::database::CONTAINER_DB {
+                continue;
+            }
+            if root
+                && ["veil.db-journal", "veil.db-wal", "veil.db-shm"]
+                    .contains(&name.to_string_lossy().as_ref())
+            {
+                continue;
+            }
+            let destination_path = destination.join(name);
+            let metadata = fs::symlink_metadata(&source_path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(invalid("容器目录中不能包含符号链接"));
+            }
+            if metadata.is_dir() {
+                fs::create_dir(&destination_path)?;
+                veil_core::fsutil::sync_directory(
+                    destination_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new(".")),
+                )?;
+                copy_directory(&source_path, &destination_path, false)?;
+                fs::set_permissions(&destination_path, metadata.permissions())?;
+                veil_core::fsutil::sync_directory(&destination_path)?;
+            } else if metadata.is_file() {
+                let mut input = fs::File::open(&source_path)?;
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination_path)?;
+                let copied = io::copy(&mut input, &mut output)?;
+                if copied != metadata.len() {
+                    return Err(invalid("容器文件复制长度不一致"));
+                }
+                fs::set_permissions(&destination_path, metadata.permissions())?;
+                veil_core::fsutil::sync_file(&output)?;
+                veil_core::fsutil::sync_directory(destination)?;
+            } else {
+                return Err(invalid("容器目录中包含不支持的文件类型"));
+            }
+        }
+        veil_core::fsutil::sync_directory(destination)?;
+        Ok(())
+    }
+
+    let source_metadata = fs::symlink_metadata(source)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+        return Err(invalid("原容器目录无效"));
+    }
+    copy_directory(source, destination, true)?;
+    fs::set_permissions(destination, source_metadata.permissions())?;
+    veil_core::fsutil::sync_directory(destination)?;
+    Ok(())
+}
+
+fn verify_container_copy(
+    directory: &std::path::Path,
+    password: &str,
+    identity: &str,
+) -> Result<(), VeilError> {
+    use crate::storage::{container::ContainerDb, invalid};
+
+    fn validate_tree(directory: &std::path::Path) -> Result<(), VeilError> {
+        use crate::storage::invalid;
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                return Err(invalid("容器目录中不能包含符号链接"));
+            }
+            if metadata.is_dir() {
+                validate_tree(&path)?;
+            } else if !metadata.is_file() {
+                return Err(invalid("容器目录中包含不支持的文件类型"));
+            }
+        }
+        Ok(())
+    }
+
+    let directory_metadata = std::fs::symlink_metadata(directory)?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        return Err(invalid("目标容器目录无效"));
+    }
+    validate_tree(directory)?;
+    ensure_regular_container_database(directory)?;
+    let db = ContainerDb::open(directory, password, Some(identity))?;
+    let metadata = db.metadata()?;
+    for file in &metadata.files {
+        let path = directory.join(&file.encrypted_name);
+        let entry = std::fs::symlink_metadata(&path)?;
+        if entry.file_type().is_symlink() || !entry.is_file() {
+            return Err(invalid("目标容器缺少有效的密文文件"));
+        }
+        let node = db
+            .node(&file.file_id)?
+            .ok_or_else(|| invalid("文件身份缺失"))?;
+        let key = db
+            .keys()?
+            .into_iter()
+            .find(|key| Some(&key.key_id) == node.key_id.as_ref())
+            .ok_or_else(|| invalid("文件密钥缺失"))?;
+        veil_core::file_ops::decrypt_file_to_writer(
+            &path,
+            &mut std::io::sink(),
+            &*key.material()?,
+            &file.nonce,
+            file.size,
+        )?;
+    }
+    Ok(())
+}
 /// 在事务和空间锁释放后记录跨存储操作的部分结果，避免延长临界区。
-fn diagnose_partial_mutation(
+fn diagnose_partial_mutation<T>(
     operation: &'static str,
     identity: &str,
     phase: Option<&'static str>,
-    result: &Result<(), VeilError>,
+    result: &Result<T, VeilError>,
 ) {
     if let (Some(phase), Err(error)) = (phase, result) {
         use veil_core::logging::{self, Field, Level};
@@ -555,5 +728,218 @@ fn diagnose_partial_mutation(
                 ("outcome", Field::Label("verify_storage_and_registration")),
             ],
         );
+    }
+}
+
+#[cfg(test)]
+mod database_copy_tests {
+    use super::{copy_container_database, copy_database_file};
+    use crate::storage::{
+        container::ContainerDb,
+        locks::{LockManager, LockMode, LockOptions},
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn database_file_copy_is_byte_for_byte_without_source_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let id = veil_core::metadata::generate_veil_id();
+        let directory = root.path().join(&id);
+        let source = ContainerDb::create(&directory, &id, "source", "pw").unwrap();
+        let original = std::fs::read(directory.join(veil_core::database::CONTAINER_DB)).unwrap();
+        let destination = root.path().join("copied.db");
+        copy_database_file(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        assert!(source.conn.is_autocommit());
+        assert!(copy_database_file(&source, root.path()).is_err());
+        assert!(source.conn.is_autocommit());
+        assert_eq!(
+            std::fs::read(directory.join(veil_core::database::CONTAINER_DB)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn database_is_copied_and_reidentified_before_target_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let source_id = veil_core::metadata::generate_veil_id();
+        let target_id = veil_core::metadata::generate_veil_id();
+        let source_path = root.path().join(&source_id);
+        let target_path = root.path().join(&target_id);
+        let source = ContainerDb::create(&source_path, &source_id, "source", "pw").unwrap();
+        assert!(!target_path.exists());
+        std::fs::create_dir(&target_path).unwrap();
+        let source_guard = LockManager::new(&source_path, "pw")
+            .acquire_container(LockMode::Read)
+            .unwrap();
+        let manager = LockManager::new(&target_path, "pw").with_options(LockOptions {
+            timeout: Some(Duration::from_millis(50)),
+            cancellation: None,
+        });
+        copy_container_database(&source, &target_path, &target_id, "target", "pw").unwrap();
+        let copied = ContainerDb::open(&target_path, "pw", Some(&target_id)).unwrap();
+        assert_eq!(
+            copied
+                .conn
+                .query_row("SELECT count(*) FROM operation_locks", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(copied);
+        let target_guard = manager.acquire_container(LockMode::Write).unwrap();
+        let original_lock = target_guard.credentials().unwrap()[0].lock_id.clone();
+        assert!(source.conn.is_autocommit());
+        let target = ContainerDb::open(&target_path, "pw", Some(&target_id)).unwrap();
+        assert_eq!(target.info().unwrap().0, target_id);
+        assert_eq!(target.info().unwrap().1, "target");
+        assert_eq!(target.root().unwrap(), source.root().unwrap());
+        assert_eq!(
+            target.keys().unwrap()[0].key_material,
+            source.keys().unwrap()[0].key_material
+        );
+        let locks: Vec<String> = target
+            .conn
+            .prepare("SELECT lock_id FROM operation_locks")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(locks, vec![original_lock]);
+        let before = std::fs::read(target_path.join(veil_core::database::CONTAINER_DB)).unwrap();
+        assert!(
+            copy_container_database(&source, &target_path, &target_id, "target", "pw").is_err()
+        );
+        assert_eq!(
+            std::fs::read(target_path.join(veil_core::database::CONTAINER_DB)).unwrap(),
+            before
+        );
+        assert!(manager.acquire_container(LockMode::Read).is_err());
+        assert!(manager.acquire_container(LockMode::Write).is_err());
+        target_guard.release().unwrap();
+        manager
+            .acquire_container(LockMode::Write)
+            .unwrap()
+            .release()
+            .unwrap();
+        source_guard.release().unwrap();
+        assert_eq!(std::fs::read_dir(&target_path).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod container_delete_tests {
+    use super::delete_container_in_store;
+    use crate::storage::app::AppStore;
+
+    fn fixture() -> (tempfile::TempDir, AppStore, String, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = AppStore::open(&root.path().join("app")).unwrap();
+        let space = store.create_space("delete", None, false).unwrap();
+        let id = veil_core::metadata::generate_veil_id();
+        let directory = space.local_path.unwrap().join(&id);
+        std::fs::create_dir(&directory).unwrap();
+        // 删除不依赖容器密码、数据库是否完整或业务结构版本。
+        std::fs::write(directory.join("veil.db"), b"broken encrypted database").unwrap();
+        std::fs::write(directory.join("cipher.enc"), b"ciphertext").unwrap();
+        store.register(&space.id, &id, "delete").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_record VALUES('recent_div',?1,'{}',1)",
+                [&id],
+            )
+            .unwrap();
+        (root, store, id, directory)
+    }
+
+    #[test]
+    fn delete_uses_lifecycle_lock_and_leaves_other_container_available() {
+        let (_root, mut store, id, directory) = fixture();
+        let shared = store.acquire_container_shared_lock(&id).unwrap();
+        let mut phase = None;
+        assert!(delete_container_in_store(&mut store, &id, &mut phase).is_err());
+        assert!(phase.is_none());
+        assert!(directory.is_dir());
+        assert_eq!(store.registrations().unwrap().len(), 1);
+        drop(shared);
+        let other_id = veil_core::metadata::generate_veil_id();
+        let _other_lock = store.acquire_container_shared_lock(&other_id).unwrap();
+        delete_container_in_store(&mut store, &id, &mut phase).unwrap();
+        assert!(store.conn.is_autocommit());
+        assert!(!directory.exists());
+        assert!(store.registrations().unwrap().is_empty());
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM local_record WHERE record_key=?1",
+                    [&id],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.parent().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn registration_failure_keeps_directory_untouched() {
+        let (_root, mut store, id, directory) = fixture();
+        store.conn.execute_batch("CREATE TEMP TRIGGER reject_delete BEFORE DELETE ON main.space_div BEGIN SELECT RAISE(ABORT,'injected delete failure'); END;").unwrap();
+        let mut phase = None;
+        assert!(delete_container_in_store(&mut store, &id, &mut phase).is_err());
+        assert_eq!(phase, Some("commit_registration"));
+        assert_eq!(
+            std::fs::read(directory.join("veil.db")).unwrap(),
+            b"broken encrypted database"
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(
+            std::fs::read(directory.join("cipher.enc")).unwrap(),
+            b"ciphertext"
+        );
+        assert_eq!(store.registrations().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_dir(directory.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+        store
+            .conn
+            .execute_batch("DROP TRIGGER reject_delete;")
+            .unwrap();
+        delete_container_in_store(&mut store, &id, &mut phase).unwrap();
+        assert!(!directory.exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn directory_removal_failure_does_not_restore_deleted_registration() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, mut store, id, directory) = fixture();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut phase = None;
+        let result = delete_container_in_store(&mut store, &id, &mut phase);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(phase, Some("remove_files"));
+        assert!(error.to_string().contains(directory.to_str().unwrap()));
+        assert!(store.conn.is_autocommit());
+        assert!(store.registrations().unwrap().is_empty());
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::read_dir(directory.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+        assert!(store.acquire_container_delete_lock(&id).is_ok());
     }
 }

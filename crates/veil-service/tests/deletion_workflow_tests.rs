@@ -69,10 +69,28 @@ fn deletion_flow_worker() {
         _ => panic!("预期返回容器"),
     };
     let removable_path = Path::new(&removable.path).to_path_buf();
-    service
-        .execute(ServiceRequest::DeleteContainer {
-            id: removable.id,
+    let reader = VeilService::default();
+    reader
+        .execute(ServiceRequest::OpenContainer {
+            path: removable.path.clone(),
+            password: "password".into(),
         })
+        .unwrap();
+    assert!(
+        service
+            .execute(ServiceRequest::DeleteContainer {
+                id: removable.id.clone()
+            })
+            .is_err()
+    );
+    assert!(removable_path.is_dir());
+    assert!(matches!(
+        reader.execute(ServiceRequest::RefreshContainer).unwrap(),
+        ServiceResponse::Container(_)
+    ));
+    reader.execute(ServiceRequest::LockContainer).unwrap();
+    service
+        .execute(ServiceRequest::DeleteContainer { id: removable.id })
         .unwrap();
     assert!(!removable_path.exists());
 
@@ -118,6 +136,25 @@ fn deletion_flow_worker() {
         _ => panic!("预期返回容器"),
     };
     assert!(view.files.is_empty());
+
+    // 同空间另一个容器仍打开时，也能删除未使用的容器。
+    let disposable = match reader
+        .execute(ServiceRequest::CreateInSpace {
+            space: "子空间".into(),
+            name: "可独立删除".into(),
+            password: "password".into(),
+        })
+        .unwrap()
+    {
+        ServiceResponse::Container(view) => view,
+        _ => panic!("预期容器"),
+    };
+    reader
+        .execute(ServiceRequest::DeleteContainer { id: disposable.id })
+        .unwrap();
+    assert!(
+        matches!(service.execute(ServiceRequest::RefreshContainer).unwrap(), ServiceResponse::Container(view) if view.path == active.path)
+    );
 
     // 删除父空间时，当前打开的子空间会先释放共享锁；子空间记录也随目录一起清除。
     let spaces = match service

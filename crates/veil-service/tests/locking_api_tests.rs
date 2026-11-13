@@ -523,3 +523,20 @@ fn completed_tasks_are_reclaimed_early_and_unknown_tasks_keep_their_lease() {
     assert!(manager.acquire(&["b".into()], LockMode::Read).is_err());
     drop(guard);
 }
+
+#[test]
+fn container_copy_read_lock_allows_reads_and_blocks_all_writes() {
+    let root = TempDir::new().unwrap();
+    let veil = VeilManager::new(root.path().join("veil")).with_lock_options(LockOptions { timeout: Some(Duration::from_millis(50)), cancellation: None });
+    veil.init_veil("test", "password").unwrap();
+    let locks = LockManager::new(&veil.veil_dir, "password").with_options(LockOptions {
+        timeout: Some(Duration::from_millis(50)), cancellation: None,
+    });
+    let reader = locks.acquire_container(LockMode::Read).unwrap();
+    let second_reader = locks.acquire_container(LockMode::Read).unwrap();
+    assert!(locks.acquire_container(LockMode::Write).is_err());
+    assert!(veil.create_directory("blocked", "password").is_err());
+    second_reader.release().unwrap();
+    reader.release().unwrap();
+    locks.acquire_container(LockMode::Write).unwrap().release().unwrap();
+}

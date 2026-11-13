@@ -95,7 +95,7 @@ iOS 客户端位于 `apps/veil-ios`，需要 Xcode、XcodeGen 和 Rust 的 iOS �
 
 - CLI 的 `ex` 当前只处理单文件；`add` 支持文件、目录递归导入和目标路径。
 - `passwd` 默认只修改密码保护层；`passwd --full` 才会重新加密 Veil 中的全部文件。
-- `.veil-link` 仅按容器 ID 查找已登记工作区，移动容器后无需修改链接。
+- `.veil-link` 仅按容器 ID 查找已登记工作区，“移动容器”创建新 ID 的独立副本，原容器和原链接保持有效，当前会话继续使用源容器。
 - 忘记密码后没有恢复通道。
 
 详细限制分别记录在 CLI 和 Core 文档中。

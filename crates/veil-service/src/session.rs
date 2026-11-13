@@ -2,8 +2,8 @@
 
 use crate::veil_ops::VeilManager;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -522,7 +522,8 @@ struct GarbageCollectionQueue {
 
 impl GarbageCollectionQueue {
     fn new(session: Arc<Mutex<Option<Session>>>) -> Self {
-        let (sender, receiver) = veil_core::queue::BoundedQueue::new(GARBAGE_QUEUE_CAPACITY).split();
+        let (sender, receiver) =
+            veil_core::queue::BoundedQueue::new(GARBAGE_QUEUE_CAPACITY).split();
         let recurring = sender.clone();
         let worker = std::thread::spawn(move || {
             let _ = receiver.listen_batches(
@@ -540,6 +541,11 @@ impl GarbageCollectionQueue {
                 |_| {
                     let session = session.lock().ok().and_then(|session| session.clone());
                     if let Some(session) = session {
+                        let Ok(_container_locks) =
+                            VeilService::space_lock_for_container(&session.veil_id)
+                        else {
+                            return Ok(());
+                        };
                         let manager = VeilManager::for_veil(session.path, session.veil_id);
                         let _ = manager.cleanup(session.password.as_str());
                         // 会话保持解锁时，周期性发送下一轮低优先级扫描。
@@ -902,30 +908,8 @@ impl VeilService {
                 target_space,
                 password,
             } => {
-                let store = crate::storage::app::AppStore::global()?;
-                let mut target_space_lock = Some(store.acquire_space_shared_lock(target_space)?);
+                let _session_change = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
                 crate::spaces::move_container(id, target_space, password)?;
-                let destination = store
-                    .spaces()?
-                    .into_iter()
-                    .find(|s| s.id == target_space)
-                    .and_then(|s| s.local_path)
-                    .ok_or(ServiceError::StateUnavailable)?
-                    .join(id);
-                if let Some(session) = self
-                    .0
-                    .lock()
-                    .map_err(|_| ServiceError::StateUnavailable)?
-                    .as_mut()
-                    .filter(|s| s.veil_id == id)
-                {
-                    session.path = destination.clone();
-                    session.password = Zeroizing::new(password.into());
-                    *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? =
-                        target_space_lock.take();
-                    *self.3.write().map_err(|_| ServiceError::StateUnavailable)? =
-                        Some(destination);
-                }
                 Ok(ServiceResponse::Done)
             }
             ServiceRequest::ListRecents => Ok(ServiceResponse::Recents(
@@ -997,6 +981,7 @@ impl VeilService {
                     .map_err(|_| ServiceError::StateUnavailable)?
                     .clone()
                     .ok_or(ServiceError::NotOpen)?;
+                let _container_locks = Self::space_lock_for_container(&session.veil_id)?;
                 if session.path != expected {
                     return Err(ServiceError::InvalidInput("容器已切换，请重新导入"));
                 }
@@ -1062,6 +1047,7 @@ impl VeilService {
                     .map_err(|_| ServiceError::StateUnavailable)?
                     .clone()
                     .ok_or(ServiceError::NotOpen)?;
+                let _container_locks = Self::space_lock_for_container(&session.veil_id)?;
                 let control = Arc::new(crate::transfer_conflicts::ConflictQueue::default());
                 *self.5.lock().map_err(|_| ServiceError::StateUnavailable)? =
                     Some(Arc::clone(&control));
@@ -1313,6 +1299,8 @@ impl VeilService {
             source,
         })?;
         let id = generate_veil_id();
+        let _container_lock =
+            crate::storage::app::AppStore::global()?.acquire_container_shared_lock(&id)?;
         let path = parent.join(&id);
         let mut session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         std::fs::create_dir(&path).map_err(|source| ServiceError::Io {
@@ -1332,11 +1320,13 @@ impl VeilService {
             &metadata.veil_name,
             &metadata.created_at,
         )?;
+        let container_locks = Self::space_lock_for_container(&metadata.veil_id)?;
         let view = container_view(&path, &metadata);
         *self.3.write().map_err(|_| ServiceError::StateUnavailable)? = Some(path.clone());
         if let Some(previous) = session.as_ref() {
             veil_core::database::invalidate(&previous.path.join(veil_core::database::CONTAINER_DB));
         }
+        *self.6.lock().map_err(|_| ServiceError::StateUnavailable)? = container_locks;
         *session = Some(Session {
             path,
             veil_id: id,
@@ -1434,6 +1424,7 @@ impl VeilService {
             .map_err(|_| ServiceError::StateUnavailable)?
             .clone()
             .ok_or(ServiceError::NotOpen)?;
+        let _container_locks = Self::space_lock_for_container(&session.veil_id)?;
         if session.path != expected_container {
             return Err(ServiceError::InvalidInput("容器已切换，请重新导入"));
         }
@@ -1782,13 +1773,7 @@ impl VeilService {
     fn remove_path(&self, name: &str) -> Result<ContainerView, ServiceError> {
         let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
         let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
-        let app_store = crate::storage::app::AppStore::global()?;
-        let _space_lock = app_store
-            .registrations()?
-            .into_iter()
-            .find(|registration| registration.div_id == session.veil_id)
-            .map(|registration| app_store.acquire_space_shared_lock(&registration.space_id))
-            .transpose()?;
+        let _space_lock = Self::space_lock_for_container(&session.veil_id)?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
         let (_, ciphers) = manager.remove_path_deferred(name, session.password.as_str())?;
         self.7.enqueue(ciphers);
@@ -1815,6 +1800,14 @@ impl VeilService {
         identity: &str,
     ) -> Result<Option<Vec<std::fs::File>>, ServiceError> {
         let store = crate::storage::app::AppStore::global()?;
+        if store
+            .record::<serde_json::Value>("div_state", identity)?
+            .is_some_and(|state| state.get("movement").is_some())
+        {
+            return Err(ServiceError::Core(crate::storage::invalid(
+                "容器正在移动，请稍后重试",
+            )));
+        }
         let Some(registration) = store
             .registrations()?
             .into_iter()
@@ -1822,9 +1815,9 @@ impl VeilService {
         else {
             return Ok(None);
         };
-        Ok(Some(
-            store.acquire_space_shared_lock(&registration.space_id)?,
-        ))
+        let mut locks = store.acquire_space_shared_lock(&registration.space_id)?;
+        locks.push(store.acquire_container_shared_lock(identity)?);
+        Ok(Some(locks))
     }
 
     fn space_lock_for_selector(selector: &str) -> Result<Vec<std::fs::File>, ServiceError> {

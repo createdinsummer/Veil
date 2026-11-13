@@ -147,6 +147,24 @@ fn desktop_flow_worker() {
     assert_eq!(work.containers.len(), 1);
     assert_eq!(work.containers[0].path, container_path);
     let default = listed.iter().find(|s| s.is_default).unwrap();
+    let source_manager = veil_service::veil_ops::VeilManager::for_veil(
+        container_path.clone().into(),
+        created.id.clone(),
+    );
+    source_manager
+        .create_directory("empty/nested", "password")
+        .unwrap();
+    let source_db = veil_service::storage::container::ContainerDb::open(
+        Path::new(&container_path),
+        "password",
+        Some(&created.id),
+    )
+    .unwrap();
+    let source_metadata = source_db.metadata().unwrap();
+    // 移动必须与已有读取共存，且不能将该租约复制到新库。
+    let source_read = veil_service::storage::locks::LockManager::new(&container_path, "password")
+        .acquire_container(veil_service::storage::locks::LockMode::Read)
+        .unwrap();
     service
         .execute(ServiceRequest::MoveContainer {
             id: &created.id,
@@ -154,22 +172,55 @@ fn desktop_flow_worker() {
             password: "password",
         })
         .unwrap();
-    assert!(!Path::new(&container_path).exists());
-    let moved = Path::new(&default.path).join(&created.id);
-    assert!(moved.join("veil.db").is_file());
+    assert!(Path::new(&container_path).join("veil.db").is_file());
+    let listed = match service.execute(ServiceRequest::ListSpaces).unwrap() {
+        ServiceResponse::Spaces(spaces) => spaces,
+        _ => panic!("预期空间列表"),
+    };
+    let copied = &listed
+        .iter()
+        .find(|s| s.id == default.id)
+        .unwrap()
+        .containers[0];
+    assert_ne!(copied.id, created.id);
+    let copied_db = veil_service::storage::container::ContainerDb::open(
+        Path::new(&copied.path),
+        "password",
+        Some(&copied.id),
+    )
+    .unwrap();
+    assert_eq!(copied_db.metadata().unwrap().files.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&copied_db.metadata().unwrap().directories).unwrap(),
+        serde_json::to_value(&source_metadata.directories).unwrap()
+    );
+    assert_eq!(
+        copied_db.keys().unwrap()[0].key_material,
+        source_db.keys().unwrap()[0].key_material
+    );
+    assert_eq!(
+        serde_json::to_value(&copied_db.metadata().unwrap().files).unwrap(),
+        serde_json::to_value(&source_metadata.files).unwrap()
+    );
+    let target_write = veil_service::storage::locks::LockManager::new(&copied.path, "password")
+        .acquire_container(veil_service::storage::locks::LockMode::Write)
+        .unwrap();
+    target_write.release().unwrap();
+    source_read.release().unwrap();
     assert!(
-        matches!(service.execute(ServiceRequest::RefreshContainer).unwrap(),ServiceResponse::Container(view) if view.path==moved.to_string_lossy())
+        matches!(service.execute(ServiceRequest::RefreshContainer).unwrap(),ServiceResponse::Container(view) if view.path==container_path)
     );
     let recents = match service.execute(ServiceRequest::ListRecents).unwrap() {
         ServiceResponse::Recents(r) => r,
         _ => panic!("预期最近记录"),
     };
-    assert_eq!(recents[0].id, created.id);
+    assert!(recents.iter().any(|r| r.id == created.id));
     service
         .execute(ServiceRequest::RemoveSessionPath {
             name: "note.txt".into(),
         })
         .unwrap();
+    assert_eq!(copied_db.metadata().unwrap().files.len(), 1);
     service.execute(ServiceRequest::LockContainer).unwrap();
     assert!(matches!(
         service.execute(ServiceRequest::PreviewSessionFile {

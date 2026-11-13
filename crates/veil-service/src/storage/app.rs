@@ -327,11 +327,33 @@ impl AppStore {
         result.map_err(Into::into)
     }
 
+    /// 生命周期锁独立于加密 DB，删除无需密码，也不会删除自身承载锁的文件。
+    pub(crate) fn acquire_container_shared_lock(&self, identity: &str) -> Result<std::fs::File> {
+        crate::work::validate_veil_id(identity)?;
+        let file = self.open_resource_lock_file("container-locks", identity)?;
+        file.lock_shared()?;
+        Ok(file)
+    }
+
+    pub(crate) fn acquire_container_delete_lock(&self, identity: &str) -> Result<std::fs::File> {
+        crate::work::validate_veil_id(identity)?;
+        let file = self.open_resource_lock_file("container-locks", identity)?;
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(invalid("容器正在使用，不能删除")),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
     fn open_space_lock_file(&self, identity: &str) -> Result<std::fs::File> {
         if identity.is_empty() {
             return Err(invalid("空间锁 ID 不能为空"));
         }
-        let lock_directory = self.directory.join("space-locks");
+        self.open_resource_lock_file("space-locks", identity)
+    }
+
+    fn open_resource_lock_file(&self, namespace: &str, identity: &str) -> Result<std::fs::File> {
+        let lock_directory = self.directory.join(namespace);
         std::fs::create_dir_all(&lock_directory)?;
         #[cfg(unix)]
         {
@@ -538,6 +560,7 @@ impl AppStore {
     }
     pub fn register(&mut self, space: &str, div: &str, name: &str) -> Result<()> {
         crate::work::validate_veil_id(div)?;
+        let _container_lock = self.acquire_container_shared_lock(div)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -570,8 +593,21 @@ impl AppStore {
         Ok(())
     }
     pub fn unregister(&self, div: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM space_div WHERE div_id=?1", [div])?;
+        let _container_lock = self.acquire_container_shared_lock(div)?;
+        let changed = self.conn.execute(
+            "DELETE FROM space_div WHERE div_id=?1 AND NOT EXISTS (SELECT 1 FROM local_record WHERE record_type='div_state' AND record_key=?1 AND json_type(value_json,'$.movement') IS NOT NULL)",
+            [div],
+        )?;
+        if changed == 0 {
+            let moving: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_record WHERE record_type='div_state' AND record_key=?1 AND json_type(value_json,'$.movement') IS NOT NULL)",
+                [div],
+                |row| row.get(0),
+            )?;
+            if moving {
+                return Err(invalid("容器正在移动，不能取消登记"));
+            }
+        }
         Ok(())
     }
     pub(crate) fn cache_container_identity(&self, identity: &str, created_at: &str) -> Result<()> {
@@ -744,6 +780,14 @@ struct DivState {
 struct Movement {
     source: PathBuf,
     destination: PathBuf,
+    #[serde(default)]
+    staging: Option<PathBuf>,
+    #[serde(default)]
+    ready_to_publish: bool,
+    #[serde(default)]
+    source_space_id: Option<String>,
+    #[serde(default)]
+    target_space_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -783,6 +827,24 @@ fn validate_record<T: Serialize>(kind: &str, key: &str, value: &T) -> Result<()>
                 if !m.source.is_absolute() || !m.destination.is_absolute() {
                     return Err(invalid("容器移动意图路径无效"));
                 }
+                if let Some(staging) = m.staging {
+                    let prefix = format!(".veil-moving-{key}-");
+                    if !staging.is_absolute()
+                        || staging.parent() != m.destination.parent()
+                        || !staging
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with(&prefix))
+                    {
+                        return Err(invalid("容器移动暂存路径无效"));
+                    }
+                }
+                if m.source_space_id.as_deref().is_some_and(str::is_empty)
+                    || m.target_space_id.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(invalid("容器移动空间身份无效"));
+                }
+                let _ = m.ready_to_publish;
             }
         }
         "space_access" => {
