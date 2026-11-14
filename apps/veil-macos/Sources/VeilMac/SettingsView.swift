@@ -134,7 +134,7 @@ struct SettingsView: View {
     }
 
     private var unlockCacheRow: some View {
-        SettingsRow("免密时长", detail: "解锁后重新打开同一容器免输密码的时长。") {
+        SettingsRow("免密时长", detail: "解锁后重新打开同一容器免输密码的时长；导入/导出等长任务进行中会自动顺延。") {
             Picker("免密时长", selection: Binding(
                 get: { store.unlockCacheSeconds },
                 set: { seconds in Task { await store.setUnlockCache(seconds: seconds) } }

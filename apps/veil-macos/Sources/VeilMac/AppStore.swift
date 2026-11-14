@@ -93,6 +93,17 @@ final class AppStore: ObservableObject {
         return entry.secret
     }
 
+    /// 长任务（导入/导出/打包）在跑时服务层会持续续租，说明会话仍在被使用；
+    /// 这里把免密重开倒计时一并顺延，避免任务结束时缓存已经过期、锁定后再打开要重新输密码。
+    private func extendUnlockCacheForActiveTransfer() {
+        guard unlockCacheSeconds > 0, let id = container?.id,
+            let entry = unlockedPasswords[id]
+        else { return }
+        unlockedPasswords[id] = UnlockedPassword(
+            secret: entry.secret,
+            expiresAt: Date().addingTimeInterval(TimeInterval(unlockCacheSeconds)))
+    }
+
     var isBusy: Bool { pendingOperations > 0 }
     var canBrowse: Bool { !isBusy || transferProgress?.operation == "import" }
     var activeSpace: Space? { spaces.first { $0.id == selectedSpaceID } ?? spaces.first { $0.isDefault } ?? spaces.first }
@@ -187,6 +198,7 @@ final class AppStore: ObservableObject {
                 if let progress = client.transferProgress(), progress.operation == operation,
                    ["preparing", "processing", "verifying", "snapshot", "packing", "unpacking", "finalizing"].contains(progress.phase) {
                     transferProgress = progress
+                    extendUnlockCacheForActiveTransfer()
                     let now = Date()
                     let enoughProgress = progress.completedFiles > lastRefreshedCompleted
                         && progress.completedFiles - lastRefreshedCompleted >= 512
