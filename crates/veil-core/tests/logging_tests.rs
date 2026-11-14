@@ -49,6 +49,10 @@ fn database_failure_keeps_the_cause_and_request_context() {
     worker("database");
 }
 #[test]
+fn wrapped_errors_fall_back_to_the_inner_safe_description() {
+    worker("wrapper");
+}
+#[test]
 fn worker_threads_inherit_request_and_sensitive_values() {
     worker("context");
 }
@@ -81,8 +85,12 @@ fn pending_repeat_summary_survives_failed_eviction_and_directory_change() {
     worker("pending-summary");
 }
 #[test]
-fn legacy_unstructured_messages_are_removed_from_exports() {
+fn legacy_records_are_exported_as_stored() {
     worker("legacy");
+}
+#[test]
+fn legacy_placeholder_and_empty_messages_are_repaired() {
+    worker("placeholder");
 }
 #[cfg(unix)]
 #[test]
@@ -152,6 +160,7 @@ fn logging_worker() {
     match mode.as_str() {
         "legacy" => {
             logging::error("test", "legacy", "OLD_FAILURE");
+            logging::flush().unwrap();
             let path = directory.join("errors-0.jsonl");
             let mut record: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -162,10 +171,35 @@ fn logging_worker() {
             record["context"] = serde_json::json!({"unsafe_label": "任意用户明文", "attempts": 3});
             fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
             let exported = String::from_utf8(logging::export().unwrap()).unwrap();
-            assert!(!exported.contains("任意用户明文"));
+            // 旧版记录按存储内容原样导出，不再替换 message。
+            assert!(exported.contains("任意用户明文"));
+            assert!(!exported.contains("历史日志文本已省略"));
             let records = logging::snapshot().unwrap();
             assert_eq!(records[0].event, "OLD_FAILURE");
+            assert_eq!(records[0].message, "任意用户明文");
+            assert_eq!(records[0].causes, ["任意用户明文"]);
             assert_eq!(records[0].context["attempts"], 3);
+            assert_eq!(records[0].context["unsafe_label"], "任意用户明文");
+        }
+        "placeholder" => {
+            logging::error("test", "placeholder", "OLD_PLACEHOLDER");
+            logging::flush().unwrap();
+            let path = directory.join("errors-0.jsonl");
+            let mut first: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            first["message"] = "错误详情已省略（非结构化文本）".into();
+            first["causes"] = serde_json::json!(["DATABASE", "Error code 5: database is locked"]);
+            let mut second = first.clone();
+            second["message"] = "".into();
+            second["causes"] = serde_json::json!([]);
+            fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+            let records = logging::snapshot().unwrap();
+            assert_eq!(records.len(), 2);
+            // 把存量 safe 原因提升为 message，并删掉重复的 cause。
+            assert_eq!(records[0].message, "Error code 5: database is locked");
+            assert_eq!(records[0].causes, ["DATABASE"]);
+            // 完全没有文本时退回错误码。
+            assert_eq!(records[1].message, "OLD_PLACEHOLDER");
         }
         "pending-summary" => {
             config.max_file_bytes = 1024 * 1024;
@@ -224,6 +258,7 @@ fn logging_worker() {
             fs::create_dir_all(&directory).unwrap();
             std::os::unix::fs::symlink(&private, directory.join("errors-0.jsonl")).unwrap();
             logging::error("test", "symlink_sink", "WRITE_REJECTED");
+            logging::flush().unwrap();
             assert_eq!(logging::health().0, 1);
             assert!(logging::export().is_err());
             assert_eq!(fs::read_to_string(private).unwrap(), "private content");
@@ -234,11 +269,14 @@ fn logging_worker() {
             lock.lock().unwrap();
             let started = std::time::Instant::now();
             logging::error("test", "blocked_sink", "WRITE_FAILED");
-            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+            // 写盘已移到独立线程：目录锁被占用时调用方也不再等待。
+            assert!(started.elapsed() < std::time::Duration::from_millis(200));
+            logging::flush().unwrap();
             assert_eq!(logging::health().0, 1);
             let started = std::time::Instant::now();
             logging::error("test", "backoff", "WRITE_FAILED");
             assert!(started.elapsed() < std::time::Duration::from_millis(80));
+            logging::flush().unwrap();
             assert_eq!(logging::health().0, 2);
             // 日志失败不抛出异常，也不影响调用方的正常文件操作。
             fs::write(root.join("business-result"), b"ok").unwrap();
@@ -323,6 +361,7 @@ fn logging_worker() {
         "killed-child" => {
             use std::io::Write;
             logging::error("test", "before_kill", "BEFORE_KILL");
+            logging::flush().unwrap();
             println!("ready");
             std::io::stdout().flush().unwrap();
             loop {
@@ -374,8 +413,9 @@ fn logging_worker() {
                     &[("attempts", logging::Field::Count(attempt))],
                 );
             }
+            logging::flush().unwrap();
             let file = fs::read_to_string(directory.join("errors-0.jsonl")).unwrap();
-            assert_eq!(file.lines().count(), 1, "重复故障不能逐次落盘");
+            assert_eq!(file.lines().count(), 2, "重复故障只落首现与摘要两条");
             let records = logging::snapshot().unwrap();
             assert_eq!(records.len(), 2);
             assert!(records[1].repeat_summary);
@@ -404,14 +444,41 @@ fn logging_worker() {
                 .unwrap();
             assert_eq!(record.code, "SQLITE_BUSY");
             assert_eq!(record.native_code, Some(5));
+            // 无法归类的外层错误被跳过，根因描述进入 message。
             assert!(
-                record
-                    .causes
-                    .iter()
-                    .any(|cause| cause.contains("database is locked"))
+                record.message.contains("database is locked"),
+                "{}",
+                record.message
             );
             assert_eq!(record.request_id, logging::request_id());
             assert!(!record.thread_id.is_empty());
+        }
+        "wrapper" => {
+            #[derive(Debug)]
+            struct Wrapped(std::io::Error);
+            impl std::fmt::Display for Wrapped {
+                fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(formatter, "未分类包装错误")
+                }
+            }
+            impl std::error::Error for Wrapped {
+                fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                    Some(&self.0)
+                }
+            }
+            logging::failure(
+                Level::Error,
+                "test",
+                "wrapped",
+                "WRAPPED_FAILURE",
+                &Wrapped(std::io::Error::new(std::io::ErrorKind::TimedOut, "inner")),
+                &[],
+            );
+            let records = logging::snapshot().unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].code, "IO_TIMED_OUT");
+            assert_eq!(records[0].message, "I/O 错误：TimedOut");
+            assert!(records[0].causes.is_empty());
         }
         "context" => {
             let _request = logging::request_scope();
@@ -444,6 +511,8 @@ fn logging_worker() {
             for _ in 0..50 {
                 logging::error("test", "process", "TEST_FAILURE");
             }
+            // 子进程退出前必须排空队列，否则并发计数会丢失尾部记录。
+            logging::flush().unwrap();
         }
         "concurrent" => {
             let mut children: Vec<_> = (0..3)
@@ -477,6 +546,7 @@ fn logging_worker() {
                 logging::error("test", "rotation", "TEST_FAILURE");
             }
             logging::error("test", "last", "LAST_ERROR");
+            logging::flush().unwrap();
             let files: Vec<_> = fs::read_dir(&directory)
                 .unwrap()
                 .map(|e| e.unwrap().path())
@@ -492,6 +562,7 @@ fn logging_worker() {
             config.max_files = 1;
             logging::configure(config.clone()).unwrap();
             logging::error("test", "new_retention", "AFTER_RECONFIGURE");
+            logging::flush().unwrap();
             assert!(!directory.join("errors-1.jsonl").exists());
             assert!(!directory.join("errors-2.jsonl").exists());
             #[cfg(unix)]
@@ -566,6 +637,7 @@ fn logging_worker() {
             config.directory = blocked;
             logging::configure(config).unwrap();
             logging::error("test", "storage_failure", "ERROR");
+            logging::flush().unwrap();
             assert_eq!(logging::health().0, 1);
             assert!(logging::health().1.is_some());
         }

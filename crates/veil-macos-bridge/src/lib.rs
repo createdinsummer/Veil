@@ -390,8 +390,14 @@ pub unsafe extern "C" fn veil_client_call(
     catch_unwind(AssertUnwindSafe(|| {
         // 请求副本用完即清零，不保留密码和原始请求正文。
         let input = Zeroizing::new(unsafe { slice::from_raw_parts(data, length) }.to_vec());
-        let request = serde_json::from_slice::<Request>(&input).map_err(|_| {
-            veil_core::logging::error("bridge", "decode_request", "INVALID_REQUEST");
+        let request = serde_json::from_slice::<Request>(&input).map_err(|error| {
+            // 只记录解析类别与行列，不回显请求正文。
+            veil_core::logging::error_with_code(
+                "bridge",
+                "decode_request",
+                "INVALID_REQUEST",
+                &error,
+            );
             "请求格式无效".to_owned()
         })?;
         execute(unsafe { &*client }, request)
@@ -472,6 +478,20 @@ mod tests {
         unsafe {
             veil_buffer_free(buffer);
         }
+        // 解码失败只记录解析位置，不回显请求正文。
+        let log = String::from_utf8(veil_core::logging::export().unwrap()).unwrap();
+        assert!(!log.contains("secret-do-not-log"));
+        let records: Vec<veil_core::logging::Record> = serde_json::from_str(&log).unwrap();
+        let decode = records
+            .iter()
+            .find(|record| record.operation == "decode_request")
+            .unwrap();
+        assert_eq!(decode.code, "INVALID_REQUEST");
+        assert!(
+            decode.message.contains("JSON 解析失败"),
+            "{}",
+            decode.message
+        );
         let (kind, bytes) = unsafe { call(client, serde_json::json!({"operation":"list_spaces"})) };
         assert_eq!(kind, 0);
         let spaces: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

@@ -136,6 +136,8 @@ fn main() -> std::process::ExitCode {
         Err(error) => {
             veil_core::logging::error_chain("scrollshot", "capture", error.as_ref());
             eprintln!("错误：{error:#}");
+            // 写盘在独立线程完成，退出前排空队列。
+            let _ = veil_core::logging::flush();
             std::process::ExitCode::FAILURE
         }
     }

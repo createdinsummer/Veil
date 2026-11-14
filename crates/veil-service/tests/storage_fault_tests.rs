@@ -27,6 +27,8 @@ fn fault_worker() {
         "rotate" => m.change_password_full("old", "new").unwrap(),
         _ => unreachable!(),
     }
+    // 写盘在独立线程完成；父测试直接读文件，退出前必须排空。
+    veil_core::logging::flush().unwrap();
 }
 fn fail(root: &Path, operation: &str, stage: &str) {
     let status = Command::new(std::env::current_exe().unwrap())

@@ -1,5 +1,6 @@
-//! 统一日志入口。错误消息与错误链在此脱敏，业务层不得直接调用日志后端。
+//! 统一日志入口。错误消息与错误链在此收敛为可安全导出的描述，业务层不得直接调用日志后端。
 //! 正常流程不逐项记录；重复故障合并统计，调用堆栈默认关闭。
+//! 写盘由独立线程完成，调用方只做有界入队；导出会排空队列，退出与切后台前必须调用 flush。
 mod redact;
 pub use redact::{SensitiveScope, remember as remember_sensitive, scope as sensitive_scope};
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, Once, OnceLock,
-        atomic::{AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -56,7 +58,8 @@ impl Config {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
-    /// 旧版未声明文本白名单时，导出必须省略其非结构化文本。
+    /// 文本策略版本：0 为旧版正则脱敏记录，1 为白名单记录。
+    /// 导出按存储内容原样输出，不再过滤旧版文本。
     #[serde(default)]
     pub privacy_version: u8,
     pub timestamp: String,
@@ -194,9 +197,21 @@ static STATE: Mutex<State> = Mutex::new(State {
     repeated: None,
 });
 static MINIMUM_LEVEL: AtomicU8 = AtomicU8::new(Level::Warn as u8);
+static CAPTURE_BACKTRACE: AtomicBool = AtomicBool::new(false);
 static CONTENDED_WRITES: AtomicU64 = AtomicU64::new(0);
+static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+static QUEUE: OnceLock<Option<mpsc::SyncSender<Command>>> = OnceLock::new();
+static WRITER: OnceLock<std::thread::ThreadId> = OnceLock::new();
 const LOCK_WAIT: Duration = Duration::from_millis(500);
 const STATE_WAIT: Duration = Duration::from_millis(500);
+const QUEUE_CAPACITY: usize = 4096;
+const DRAIN_WAIT: Duration = Duration::from_secs(2);
+const PANIC_DRAIN_WAIT: Duration = Duration::from_millis(200);
+
+enum Command {
+    Write(Box<Record>),
+    Flush(mpsc::Sender<bool>),
+}
 
 /// 等级关闭时不遍历错误链、不格式化文本，也不采集资源指纹。
 pub fn enabled(level: Level) -> bool {
@@ -231,15 +246,22 @@ fn note_failure(state: &mut State, error: &io::Error) {
 pub fn health() -> (u64, Option<io::ErrorKind>) {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let contended = CONTENDED_WRITES.load(Ordering::Relaxed);
+    let dropped = DROPPED_RECORDS.load(Ordering::Relaxed);
     (
-        state.failed_writes.saturating_add(contended),
+        state
+            .failed_writes
+            .saturating_add(contended)
+            .saturating_add(dropped),
         state
             .last_failure
-            .or((contended > 0).then_some(io::ErrorKind::TimedOut)),
+            .or((contended > 0).then_some(io::ErrorKind::TimedOut))
+            .or((dropped > 0).then_some(io::ErrorKind::WouldBlock)),
     )
 }
 pub fn configure(config: Config) -> io::Result<()> {
     validate(&config)?;
+    // 先按旧配置排空已入队记录，再切换目录与级别。
+    let _ = drain(DRAIN_WAIT);
     let mut state = state_lock()?;
     match flush_pending(&mut state) {
         Ok(()) => state.repeated = None,
@@ -254,10 +276,13 @@ pub fn configure(config: Config) -> io::Result<()> {
         },
         Ordering::Relaxed,
     );
+    CAPTURE_BACKTRACE.store(config.capture_backtrace, Ordering::Relaxed);
     state.config = Some(config);
     Ok(())
 }
 pub fn set_directory(directory: PathBuf) -> io::Result<()> {
+    // 先按旧目录排空已入队记录，避免切目录后写错位置。
+    let _ = drain(DRAIN_WAIT);
     let mut state = state_lock()?;
     if state
         .config
@@ -328,6 +353,8 @@ pub fn initialize() {
                 location.map_or(0, |l| l.line()),
                 details,
             );
+            // panic 后进程可能立即退出；有界等待写线程落盘。
+            let _ = drain(PANIC_DRAIN_WAIT);
         }))
     });
 }
@@ -465,8 +492,9 @@ pub fn error_with_code(
 ) {
     failure(Level::Error, component, operation, fallback, error, &[]);
 }
-// 只输出已知错误的安全表示。正则不能识别没有字段名或引号的任意明文内容。
-fn safe_error_message(error: &(dyn Error + 'static)) -> String {
+// 只输出已知错误的安全表示；无法归类时返回 None，由上层跳过该层包装错误。
+// 任意明文的脱敏不可靠，因此未识别的错误不回显 Display 文本。
+fn safe_error_message(error: &(dyn Error + 'static)) -> Option<String> {
     if let Some(error) = error.downcast_ref::<crate::error::VeilError>() {
         use crate::error::VeilError;
         let reason = match error {
@@ -523,12 +551,13 @@ fn safe_error_message(error: &(dyn Error + 'static)) -> String {
                     | "时间戳超出范围"
             )
         }) {
-            return reason.into();
+            return Some(reason.into());
         }
-        return error.log_code().into();
+        // 分类码已在 code 字段中；这里返回 None，让更深层的根因成为 message。
+        return None;
     }
     if let Some(error) = error.downcast_ref::<rusqlite::Error>() {
-        return match error {
+        return Some(match error {
             // SQLite 附带文本可能包含 SQL、路径或字段值；ffi 错误表示仅含错误码及固定说明。
             rusqlite::Error::SqliteFailure(failure, _) => failure.to_string(),
             rusqlite::Error::QueryReturnedNoRows => "SQLITE_NO_ROWS".into(),
@@ -541,26 +570,26 @@ fn safe_error_message(error: &(dyn Error + 'static)) -> String {
             rusqlite::Error::InvalidParameterName(..)
             | rusqlite::Error::InvalidParameterCount(..) => "SQLITE_INVALID_PARAMETER".into(),
             _ => "DATABASE_ERROR".into(),
-        };
+        });
     }
     if let Some(error) = error.downcast_ref::<rusqlite::ffi::Error>() {
-        return error.to_string();
+        return Some(error.to_string());
     }
     if let Some(error) = error.downcast_ref::<io::Error>() {
-        return error.raw_os_error().map_or_else(
+        return Some(error.raw_os_error().map_or_else(
             || format!("I/O 错误：{:?}", error.kind()),
             |code| io::Error::from_raw_os_error(code).to_string(),
-        );
+        ));
     }
     if let Some(error) = error.downcast_ref::<serde_json::Error>() {
-        return format!(
-            "JSON {:?} at {}:{}",
+        return Some(format!(
+            "JSON 解析失败：{:?}（第 {} 行，第 {} 列）",
             error.classify(),
             error.line(),
             error.column()
-        );
+        ));
     }
-    "错误详情已省略（非结构化文本）".into()
+    None
 }
 
 fn safe_backtrace() -> String {
@@ -631,8 +660,11 @@ pub fn failure(
                 serde_json::json!(&blake3::hash(scope.as_bytes()).to_hex()[..16]),
             );
         }
-        let message = safe_error_message(error);
-        if messages.last() != Some(&message) {
+        // 包装错误的 Display 可能夹杂任意文本；跳过无法归类的层级，
+        // 让最外层可安全描述的错误成为 message，其余进入 causes。
+        if let Some(message) = safe_error_message(error)
+            && messages.last() != Some(&message)
+        {
             messages.push(message);
         }
         current = error
@@ -684,16 +716,19 @@ fn flush_pending(state: &mut State) -> io::Result<()> {
     Ok(())
 }
 
-/// 正常退出、进入后台或用户导出时补写重复故障摘要；不承诺异常终止时一定被调用。
+/// 正常退出、进入后台或用户导出时排空队列并补写重复故障摘要。
 pub fn flush() -> io::Result<()> {
-    let mut state = state_lock()?;
-    let result = flush_pending(&mut state);
-    if let Err(error) = &result {
-        note_failure(&mut state, error);
+    if drain(DRAIN_WAIT) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "日志写线程未能及时刷新",
+        ))
     }
-    result
 }
 
+/// 调用线程只构造记录并尝试入队，写盘由独立线程完成。
 fn write_record(
     level: Level,
     component: &str,
@@ -706,7 +741,131 @@ fn write_record(
     if !enabled(level) {
         return;
     }
+    let mut details = details;
+    // 堆栈必须在调用线程采集，写线程的堆栈没有诊断价值。
+    if details.backtrace.is_none()
+        && (code == "PANIC" || level == Level::Error && CAPTURE_BACKTRACE.load(Ordering::Relaxed))
+    {
+        details.backtrace = Some(safe_backtrace());
+    }
+    let record = Record {
+        privacy_version: 1,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        level,
+        component: component.into(),
+        operation: operation.into(),
+        code: code.into(),
+        native_code: details.native_code,
+        version: env!("CARGO_PKG_VERSION").into(),
+        platform: std::env::consts::OS.into(),
+        process_id: std::process::id(),
+        source_file: Path::new(source)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
+        source_line: line,
+        event: details.event.into(),
+        message: details.message,
+        causes: details.causes,
+        context: details.context,
+        request_id: request_id(),
+        thread_id: format!("{:?}", std::thread::current().id()),
+        suppressed_count: 0,
+        repeat_summary: false,
+        backtrace: details.backtrace,
+    };
+    enqueue(record);
+}
+
+fn enqueue(record: Record) {
+    let Some(sender) = queue() else {
+        // 写线程无法启动时退回同步写入，宁可阻塞也不丢记录。
+        write_now(record);
+        return;
+    };
+    if sender.try_send(Command::Write(Box::new(record))).is_err() {
+        DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn queue() -> Option<&'static mpsc::SyncSender<Command>> {
+    QUEUE
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+            std::thread::Builder::new()
+                .name("veil-log-writer".into())
+                .spawn(move || run_writer(receiver))
+                .ok()
+                .map(|_| sender)
+        })
+        .as_ref()
+}
+
+fn run_writer(receiver: mpsc::Receiver<Command>) {
+    let _ = WRITER.set(std::thread::current().id());
+    while let Ok(command) = receiver.recv() {
+        // 日志自身的 panic 不能终止写线程；刷新命令始终回执，避免调用方空等。
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match command {
+            Command::Write(record) => write_now(*record),
+            Command::Flush(ack) => {
+                let flushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(flush_now))
+                    .unwrap_or(false);
+                let _ = ack.send(flushed);
+            }
+        }));
+    }
+}
+
+/// 有界等待写线程处理完此前入队的记录并补写重复摘要。
+fn drain(wait: Duration) -> bool {
+    let Some(sender) = queue() else {
+        return true;
+    };
+    // 日志自身在写线程上 panic 时不能等待自己。
+    if WRITER.get() == Some(&std::thread::current().id()) {
+        return true;
+    }
+    let (ack_sender, ack_receiver) = mpsc::channel();
+    let started = Instant::now();
+    let mut command = Command::Flush(ack_sender);
+    loop {
+        match sender.try_send(command) {
+            Ok(()) => break,
+            Err(mpsc::TrySendError::Full(returned)) => {
+                if started.elapsed() >= wait {
+                    return false;
+                }
+                command = returned;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    ack_receiver
+        .recv_timeout(wait.saturating_sub(started.elapsed()))
+        .unwrap_or(false)
+}
+
+fn flush_now() -> bool {
     // 日志自身发生 panic 时不能等待已持有的锁，其他争用同样有等待上限。
+    let mut state = match state_lock() {
+        Ok(state) => state,
+        Err(_) => {
+            CONTENDED_WRITES.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    };
+    match flush_pending(&mut state) {
+        Ok(()) => true,
+        Err(error) => {
+            note_failure(&mut state, &error);
+            false
+        }
+    }
+}
+
+fn write_now(mut record: Record) {
     let mut state = match state_lock() {
         Ok(state) => state,
         Err(_) => {
@@ -717,7 +876,7 @@ fn write_record(
     if state
         .config
         .as_ref()
-        .is_some_and(|config| !config.enabled || level < config.minimum_level)
+        .is_some_and(|config| !config.enabled || record.level < config.minimum_level)
     {
         return;
     }
@@ -734,40 +893,17 @@ fn write_record(
             state.config = Some(default_config()?);
         }
         let config = state.config.as_ref().unwrap().clone();
-        if !config.enabled || level < config.minimum_level {
+        if !config.enabled || record.level < config.minimum_level {
             return Ok(());
         }
-        let mut record = Record {
-            privacy_version: 1,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            level,
-            component: component.into(),
-            operation: operation.into(),
-            code: code.into(),
-            native_code: details.native_code,
-            version: env!("CARGO_PKG_VERSION").into(),
-            platform: std::env::consts::OS.into(),
-            process_id: std::process::id(),
-            source_file: Path::new(source)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into(),
-            source_line: line,
-            event: details.event.into(),
-            message: details.message,
-            causes: details.causes,
-            context: details.context,
-            request_id: request_id(),
-            thread_id: format!("{:?}", std::thread::current().id()),
-            suppressed_count: 0,
-            repeat_summary: false,
-            backtrace: details.backtrace,
-        };
         if !config.repeat_interval.is_zero() {
             let key = format!(
-                "{component}:{operation}:{line}:{}:{code}:{:?}:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                "{}:{}:{}:{}:{}:{:?}:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                record.component,
+                record.operation,
+                record.source_line,
                 record.event,
+                record.code,
                 record.native_code,
                 record.message,
                 record.context.get("database"),
@@ -803,11 +939,6 @@ fn write_record(
                     repeated.remove(&oldest);
                 }
             }
-            if (code == "PANIC" || config.capture_backtrace && level == Level::Error)
-                && record.backtrace.is_none()
-            {
-                record.backtrace = Some(safe_backtrace());
-            }
             append(&config, &record)?;
             repeated.insert(
                 key,
@@ -819,11 +950,6 @@ fn write_record(
             );
             return Ok(());
         }
-        if (code == "PANIC" || config.capture_backtrace && level == Level::Error)
-            && record.backtrace.is_none()
-        {
-            record.backtrace = Some(safe_backtrace());
-        }
         append(&config, &record)
     })();
     match result {
@@ -831,7 +957,8 @@ fn write_record(
         Ok(()) => {
             let total = state
                 .failed_writes
-                .saturating_add(CONTENDED_WRITES.load(Ordering::Relaxed));
+                .saturating_add(CONTENDED_WRITES.load(Ordering::Relaxed))
+                .saturating_add(DROPPED_RECORDS.load(Ordering::Relaxed));
             if total > state.reported_failures {
                 if let Some(config) = &state.config {
                     match append(config, &health_record(&state, "LOGGING_RECOVERED")) {
@@ -869,6 +996,10 @@ fn health_record(state: &State, event: &str) -> Record {
             (
                 "contended_records",
                 Field::Count(CONTENDED_WRITES.load(Ordering::Relaxed)),
+            ),
+            (
+                "dropped_records",
+                Field::Count(DROPPED_RECORDS.load(Ordering::Relaxed)),
             ),
         ]),
         request_id: None,
@@ -991,8 +1122,22 @@ fn append(config: &Config, record: &Record) -> io::Result<()> {
     file.write_all(&bytes)
 }
 
+/// 旧版把安全描述放在 causes，message 只写占位文案；导出时恢复根因便于阅读。
+const LEGACY_PLACEHOLDER: &str = "错误详情已省略（非结构化文本）";
+fn normalize_message(record: &mut Record) {
+    if record.message == LEGACY_PLACEHOLDER {
+        record.message = record.causes.pop().unwrap_or_else(|| record.code.clone());
+    } else if record.message.is_empty() {
+        record.message = record.code.clone();
+    }
+}
+
 /// 返回完整轮转集合的快照，供各端导出反馈；读取与写入使用同一个跨进程锁。
 pub fn snapshot() -> io::Result<Vec<Record>> {
+    // 先让写线程把队列落盘，否则刚发生的故障不会出现在导出中。
+    if !drain(DRAIN_WAIT) {
+        DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+    }
     let mut state = state_lock()?;
     if state.config.is_none() {
         state.config = Some(default_config()?);
@@ -1022,16 +1167,9 @@ pub fn snapshot() -> io::Result<Vec<Record>> {
         let mut line = Vec::new();
         while reader.read_until(b'\n', &mut line)? > 0 {
             // 进程意外退出可能留下不完整末行；保留其余可解码记录。
+            // 旧版记录按存储内容导出，仅修复占位文案与空 message。
             if let Ok(mut record) = serde_json::from_slice::<Record>(&line) {
-                if record.privacy_version == 0 {
-                    // 历史正则脱敏不保证任意文本安全；保留位置、类别及数值状态。
-                    record.message = "历史日志文本已省略".into();
-                    record.causes.clear();
-                    record.backtrace = None;
-                    record
-                        .context
-                        .retain(|_, value| value.is_number() || value.is_boolean());
-                }
+                normalize_message(&mut record);
                 records.push(record);
             }
             line.clear();
@@ -1040,6 +1178,7 @@ pub fn snapshot() -> io::Result<Vec<Record>> {
     if state
         .failed_writes
         .saturating_add(CONTENDED_WRITES.load(Ordering::Relaxed))
+        .saturating_add(DROPPED_RECORDS.load(Ordering::Relaxed))
         > state.reported_failures
     {
         records.push(health_record(&state, "LOG_RECORDS_LOST"));

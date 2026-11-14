@@ -165,7 +165,12 @@ fn error_logging_worker() {
         .unwrap();
     assert_eq!(nested.code, "SQLITE_BUSY");
     assert_eq!(nested.native_code, Some(5));
-    assert!(!nested.causes.is_empty());
+    // 包装层无法归类时，原始原因被提升为 message。
+    assert!(
+        nested.message.contains("database is locked"),
+        "{}",
+        nested.message
+    );
     let text = String::from_utf8(logging::export().unwrap()).unwrap();
     assert!(!text.contains("sensitive-wrapped-file-name"));
     assert!(!text.contains("sensitive-database-message"));
