@@ -55,10 +55,27 @@ struct ImportInspection: Decodable, Identifiable, Sendable {
     let conflicts: [ImportConflict]
 }
 
+extension ImportInspection {
+    /// 把一批冲突按统一动作展开；覆盖不了的目标（目录、校验失败等）按跳过处理。
+    func resolutions(for action: ImportAction) -> [ImportResolution] {
+        conflicts.map { conflict in
+            ImportResolution(
+                target: conflict.target,
+                action: action == .overwrite && conflict.canOverwrite ? .overwrite : .skip)
+        }
+    }
+}
+
 enum ImportAction: String, Encodable, Sendable { case overwrite, skip }
 struct ImportResolution: Encodable, Sendable {
     let target: String
     let action: ImportAction
+}
+
+/// 一次同名文件复核的结果；`stickyAction` 非空表示后续批次不再询问，直接沿用该动作。
+struct ImportReviewOutcome: Sendable {
+    var resolutions: [ImportResolution]?
+    var stickyAction: ImportAction?
 }
 
 enum ClientError: LocalizedError {

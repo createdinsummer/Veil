@@ -364,7 +364,14 @@ final class NativeClientTests: XCTestCase {
         let batch = try await awaitReview()
         XCTAssertEqual(store.conflictOperation, "导出")
         XCTAssertFalse(try XCTUnwrap(batch.conflicts.first).sameContent)
-        store.completeImportReview([ImportResolution(target: try XCTUnwrap(batch.conflicts.first).target, action: .overwrite)], id: batch.id)
+        store.completeImportReview(
+            ImportReviewOutcome(
+                resolutions: [
+                    ImportResolution(
+                        target: try XCTUnwrap(batch.conflicts.first).target, action: .overwrite)
+                ],
+                stickyAction: nil),
+            id: batch.id)
         await overwrite.value
         XCTAssertNil(store.error)
         XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
@@ -405,7 +412,10 @@ final class NativeClientTests: XCTestCase {
         let same = try await awaitReview()
         XCTAssertTrue(try XCTUnwrap(same.conflicts.first).sameContent)
         XCTAssertEqual(store.container?.files.first?.version, 1)
-        store.completeImportReview([ImportResolution(target: "同名.txt", action: .skip)])
+        store.completeImportReview(
+            ImportReviewOutcome(
+                resolutions: [ImportResolution(target: "同名.txt", action: .skip)],
+                stickyAction: nil))
         await skipping.value
         XCTAssertNil(store.error)
         XCTAssertEqual(store.container?.files.first?.version, 1)
@@ -413,7 +423,10 @@ final class NativeClientTests: XCTestCase {
         let overwriting = Task { await store.importFiles([file]) }
         let different = try await awaitReview()
         XCTAssertFalse(try XCTUnwrap(different.conflicts.first).sameContent)
-        store.completeImportReview([ImportResolution(target: "同名.txt", action: .overwrite)])
+        store.completeImportReview(
+            ImportReviewOutcome(
+                resolutions: [ImportResolution(target: "同名.txt", action: .overwrite)],
+                stickyAction: nil))
         await overwriting.value
         XCTAssertNil(store.error)
         XCTAssertEqual(store.container?.files.first?.version, 2)

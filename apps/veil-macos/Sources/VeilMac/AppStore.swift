@@ -37,7 +37,7 @@ final class AppStore: ObservableObject {
     @Published var preview: PreviewAsset?
     @Published var conflictOperation = "导入"
     @Published var importInspection: ImportInspection?
-    private var importReview: CheckedContinuation<[ImportResolution]?, Never>?
+    private var importReview: CheckedContinuation<ImportReviewOutcome?, Never>?
     @Published var error: String?
     @Published var notice: String?
     @Published private(set) var thumbnails: [String: Data] = [:]
@@ -628,16 +628,18 @@ final class AppStore: ObservableObject {
         return "已完成 \(progress.completedFiles) / \(progress.totalFiles) · \(Int(min(1, Double(progress.completedFiles) / Double(progress.totalFiles))*100))%" + (progress.scanComplete ? " · 遍历完成" : " · 总数持续增加")
     }
 
-    func completeImportReview(_ resolutions: [ImportResolution]?, id: String? = nil) {
+    func completeImportReview(_ outcome: ImportReviewOutcome?, id: String? = nil) {
         if let id, importInspection?.id != id { return }
         let continuation = importReview
         importReview = nil
         importInspection = nil
-        continuation?.resume(returning: resolutions)
+        continuation?.resume(returning: outcome)
     }
 
-    private func reviewImport(_ inspection: ImportInspection) async -> [ImportResolution]? {
-        if inspection.conflicts.isEmpty { return [] }
+    private func reviewImport(_ inspection: ImportInspection) async -> ImportReviewOutcome? {
+        if inspection.conflicts.isEmpty {
+            return ImportReviewOutcome(resolutions: [], stickyAction: nil)
+        }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 importReview = continuation
@@ -648,18 +650,47 @@ final class AppStore: ObservableObject {
         }
     }
 
+
+
     private func pollImportConflicts(ticket: UInt64, exporting: Bool = false) async {
+        // 用户选择「全部跳过 / 全部覆盖」后，后续批次不再弹窗，直接沿用。
+        var sticky: ImportAction?
         while !Task.isCancelled, ticket == generation {
             do {
                 let batch: ImportInspection? = try await client.json(NativeRequest(operation: exporting ? "poll_export_conflicts" : "poll_import_conflicts"))
                 if let batch {
                     guard ticket == generation, !Task.isCancelled else { return }
                     self.conflictOperation = exporting ? "导出" : "导入"
-                    guard let resolutions = await reviewImport(batch), ticket == generation, !Task.isCancelled else {
+                    let outcome: ImportReviewOutcome
+                    if let action = sticky {
+                        outcome = ImportReviewOutcome(
+                            resolutions: batch.resolutions(for: action),
+                            stickyAction: action)
+                    } else {
+                        guard let reviewed = await reviewImport(batch), ticket == generation,
+                            !Task.isCancelled
+                        else {
+                            _ = client.cancelTransfer()
+                            return
+                        }
+                        outcome = reviewed
+                    }
+                    if let action = outcome.stickyAction {
+                        if sticky == nil {
+                            notice =
+                                action == .skip
+                                ? "后续同名文件将自动跳过，不再询问"
+                                : "后续同名文件将自动覆盖，无法覆盖的跳过"
+                        }
+                        sticky = action
+                    }
+                    guard let resolutions = outcome.resolutions else {
                         _ = client.cancelTransfer()
                         return
                     }
                     try await client.execute(NativeRequest(operation: exporting ? "resolve_export_conflicts" : "resolve_import_conflicts", id: batch.id, resolutions: resolutions))
+                    // 已选择统一处理时继续立即取下一批，不必等轮询间隔。
+                    if sticky != nil { continue }
                 }
             } catch { AppLog.capture(error);
                 if ticket == generation, !Task.isCancelled {
