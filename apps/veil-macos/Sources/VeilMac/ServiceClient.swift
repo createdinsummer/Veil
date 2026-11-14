@@ -17,9 +17,23 @@ struct NativeRequest: Encodable, Sendable {
     var directory: String? = nil
     var destination: String? = nil
     var key: String? = nil
-    var value: String? = nil
+    var value: PreferenceValue? = nil
     var seconds: Int? = nil
     var count: Int? = nil
+}
+
+/// 用户设置值：字符串或对象；编码后直接写入 app.db 的 `value_json`。
+enum PreferenceValue: Encodable, Sendable, Equatable {
+    case string(String)
+    case map([String: String])
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value): try container.encode(value)
+        case .map(let value): try container.encode(value)
+        }
+    }
 }
 
 struct ImportConflict: Decodable, Identifiable, Sendable {

@@ -27,28 +27,36 @@ struct PreviewSheet: View {
             if let error = asset.error {
                 ContentUnavailableView("无法预览", systemImage: "doc.questionmark", description: Text(error))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let url = asset.videoURL {
-                VideoPreview(url: url)
-            } else if let data = asset.data {
+            } else if let url = asset.contentURL {
                 if asset.file.previewMime == "text/plain" {
                     ScrollView {
-                        Text(String(decoding: data, as: UTF8.self)).font(.system(.body, design: .monospaced))
+                        Text(Self.decodedText(at: url)).font(.system(.body, design: .monospaced))
                             .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(20)
                     }.background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
                 } else if asset.file.previewMime == "application/pdf" {
-                    PDFPreview(data: data)
-                } else if let image = NSImage(data: data) {
+                    PDFPreview(url: url)
+                } else if asset.file.previewMime?.hasPrefix("video/") == true {
+                    VideoPreview(url: url)
+                } else if let image = NSImage(contentsOf: url) {
                     Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ContentUnavailableView("无法显示此文件", systemImage: "doc", description: Text("可导出后使用系统应用查看。"))
                 }
             } else {
-                VStack(spacing: 13) { ProgressView(); Text("正在解密预览…").foregroundStyle(.secondary) }
+                VStack(spacing: 13) { ProgressView(); Text("正在解密文件…").foregroundStyle(.secondary) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             HStack {
                 Button("删除…", systemImage: "trash", role: .destructive) { confirmDelete = true }.disabled(store.isBusy)
                 Spacer()
+                Button("用系统应用打开", systemImage: "arrow.up.forward.app") { Task { await store.openPreviewExternally() } }
+                    .buttonStyle(VeilButtonStyle()).disabled(store.isBusy || asset.contentURL == nil)
+                    .help("先解密到临时文件，再用系统应用打开")
+                Button { Task { await store.chooseApplicationForPreview() } } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .buttonStyle(VeilIconButtonStyle()).disabled(store.isBusy || asset.contentURL == nil)
+                .help("选择用于打开的应用…").accessibilityLabel("选择用于打开的应用")
                 Button("导出…", systemImage: "square.and.arrow.up") { Task { await store.exportFile(asset.file) } }
                     .buttonStyle(VeilButtonStyle()).disabled(store.isBusy)
                 Button("完成") { store.closePreview() }.buttonStyle(VeilButtonStyle(variant: .primary)).keyboardShortcut(.defaultAction)
@@ -62,14 +70,20 @@ struct PreviewSheet: View {
                 Button("取消", role: .cancel) { }
             } message: { Text("此文件将从容器中删除。此操作无法撤销。") }
     }
+
+    /// 文本预览从临时文件读回内存展示；解码失败时给出可读提示。
+    private static func decodedText(at url: URL) -> String {
+        guard let data = try? Data(contentsOf: url) else { return "无法读取文件内容" }
+        return String(decoding: data, as: UTF8.self)
+    }
 }
 
 private struct PDFPreview: NSViewRepresentable {
-    let data: Data
+    let url: URL
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
-        view.document = PDFDocument(data: data)
+        view.document = PDFDocument(url: url)
         return view
     }
     func updateNSView(_ view: PDFView, context: Context) { }

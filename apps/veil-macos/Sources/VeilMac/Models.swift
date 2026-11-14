@@ -85,8 +85,35 @@ struct FileEntry: Decodable, Identifiable, Hashable, Sendable {
     }
 }
 
+func folderNameForCreation(_ rawName: String) -> String? {
+    let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty, name != ".", name != "..",
+          !name.contains("/"), !name.contains("\\"), !name.contains("\0")
+    else { return nil }
+    return name
+}
+
 enum BrowseMode: String, CaseIterable, Sendable { case type, path }
 enum FileLayout: String, Sendable { case grid, list }
+
+/// 命令行提示的详细程度，与 CLI 共用 app.db 的 hint_level 设置项。
+enum HintLevel: String, CaseIterable, Sendable {
+    case full, brief, off
+    var title: String {
+        switch self {
+        case .full: "完整"
+        case .brief: "简洁"
+        case .off: "关闭"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .full: "显示全部操作提示。"
+        case .brief: "只显示关键提示。"
+        case .off: "不显示提示。"
+        }
+    }
+}
 
 enum BrowserEntry: Identifiable, Hashable, Sendable {
     case folder(String)
@@ -103,25 +130,43 @@ enum BrowserEntry: Identifiable, Hashable, Sendable {
     }
 }
 
+/// 判断路径的任一组件是否以「.」开头；扁平视图据此隐藏位于隐藏目录内的文件。
+func pathContainsDotComponent(_ path: String) -> Bool {
+    path.split(separator: "/").contains { $0.hasPrefix(".") }
+}
+
 /// 这是 macOS 界面的展示计算；业务路径的合法性仍由 Rust 校验。
+/// 默认隐藏以「.」开头的文件与目录；`showHidden` 为真时按原样展示。
 func browserEntries(container: ContainerSnapshot, mode: BrowseMode, directory: String,
-                    categories: Set<FileCategory>, search: String) -> [BrowserEntry] {
+                    categories: Set<FileCategory>, search: String,
+                    showHidden: Bool = false) -> [BrowserEntry] {
     var result: [BrowserEntry]
     if mode == .type {
-        result = container.files.filter { categories.isEmpty || categories.contains($0.category) }.map(BrowserEntry.file)
+        result = container.files.filter {
+            (categories.isEmpty || categories.contains($0.category))
+                && (showHidden || !pathContainsDotComponent($0.name))
+        }.map(BrowserEntry.file)
     } else {
         let prefix = directory.isEmpty ? "" : directory + "/"
         var folders = Set<String>()
         var files: [BrowserEntry] = []
         for folder in container.directories where folder.path.hasPrefix(prefix) {
             let tail = folder.path.dropFirst(prefix.count)
-            if let child = tail.split(separator: "/").first { folders.insert(prefix + child) }
+            if let child = tail.split(separator: "/").first,
+               showHidden || !child.hasPrefix(".") {
+                folders.insert(prefix + child)
+            }
         }
         for file in container.files where file.name.hasPrefix(prefix) {
             let tail = file.name.dropFirst(prefix.count)
             if tail.contains("/") {
-                if let child = tail.split(separator: "/").first { folders.insert(prefix + child) }
-            } else if !tail.isEmpty { files.append(.file(file)) }
+                if let child = tail.split(separator: "/").first,
+                   showHidden || !child.hasPrefix(".") {
+                    folders.insert(prefix + child)
+                }
+            } else if !tail.isEmpty, showHidden || !tail.hasPrefix(".") {
+                files.append(.file(file))
+            }
         }
         result = folders.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map(BrowserEntry.folder)
             + files.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }

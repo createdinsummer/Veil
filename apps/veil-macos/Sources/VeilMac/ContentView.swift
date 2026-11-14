@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
     @State private var sidebarVisible = true
 
     var body: some View {
@@ -67,6 +68,13 @@ struct ContentView: View {
                     .accessibilityAddTraits(.updatesFrequently)
             }
         }
+        .overlay {
+            if let status = store.decryptStatus {
+                DecryptOverlay(status: status)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: store.decryptStatus)
     }
 
     private var header: some View {
@@ -101,6 +109,8 @@ struct ContentView: View {
                     Button("刷新") { Task { await store.refresh() } }
                     Divider()
                     Button("导出错误日志…") { exportErrorLogs() }
+                    Divider()
+                    Button("设置…") { openSettings() }
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).pointerCursor().help("容器操作")
             }
@@ -330,6 +340,18 @@ private struct SidebarView: View {
                     .background(store.transferTitle != nil ? VeilTheme.selected : .clear, in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(VeilPlainButtonStyle())
+                SettingsLink {
+                    HStack(spacing: 8) {
+                        Image(systemName: "gearshape").font(.system(size: 13)).frame(width: 16)
+                        Text("设置").font(.system(size: 12))
+                        Spacer(minLength: 4)
+                    }
+                    .foregroundStyle(VeilTheme.secondary)
+                    .padding(.horizontal, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(VeilPlainButtonStyle())
+                .accessibilityLabel("打开设置")
                 Label("本机", systemImage: "lock").font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
             }.padding(.horizontal, 23).padding(.bottom, 20).padding(.top, 12)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).background(VeilTheme.sidebar)
@@ -509,5 +531,34 @@ struct FeedbackBanner: View {
             Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(VeilPlainButtonStyle()).accessibilityLabel("关闭提示")
         }.font(.system(size: 12)).foregroundStyle(isError ? VeilTheme.danger : VeilTheme.secondary)
             .padding(12).background(isError ? VeilTheme.dangerSurface : VeilTheme.thumbnail)
+    }
+}
+
+/// 解密浮层：先把明文写到临时文件，再交给应用内查看器或系统应用。
+private struct DecryptOverlay: View {
+    let status: DecryptStatus
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.18).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView().controlSize(.large)
+                Text("正在解密文件…").font(.system(size: 14, weight: .semibold))
+                Text(status.fileName).font(.system(size: 12)).foregroundStyle(VeilTheme.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(hint).font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
+                    .multilineTextAlignment(.center).frame(maxWidth: 280).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(24).frame(width: 330)
+            .background(VeilTheme.card, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(VeilTheme.border))
+            .shadow(color: .black.opacity(0.18), radius: 24, y: 10)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+
+    private var hint: String {
+        "会先把文件解密到临时文件，再用\(status.destination)打开；锁定或退出后自动清理。"
     }
 }

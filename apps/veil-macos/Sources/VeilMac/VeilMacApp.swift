@@ -61,35 +61,12 @@ struct VeilMacApp: App {
                     .keyboardShortcut("r").disabled(store.isBusy)
                 Button("锁定容器") { Task { await store.lock(forgetPassword: true) } }
                     .keyboardShortcut("l", modifiers: [.command, .shift]).disabled(store.container == nil && !store.isBusy)
-                Divider()
-                Menu("免密时长") {
-                    ForEach([0, 900, 1800, 3600, 7200, 14400], id: \.self) { seconds in
-                        Button(store.unlockCacheSeconds == seconds
-                               ? "\(AppStore.durationLabel(seconds))（当前）"
-                               : AppStore.durationLabel(seconds)) {
-                            Task { await store.setUnlockCache(seconds: seconds) }
-                        }
-                    }
-                }.disabled(store.isBusy)
-                Menu("导入提交间隔") {
-                    ForEach(1...60, id: \.self) { seconds in
-                        Button("\(seconds) 秒" + (store.importCommitIntervalSeconds == seconds ? "（当前）" : "")) {
-                            Task { await store.setImportCommitInterval(seconds: seconds) }
-                        }
-                    }
-                }.disabled(store.isBusy)
-                Menu("导入提交数量") {
-                    ForEach(0..<10, id: \.self) { group in
-                        Menu("\(group * 10 + 1)～\(group * 10 + 10) 条") {
-                            ForEach((group * 10 + 1)...(group * 10 + 10), id: \.self) { count in
-                                Button("\(count) 条" + (store.importCommitCount == count ? "（当前）" : "")) {
-                                    Task { await store.setImportCommitCount(count) }
-                                }
-                            }
-                        }
-                    }
-                }.disabled(store.isBusy)
             }
+        }
+        Settings {
+            SettingsView()
+                .environmentObject(store)
+                .tint(VeilTheme.accent)
         }
         Window("任务中心", id: VeilWindowID.taskCenter) {
             TaskCenterView()

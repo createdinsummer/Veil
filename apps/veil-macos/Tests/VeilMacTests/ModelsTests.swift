@@ -66,6 +66,28 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(rows.map(\.name), ["empty", "sub", "note.txt"])
     }
 
+    func testDotEntriesAreHiddenByDefaultAndCanBeRevealed() {
+        let container = ContainerSnapshot(id: "one", name: "测试", path: "/tmp/one", createdAt: "", files: [
+            file(".DS_Store"), file("可见.txt"), file("资料/.hidden.txt"), file("资料/说明.txt"), file(".配置/内容.txt")
+        ], directories: [
+            DirectoryEntry(id: "hidden", path: ".配置"), DirectoryEntry(id: "visible", path: "资料")
+        ])
+        // 默认隐藏：根目录只显示「可见.txt」与「资料」，隐藏文件与隐藏目录不出现。
+        let rootRows = browserEntries(container: container, mode: .path, directory: "", categories: [], search: "")
+        XCTAssertEqual(rootRows.map(\.path), ["资料", "可见.txt"])
+        // 进入普通目录后，其中的隐藏文件同样默认不显示。
+        let insideRows = browserEntries(container: container, mode: .path, directory: "资料", categories: [], search: "")
+        XCTAssertEqual(insideRows.map(\.path), ["资料/说明.txt"])
+        // 按类型扁平浏览时，隐藏文件及位于隐藏目录内的文件都不显示。
+        let typeRows = browserEntries(container: container, mode: .type, directory: "", categories: [], search: "")
+        XCTAssertEqual(typeRows.map(\.path), ["可见.txt", "资料/说明.txt"])
+        // 打开开关后，隐藏文件与隐藏目录恢复显示；隐藏目录内容仍聚合在自身路径下。
+        let revealed = browserEntries(container: container, mode: .path, directory: "", categories: [], search: "", showHidden: true)
+        XCTAssertEqual(Set(revealed.map(\.name)), [".DS_Store", "可见.txt", "资料", ".配置"])
+        let revealedType = browserEntries(container: container, mode: .type, directory: "", categories: [], search: "", showHidden: true)
+        XCTAssertEqual(Set(revealedType.map(\.name)), [".DS_Store", "可见.txt", ".hidden.txt", "说明.txt", "内容.txt"])
+    }
+
     func testCategorySearchAndBreadcrumbs() {
         let container = ContainerSnapshot(id: "one", name: "测试", path: "/tmp/one", createdAt: "", files: [
             file("旅行/照片.jpg", category: .photo), file("旅行/说明.txt"), file("工作/记录.txt")
@@ -259,19 +281,57 @@ final class NativeClientTests: XCTestCase {
         XCTAssertTrue(store.thumbnails.isEmpty)
     }
 
-    func testVideoPreviewRemovesItsPrivateTemporaryFile() throws {
+    func testPreviewRemovesItsPrivateTemporaryFile() throws {
         let file = FileEntry(id: "video", name: "旅行/短片.mp4", size: 8, version: 1,
                              encryptedAt: "", category: .video, previewMime: "video/mp4")
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("veil-native-preview-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let url = folder.appendingPathComponent(file.leafName)
+        try Data("test-only".utf8).write(to: url)
         let asset = PreviewAsset(file: file)
-        try asset.install(Data("test-only".utf8))
-        let url = try XCTUnwrap(asset.videoURL)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        try asset.install(url, folder: folder)
+        let installed = try XCTUnwrap(asset.contentURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: installed.path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: installed.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         asset.close()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: installed.deletingLastPathComponent().path))
+        XCTAssertNil(asset.contentURL)
+    }
+
+    func testShowPreviewWritesTemporaryFileAndLockCleansItUp() async throws {
+        guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
+              ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
+            throw XCTSkip("预览集成测试需要独立的测试目录")
+        }
+        let store = AppStore()
+        await store.load()
+        let space = try XCTUnwrap(store.activeSpace)
+        await store.submit(.create(space: space.id), name: "预览测试 " + UUID().uuidString,
+                           password: "preview-test-password", confirmation: "preview-test-password")
+        XCTAssertNotNil(store.container)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("说明.txt")
+        let content = "打开预览后解密到临时目录。\n"
+        try Data(content.utf8).write(to: source)
+        await store.importFiles([source])
+        XCTAssertNil(store.error)
+        guard let entry = store.visibleEntries.first, case .file(let file) = entry else {
+            return XCTFail("缺少导入的文件")
+        }
+        await store.showPreview(file)
+        let asset = try XCTUnwrap(store.preview)
+        let url = try XCTUnwrap(asset.contentURL, asset.error ?? "未生成预览临时文件")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), content)
+        // 锁定容器必须同时清空预览并删除临时文件。
+        await store.lock()
+        XCTAssertNil(store.preview)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
-        XCTAssertNil(asset.videoURL)
-        XCTAssertNil(asset.data)
     }
 
     func testExportReviewAndCancellationPreserveExistingFiles() async throws {

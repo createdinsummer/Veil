@@ -3,6 +3,13 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 解密浮层状态：先把明文写进临时文件，再交给应用内查看器或系统应用。
+struct DecryptStatus: Equatable, Sendable {
+    let fileName: String
+    /// 解密完成后的去处，例如“应用内查看器”“「OmniPlayer」”“系统默认应用”。
+    let destination: String
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     @Published private(set) var spaces: [Space] = []
@@ -17,6 +24,8 @@ final class AppStore: ObservableObject {
     @Published var directory = ""
     @Published var categories: Set<FileCategory> = []
     @Published var search = ""
+    /// 默认隐藏以「.」开头的文件与目录；切换开关仅对当前浏览会话生效。
+    @Published var showHiddenFiles = false
     @Published var layout: FileLayout = .grid
     @Published var browseMode: BrowseMode = .type
     @Published var form: ContainerForm?
@@ -36,6 +45,16 @@ final class AppStore: ObservableObject {
     @Published private(set) var unlockCacheSeconds = 3600
     @Published private(set) var importCommitIntervalSeconds = 1
     @Published private(set) var importCommitCount = 8
+    /// 命令行提示详细程度；与 CLI 共用 app.db 的 hint_level 设置项。
+    @Published var hintLevel: HintLevel = .full
+    /// 本机设备身份；只读展示，来自 app.db 的 system_setting 表。
+    @Published private(set) var deviceID = ""
+    /// 设置窗口内的操作反馈；在主窗口 notice 之外独立提示。
+    @Published var settingsFeedback: String?
+    /// 按扩展名登记的默认打开应用；来自 app.db 的 user_setting 表。
+    @Published private(set) var openWithDefaults: [String: String] = [:]
+    /// 非空时界面显示“正在解密文件…”浮层。
+    @Published private(set) var decryptStatus: DecryptStatus?
 
     private let client = ServiceClient()
     private var generation: UInt64 = 0
@@ -79,7 +98,7 @@ final class AppStore: ObservableObject {
     var activeSpace: Space? { spaces.first { $0.id == selectedSpaceID } ?? spaces.first { $0.isDefault } ?? spaces.first }
     var visibleEntries: [BrowserEntry] {
         guard let container else { return [] }
-        return browserEntries(container: container, mode: browseMode, directory: directory, categories: categories, search: search)
+        return browserEntries(container: container, mode: browseMode, directory: directory, categories: categories, search: search, showHidden: showHiddenFiles)
     }
     var externalRecents: [RecentContainer] {
         recents.filter { recent in !spaces.contains { $0.containers.contains { $0.id == recent.id } } }
@@ -118,6 +137,10 @@ final class AppStore: ObservableObject {
 
     func load() async {
         guard !loaded else { return }
+        // 启动即清空上次遗留的明文副本（崩溃、旧版本或外部应用未退出都可能留下）。
+        TemporaryFiles.purge(
+            root: TemporaryFiles.directory,
+            legacyRoot: FileManager.default.temporaryDirectory)
         lastTransferFailure = TransferDiagnostics.latestRecord()
         await perform { _ in
             try await self.reloadCatalog()
@@ -126,11 +149,18 @@ final class AppStore: ObservableObject {
             let cache: Double = try await self.client.json(NativeRequest(operation: "get_preference", key: "unlock_cache_seconds"))
             let interval: Int = try await self.client.json(NativeRequest(operation: "get_preference", key: "import_commit_interval_seconds"))
             let count: Int = try await self.client.json(NativeRequest(operation: "get_preference", key: "import_commit_count"))
+            let hint: String = try await self.client.json(NativeRequest(operation: "get_preference", key: "hint_level"))
+            let device: String? = try await self.client.json(NativeRequest(operation: "get_system_setting", key: "device_id"))
+            let openWith: [String: String] = (try? await self.client.json(
+                NativeRequest(operation: "get_preference", key: "external_open_defaults"))) ?? [:]
             self.layout = FileLayout(rawValue: layout) ?? .grid
             self.browseMode = BrowseMode(rawValue: mode) ?? .type
             self.unlockCacheSeconds = Int(cache.rounded())
             self.importCommitIntervalSeconds = interval
             self.importCommitCount = count
+            self.hintLevel = HintLevel(rawValue: hint) ?? .full
+            self.deviceID = device ?? ""
+            self.openWithDefaults = openWith
             self.loaded = true
         }
     }
@@ -250,6 +280,7 @@ final class AppStore: ObservableObject {
         directory = ""
         categories = []
         search = ""
+        showHiddenFiles = false
         closePreview()
         pendingDelete = nil
     }
@@ -264,6 +295,9 @@ final class AppStore: ObservableObject {
         container = nil
         form = nil
         resetBrowser()
+        cleanupExternalOpens()
+        // 锁定/休眠/退出应用都走这里：清空整个临时副本目录，不留下任何明文。
+        TemporaryFiles.purge(root: TemporaryFiles.directory)
         notice = nil
         if forgetPassword { unlockedPasswords.removeAll() }
         pendingOperations += 1
@@ -492,34 +526,77 @@ final class AppStore: ObservableObject {
     func savePreferences() async {
         let layout = layout.rawValue, mode = browseMode.rawValue
         do {
-            try await client.execute(NativeRequest(operation: "set_preference", key: "layout", value: layout))
-            try await client.execute(NativeRequest(operation: "set_preference", key: "view_mode", value: mode))
+            try await client.execute(NativeRequest(operation: "set_preference", key: "layout", value: .string(layout)))
+            try await client.execute(NativeRequest(operation: "set_preference", key: "view_mode", value: .string(mode)))
+            settingsFeedback = "布局与浏览方式已保存"
         } catch { AppLog.capture(error); self.error = error.localizedDescription }
     }
 
     /// 免密时长只写入 app.db 的设置项；密码本身仍只在内存中。
+    /// 界面先即时生效，保存失败时回退原值；不经过 isBusy 门卫，保证设置必然落盘。
     func setUnlockCache(seconds: Int) async {
-        await perform { _ in
-            try await self.client.execute(NativeRequest(operation: "set_unlock_cache", seconds: seconds))
-            self.unlockCacheSeconds = seconds
-            if seconds == 0 { self.unlockedPasswords.removeAll() }
-            self.notice = seconds == 0 ? "已关闭免密重开" : "免密时长已设为 \(self.unlockCacheDescription)"
+        let previous = unlockCacheSeconds
+        unlockCacheSeconds = seconds
+        do {
+            try await client.execute(NativeRequest(operation: "set_unlock_cache", seconds: seconds))
+            if seconds == 0 { unlockedPasswords.removeAll() }
+            settingsFeedback = seconds == 0 ? "已关闭免密重开" : "免密时长已设为 \(unlockCacheDescription)"
+        } catch {
+            unlockCacheSeconds = previous
+            AppLog.capture(error)
+            self.error = error.localizedDescription
         }
     }
 
     func setImportCommitInterval(seconds: Int) async {
-        await perform { _ in
-            try await self.client.execute(NativeRequest(operation: "set_import_commit_interval", seconds: seconds))
-            self.importCommitIntervalSeconds = seconds
-            self.notice = "导入提交间隔已设为 \(seconds) 秒"
+        let previous = importCommitIntervalSeconds
+        importCommitIntervalSeconds = seconds
+        do {
+            try await client.execute(NativeRequest(operation: "set_import_commit_interval", seconds: seconds))
+            settingsFeedback = "导入提交间隔已设为 \(seconds) 秒"
+        } catch {
+            importCommitIntervalSeconds = previous
+            AppLog.capture(error)
+            self.error = error.localizedDescription
         }
     }
 
     func setImportCommitCount(_ count: Int) async {
-        await perform { _ in
-            try await self.client.execute(NativeRequest(operation: "set_import_commit_count", count: count))
-            self.importCommitCount = count
-            self.notice = "导入提交数量已设为 \(count) 条"
+        let previous = importCommitCount
+        importCommitCount = count
+        do {
+            try await client.execute(NativeRequest(operation: "set_import_commit_count", count: count))
+            settingsFeedback = "导入提交数量已设为 \(count) 条"
+        } catch {
+            importCommitCount = previous
+            AppLog.capture(error)
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// 提示级别与 CLI 共用设置项；保存到 app.db 的 hint_level。
+    func setHintLevel(_ level: HintLevel) async {
+        let previous = hintLevel
+        hintLevel = level
+        do {
+            try await client.execute(NativeRequest(operation: "set_preference", key: "hint_level", value: .string(level.rawValue)))
+            settingsFeedback = "提示级别已设为「\(level.title)」"
+        } catch {
+            hintLevel = previous
+            AppLog.capture(error)
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// 切换默认空间；成功后刷新空间列表以同步「默认」标记。
+    func setDefaultSpace(_ id: String) async {
+        do {
+            try await client.execute(NativeRequest(operation: "set_default_space", id: id))
+            try await reloadCatalog()
+            settingsFeedback = "默认空间已更新"
+        } catch {
+            AppLog.capture(error)
+            self.error = error.localizedDescription
         }
     }
 
@@ -613,32 +690,365 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func activate(_ entry: BrowserEntry) async {
-        switch entry {
-        case .folder(let path): directory = path
-        case .file(let file): await showPreview(file)
+    func createFolder(named rawName: String) async {
+        guard let name = folderNameForCreation(rawName) else {
+            error = AppLog.validation("文件夹名称无效，请使用不含路径分隔符的名称")
+            return
+        }
+        guard browseMode == .path, container != nil else { return }
+        let parent = directory
+        await perform { ticket in
+            let view: ContainerSnapshot = try await self.client.json(
+                NativeRequest(operation: "create_directory", name: name, directory: parent)
+            )
+            guard ticket == self.generation else { return }
+            self.container = view
+            self.notice = "文件夹已创建"
         }
     }
 
+    func activate(_ entry: BrowserEntry) async {
+        switch entry {
+        case .folder(let path): directory = path
+        case .file(let file):
+            // 打开语义遵循用户登记：有默认应用就直接用系统应用打开，否则在应用内预览。
+            let resolution = defaultApplicationResolution(for: file)
+            if resolution.application != nil {
+                await openExternally(file)
+                return
+            }
+            if resolution.configured {
+                notice = "未找到登记的应用，已在应用内预览"
+            }
+            await showPreview(file)
+        }
+    }
+
+    /// 打开文件预览：先显示解密浮层，把明文写入应用临时目录；完成后自动关闭浮层，再打开预览窗口。
+    /// 预览窗口按文件 URL 渲染，不受 16 MiB 内存读取限制；网格缩略图仍走内存读取。
     func showPreview(_ file: FileEntry) async {
         guard canBrowse else { return }
         closePreview()
         let asset = PreviewAsset(file: file)
-        preview = asset
-        guard file.previewMime != nil else { asset.error = AppLog.validation("此类型暂不支持内置预览，可导出后查看。"); return }
+        guard file.previewMime != nil else {
+            preview = asset
+            asset.error = AppLog.validation("此类型暂不支持内置预览，可导出后查看。")
+            return
+        }
+        // 预览需要把整份明文写入临时目录：先确认空间够用，避免解密到一半才报 ENOSPC。
+        if let message = PreviewStorage.insufficientSpaceMessage(
+            fileSize: file.size,
+            availableBytes: PreviewStorage.availableBytes(in: FileManager.default.temporaryDirectory)
+        ) {
+            preview = asset
+            asset.error = AppLog.validation(message)
+            return
+        }
         await perform(allowDuringImport: true) { ticket in
+            self.decryptStatus = DecryptStatus(fileName: file.leafName, destination: "应用内查看器")
+            defer { self.decryptStatus = nil }
+            let folder = TemporaryFiles.directory
+                .appendingPathComponent("veil-native-preview-" + UUID().uuidString, isDirectory: true)
             do {
-                let result = try await self.client.previewWithStatus(name: file.name)
-                guard ticket == self.generation, self.preview === asset else { return }
-                asset.unstable = result.unstable
-                try asset.install(result.data)
-            } catch { AppLog.capture(error);
-                if ticket == self.generation && self.preview === asset { asset.error = error.localizedDescription }
+                try TemporaryFiles.ensureDirectory()
+                try FileManager.default.createDirectory(
+                    at: folder, withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                let url = folder.appendingPathComponent(file.leafName)
+                let unstable = try await self.client.exportWithStatus(name: file.name, destination: url.path)
+                guard ticket == self.generation else {
+                    AppLog.attempt({ try FileManager.default.removeItem(at: folder) })
+                    return
+                }
+                asset.unstable = unstable
+                try asset.install(url, folder: folder)
+                // 先关闭解密浮层，再打开预览窗口。
+                self.decryptStatus = nil
+                self.preview = asset
+            } catch {
+                AppLog.attempt({ try FileManager.default.removeItem(at: folder) })
+                AppLog.capture(error)
+                guard ticket == self.generation else { return }
+                self.decryptStatus = nil
+                asset.error = PreviewStorage.failureMessage(for: error, fileSize: file.size)
+                self.preview = asset
             }
         }
     }
 
     func closePreview() { preview?.close(); preview = nil }
+
+    // MARK: 用系统应用打开
+
+    /// 设置页展示用：已登记的后缀（升序）。
+    var openWithExtensions: [String] { OpenWithRules.sortedExtensions(openWithDefaults) }
+
+    /// 文件当前配置的默认应用；未登记或应用已卸载时返回 nil（回落到系统默认）。
+    func defaultOpenApplication(for file: FileEntry) -> ExternalApplication? {
+        defaultApplicationResolution(for: file).application
+    }
+
+    func isApplicationInstalled(forExtension ext: String) -> Bool {
+        guard let bundleID = openWithDefaults[ext] else { return false }
+        return ExternalApplication.resolve(bundleID: bundleID) != nil
+    }
+
+    /// 用已登记的默认应用打开；未登记或应用缺失时使用系统默认应用。
+    func openExternally(_ file: FileEntry) async {
+        guard canBrowse else { return }
+        let resolution = defaultApplicationResolution(for: file)
+        if resolution.configured && resolution.application == nil {
+            notice = "未找到登记的应用，已改用系统默认应用打开"
+        }
+        await exportAndOpen(file, application: resolution.application)
+    }
+
+    /// 选择应用打开文件：先确认是否登记为该后缀的默认应用，再解密并交给系统应用。
+    func chooseApplication(for file: FileEntry) async {
+        guard canBrowse else { return }
+        guard
+            let application = ExternalApplication.choose(
+                title: "选择用于打开「\(file.leafName)」的应用",
+                message: "会先把文件解密到临时文件，再交给该系统应用打开。")
+        else { return }
+        guard await confirmOpenWith(application, for: file) else { return }
+        await exportAndOpen(file, application: application)
+    }
+
+    /// 预览弹窗：把当前已解密的副本交给系统应用；关闭预览不再删除它，改由锁定/退出清理。
+    func openPreviewExternally() async {
+        guard let asset = preview else { return }
+        let resolution = defaultApplicationResolution(for: asset.file)
+        if resolution.configured && resolution.application == nil {
+            notice = "未找到登记的应用，已改用系统默认应用打开"
+        }
+        handOffPreview(asset, application: resolution.application)
+    }
+
+    func chooseApplicationForPreview() async {
+        guard let asset = preview else { return }
+        guard
+            let application = ExternalApplication.choose(
+                title: "选择用于打开「\(asset.file.leafName)」的应用",
+                message: "会先把当前预览副本解密到临时文件，再交给该系统应用打开。")
+        else { return }
+        guard await confirmOpenWith(application, for: asset.file) else { return }
+        handOffPreview(asset, application: application)
+    }
+
+    /// 设置页：新增「后缀 → 应用」登记。
+    func addDefaultOpenApplication() async {
+        guard let ext = promptOpenWithExtension() else { return }
+        guard
+            let application = ExternalApplication.choose(
+                title: "选择 .\(ext) 文件默认使用的应用",
+                message: "点击该后缀的文件时会先解密到临时文件，再交给所选应用打开；登记保存在 app.db，可在此修改或移除。")
+        else { return }
+        await setDefaultOpenApplication(application, forExtension: ext)
+    }
+
+    func changeDefaultOpenApplication(forExtension ext: String) async {
+        guard
+            let application = ExternalApplication.choose(
+                title: "选择 .\(ext) 文件默认使用的应用",
+                message: "点击该后缀的文件时会先解密到临时文件，再交给所选应用打开；登记保存在 app.db，可在此修改或移除。")
+        else { return }
+        await setDefaultOpenApplication(application, forExtension: ext)
+    }
+
+    func setDefaultOpenApplication(_ application: ExternalApplication, forExtension ext: String)
+        async
+    {
+        guard let ext = OpenWithRules.normalizeUserInput(ext) else { return }
+        await updateOpenWithDefaults { $0[ext] = application.bundleID }
+        if openWithDefaults[ext] == application.bundleID {
+            settingsFeedback = ".\(ext) 已改用「\(application.name)」打开"
+        }
+    }
+
+    func removeDefaultOpenApplication(forExtension ext: String) async {
+        await updateOpenWithDefaults { $0.removeValue(forKey: ext) }
+        if openWithDefaults[ext] == nil {
+            settingsFeedback = ".\(ext) 已恢复系统默认应用"
+        }
+    }
+
+    private func updateOpenWithDefaults(_ change: (inout [String: String]) -> Void) async {
+        let previous = openWithDefaults
+        var rules = previous
+        change(&rules)
+        openWithDefaults = rules
+        do {
+            try await client.execute(
+                NativeRequest(
+                    operation: "set_preference", key: "external_open_defaults",
+                    value: .map(rules)))
+        } catch {
+            openWithDefaults = previous
+            AppLog.capture(error)
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func defaultApplicationResolution(for file: FileEntry)
+        -> (application: ExternalApplication?, configured: Bool)
+    {
+        guard let ext = OpenWithRules.normalizeExtension(forFileName: file.name),
+            let bundleID = openWithDefaults[ext]
+        else { return (nil, false) }
+        return (ExternalApplication.resolve(bundleID: bundleID), true)
+    }
+
+    private func exportAndOpen(_ file: FileEntry, application: ExternalApplication?) async {
+        // 外开要把整份明文写到临时目录，空间不够时先拦住，避免解密到一半失败。
+        if let message = PreviewStorage.insufficientSpaceMessage(
+            fileSize: file.size,
+            availableBytes: PreviewStorage.availableBytes(in: FileManager.default.temporaryDirectory),
+            action: "打开")
+        {
+            self.error = message
+            return
+        }
+        await perform(allowDuringImport: true) { ticket in
+            self.decryptStatus = DecryptStatus(
+                fileName: file.leafName,
+                destination: application.map { "「\($0.name)」" } ?? "系统默认应用")
+            defer { self.decryptStatus = nil }
+            let folder = TemporaryFiles.directory
+                .appendingPathComponent(
+                    TemporaryFiles.openPrefix + UUID().uuidString, isDirectory: true)
+            do {
+                try TemporaryFiles.ensureDirectory()
+                try FileManager.default.createDirectory(
+                    at: folder, withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700])
+                let url = folder.appendingPathComponent(file.leafName)
+                _ = try await self.client.exportWithStatus(name: file.name, destination: url.path)
+                guard ticket == self.generation else {
+                    AppLog.attempt({ try FileManager.default.removeItem(at: folder) })
+                    return
+                }
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: url.path)
+                // 先关闭“正在解密”浮层，再启动系统应用，保证顺序是“解密 → 关闭 → 打开”。
+                self.decryptStatus = nil
+                ExternalOpenTracker.shared.register(folder)
+                self.launch(url, application: application, folder: folder)
+            } catch {
+                AppLog.attempt({ try FileManager.default.removeItem(at: folder) })
+                AppLog.capture(error)
+                if ticket == self.generation {
+                    self.error = PreviewStorage.failureMessage(
+                        for: error, fileSize: file.size, action: "打开")
+                }
+            }
+        }
+    }
+
+    private func handOffPreview(_ asset: PreviewAsset, application: ExternalApplication?) {
+        guard let url = asset.contentURL else {
+            self.error = "文件尚未解密完成，请稍后再试。"
+            return
+        }
+        let folder = asset.detachForExternalOpen()
+        if let folder { ExternalOpenTracker.shared.register(folder) }
+        launch(url, application: application, folder: folder)
+    }
+
+    /// 交给系统应用打开；成功后按实际进程号登记目录，该应用退出时回收明文副本。
+    private func launch(_ url: URL, application: ExternalApplication?, folder: URL?) {
+        let completion: @Sendable (NSRunningApplication?, (any Error)?) -> Void = {
+            running, error in
+            Task { @MainActor in
+                if let error {
+                    AppLog.capture(error)
+                    self.error =
+                        "无法用「\(application?.name ?? "系统默认应用")」打开文件：\(error.localizedDescription)"
+                    ExternalOpenTracker.shared.discard(folder)
+                } else {
+                    self.notice =
+                        application.map { "已用「\($0.name)」打开" } ?? "已用系统默认应用打开"
+                    ExternalOpenTracker.shared.associate(
+                        folder: folder, process: running?.processIdentifier)
+                }
+            }
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        if let application {
+            NSWorkspace.shared.open(
+                [url], withApplicationAt: application.url, configuration: configuration,
+                completionHandler: completion)
+        } else {
+            NSWorkspace.shared.open(url, configuration: configuration, completionHandler: completion)
+        }
+    }
+
+    /// 打开前询问「仅此次 / 总是使用 / 取消」；确认后才开始解密，避免应用先启动、用户后选择。
+    /// 文件没有后缀时无法登记默认应用，只提供打开和取消。
+    private func confirmOpenWith(_ application: ExternalApplication, for file: FileEntry) async
+        -> Bool
+    {
+        let ext = OpenWithRules.normalizeExtension(forFileName: file.name)
+        let hint = "打开时会先把文件解密到临时文件，锁定或退出后自动清理。"
+        let alert = NSAlert()
+        alert.messageText = "用「\(application.name)」打开「\(file.leafName)」？"
+        if let ext {
+            alert.informativeText = hint + "「总是使用」会把它登记为 .\(ext) 的默认应用，之后点击该后缀的文件就直接用这个应用打开。"
+            alert.addButton(withTitle: "仅此次")
+            alert.addButton(withTitle: "总是使用")
+        } else {
+            alert.informativeText = hint
+            alert.addButton(withTitle: "打开")
+        }
+        alert.addButton(withTitle: "取消")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return true
+        case .alertSecondButtonReturn where ext != nil:
+            guard let ext else { return true }
+            await setDefaultOpenApplication(application, forExtension: ext)
+            notice = "已把「\(application.name)」设为 .\(ext) 的默认应用"
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func promptOpenWithExtension() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "添加打开方式"
+        alert.informativeText = "输入文件后缀，例如 mp4、pdf、zip。"
+        alert.addButton(withTitle: "继续")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.placeholderString = "mp4"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard let ext = OpenWithRules.normalizeUserInput(field.stringValue) else {
+            self.error = "扩展名无效：只能包含字母和数字，长度 1 至 16。"
+            return nil
+        }
+        return ext
+    }
+
+    /// 锁定、退出或切换容器时清理已交给系统应用的明文副本。
+    func cleanupExternalOpens() {
+        ExternalOpenTracker.shared.cleanupAll()
+    }
+
+    /// 设置页：在访达中打开解密副本的临时目录。
+    func openTemporaryDirectoryInFinder() {
+        do {
+            try TemporaryFiles.ensureDirectory()
+            NSWorkspace.shared.open(
+                TemporaryFiles.directory, configuration: NSWorkspace.OpenConfiguration())
+        } catch {
+            AppLog.capture(error)
+            self.error = "无法打开临时目录：\(error.localizedDescription)"
+        }
+    }
 
     func exportFile(_ file: FileEntry) async {
         guard !isBusy else { return }
@@ -733,31 +1143,31 @@ final class AppStore: ObservableObject {
 final class PreviewAsset: ObservableObject, Identifiable {
     let file: FileEntry
     nonisolated var id: String { file.id }
-    @Published var data: Data?
-    @Published var videoURL: URL?
+    @Published var contentURL: URL?
     @Published var error: String?
     @Published var unstable = false
     private var temporaryDirectory: URL?
 
     init(file: FileEntry) { self.file = file }
 
-    func install(_ bytes: Data) throws {
-        if file.previewMime?.hasPrefix("video/") == true {
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-native-preview-" + UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    /// 解密结果已由服务层写入 `url`；这里只收紧文件权限并登记清理责任。
+    func install(_ url: URL, folder: URL) throws {
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             temporaryDirectory = folder
-            let url = folder.appendingPathComponent(file.leafName)
-            do {
-                try bytes.write(to: url, options: .atomic)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                videoURL = url
-            } catch { close(); throw AppLog.recorded(error) }
-        } else { data = bytes }
+            contentURL = url
+        } catch { close(); throw AppLog.recorded(error) }
+    }
+
+    /// 交给系统应用打开后，关闭预览不应删除文件；清理责任转交给 AppStore 的登记表。
+    func detachForExternalOpen() -> URL? {
+        guard let folder = temporaryDirectory else { return nil }
+        temporaryDirectory = nil
+        return folder
     }
 
     func close() {
-        data = nil
-        videoURL = nil
+        contentURL = nil
         if let temporaryDirectory { AppLog.attempt({ try FileManager.default.removeItem(at: temporaryDirectory) }) }
         temporaryDirectory = nil
     }

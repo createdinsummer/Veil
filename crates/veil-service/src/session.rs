@@ -132,6 +132,10 @@ pub enum ServiceRequest<'a> {
         key: &'a str,
         value: &'a serde_json::Value,
     },
+    /// 设置页展示用的系统配置；服务只放行白名单键，见 `AppStore::system_setting_view`。
+    GetSystemSetting {
+        key: &'a str,
+    },
     RenameSpace {
         id: &'a str,
         name: &'a str,
@@ -172,6 +176,10 @@ pub enum ServiceRequest<'a> {
     StreamSessionImport {
         sources: Vec<String>,
         directory: String,
+    },
+    CreateSessionDirectory {
+        directory: String,
+        name: String,
     },
     PollSessionImportConflicts,
     ResolveSessionImportConflicts {
@@ -303,6 +311,7 @@ impl ServiceRequest<'_> {
             Self::ListRecents => "ListRecents",
             Self::GetUserSetting { .. } => "GetUserSetting",
             Self::SetUserSetting { .. } => "SetUserSetting",
+            Self::GetSystemSetting { .. } => "GetSystemSetting",
             Self::RenameSpace { .. } => "RenameSpace",
             Self::SetDefaultSpace { .. } => "SetDefaultSpace",
             Self::DeleteSpace { .. } => "DeleteSpace",
@@ -314,6 +323,7 @@ impl ServiceRequest<'_> {
             Self::CreateInSpace { .. } => "CreateInSpace",
             Self::ImportSessionFiles { .. } => "ImportSessionFiles",
             Self::StreamSessionImport { .. } => "StreamSessionImport",
+            Self::CreateSessionDirectory { .. } => "CreateSessionDirectory",
             Self::PollSessionImportConflicts => "PollSessionImportConflicts",
             Self::ResolveSessionImportConflicts { .. } => "ResolveSessionImportConflicts",
             Self::PreviewSessionFile { .. } => "PreviewSessionFile",
@@ -876,6 +886,9 @@ impl VeilService {
                 crate::storage::app::AppStore::global()?.set_user_setting(key, value)?;
                 Ok(ServiceResponse::Done)
             }
+            ServiceRequest::GetSystemSetting { key } => Ok(ServiceResponse::Setting(
+                crate::storage::app::AppStore::global()?.system_setting_view(key)?,
+            )),
             ServiceRequest::RenameSpace { id, name } => {
                 crate::storage::app::AppStore::global()?.rename_space(id, name)?;
                 Ok(ServiceResponse::Done)
@@ -1003,6 +1016,9 @@ impl VeilService {
                 );
                 result.map(ServiceResponse::Container)
             }
+            ServiceRequest::CreateSessionDirectory { directory, name } => self
+                .create_session_directory(&directory, &name)
+                .map(ServiceResponse::Container),
             ServiceRequest::PollSessionImportConflicts => {
                 let control = self
                     .4
@@ -1104,8 +1120,7 @@ impl VeilService {
                 Ok(ServiceResponse::Done)
             }
             ServiceRequest::ExportSessionPackage { destination } => {
-                let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
-                let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+                let session = self.session_snapshot()?;
                 let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
                 crate::package::VeilPacker::new(destination)
                     .without_overwrite()
@@ -1746,8 +1761,7 @@ impl VeilService {
         if file_kind(name).1.is_none() {
             return Err(ServiceError::InvalidInput("暂不支持预览此文件类型"));
         }
-        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
-        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let session = self.session_snapshot()?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
         Ok(manager.read_file_bytes_with_status(
             name,
@@ -1760,8 +1774,7 @@ impl VeilService {
         if destination.is_empty() {
             return Err(ServiceError::InvalidInput("请选择导出位置"));
         }
-        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
-        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let session = self.session_snapshot()?;
         let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
         Ok(manager.extract_file_without_overwrite_with_status(
             name,
@@ -1782,6 +1795,55 @@ impl VeilService {
             &session.path,
             &manager.read_meta(session.password.as_str())?,
         ))
+    }
+
+    fn create_session_directory(
+        &self,
+        directory: &str,
+        name: &str,
+    ) -> Result<ContainerView, ServiceError> {
+        if name.trim().is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains(['/', '\\', '\0'])
+        {
+            return Err(ServiceError::InvalidInput("文件夹名称无效"));
+        }
+        let directory = if directory.is_empty() {
+            String::new()
+        } else {
+            crate::veil_ops::normalize_veil_dir(directory)?
+        };
+        let session = self.0.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let session = session.as_ref().ok_or(ServiceError::NotOpen)?;
+        let _space_lock = Self::space_lock_for_container(&session.veil_id)?;
+        let manager = VeilManager::for_veil(session.path.clone(), session.veil_id.clone());
+        if !matches!(
+            manager.path_kind(&directory, session.password.as_str())?,
+            crate::veil_ops::ContainerPathKind::Directory(_)
+        ) {
+            return Err(ServiceError::InvalidInput("目标位置不是有效文件夹"));
+        }
+        let path = if directory.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{directory}/{name}")
+        };
+        manager.create_directory(&path, session.password.as_str())?;
+        Ok(container_view(
+            &session.path,
+            &manager.read_meta(session.password.as_str())?,
+        ))
+    }
+
+    /// 取会话快照后立刻释放互斥量：解密、打包等长操作不应阻塞锁定或切换容器。
+    /// 快照自带 path / veil_id / password，操作期间容器被锁定也能安全完成或明确失败。
+    fn session_snapshot(&self) -> Result<Session, ServiceError> {
+        self.0
+            .lock()
+            .map_err(|_| ServiceError::StateUnavailable)?
+            .clone()
+            .ok_or(ServiceError::NotOpen)
     }
 
     fn lock(&self) -> Result<(), ServiceError> {

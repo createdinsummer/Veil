@@ -3,6 +3,8 @@ import SwiftUI
 
 struct BrowserView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var showNewFolder = false
+    @State private var newFolderName = ""
     let container: ContainerSnapshot
     private let columns = [GridItem(.adaptive(minimum: 120, maximum: 180), spacing: 12, alignment: .top)]
 
@@ -45,10 +47,18 @@ struct BrowserView: View {
                         Image(systemName: "folder").font(.system(size: 28, weight: .light)).foregroundStyle(VeilTheme.muted)
                             .frame(width: 56, height: 56).background(VeilTheme.thumbnail, in: RoundedRectangle(cornerRadius: 17)).padding(.bottom, 6)
                         Text(container.files.isEmpty ? "这里还是空的" : "这里没有文件").font(.system(size: 13, weight: .semibold))
-                        Text(container.files.isEmpty ? "添加文件或将文件拖到这里。" : "试试选择其他分类、目录或搜索词。")
+                        Text(container.files.isEmpty ? "添加文件或将文件拖到这里。" : store.showHiddenFiles ? "试试选择其他分类、目录或搜索词。" : "试试选择其他分类、目录或搜索词，或显示以.开头的文件。")
                             .font(.system(size: 11)).foregroundStyle(VeilTheme.muted)
                         Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
                             .buttonStyle(VeilButtonStyle()).padding(.top, 8).disabled(store.isBusy)
+                        if store.browseMode == .path {
+                            Button("新建文件夹…", systemImage: "folder.badge.plus") {
+                                newFolderName = ""
+                                showNewFolder = true
+                            }
+                            .buttonStyle(VeilButtonStyle(variant: .subtle))
+                            .disabled(store.isBusy)
+                        }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if store.layout == .grid {
                     ScrollView {
@@ -93,6 +103,18 @@ struct BrowserView: View {
             Task { await store.importFiles(urls) }
             return true
         }
+        .alert("新建文件夹", isPresented: $showNewFolder) {
+            TextField("文件夹名称", text: $newFolderName)
+            Button("创建") {
+                let name = newFolderName
+                newFolderName = ""
+                Task { await store.createFolder(named: name) }
+            }
+            .disabled(folderNameForCreation(newFolderName) == nil)
+            Button("取消", role: .cancel) { newFolderName = "" }
+        } message: {
+            Text("将在「\(store.directory.isEmpty ? "全部文件" : store.directory)」下创建文件夹。")
+        }
     }
 
     private var toolbar: some View {
@@ -112,8 +134,21 @@ struct BrowserView: View {
             HStack(spacing: 2) {
                 LayoutButton(title: "列表", symbol: "list.bullet", selected: store.layout == .list) { store.layout = .list }
                 LayoutButton(title: "大图标", symbol: "square.grid.2x2", selected: store.layout == .grid) { store.layout = .grid }
+                Divider().frame(height: 14).padding(.horizontal, 2)
+                LayoutButton(
+                    title: store.showHiddenFiles ? "隐藏以.开头的文件" : "显示以.开头的文件",
+                    symbol: store.showHiddenFiles ? "eye" : "eye.slash",
+                    selected: store.showHiddenFiles
+                ) { store.showHiddenFiles.toggle() }
             }.padding(2).background(VeilTheme.thumbnail, in: RoundedRectangle(cornerRadius: 7)).fixedSize()
             Menu {
+                if store.browseMode == .path {
+                    Button("新建文件夹…", systemImage: "folder.badge.plus") {
+                        newFolderName = ""
+                        showNewFolder = true
+                    }
+                    Divider()
+                }
                 Button("添加文件…") { Task { await store.chooseImport(directory: false) } }
                 Button("添加文件夹…") { Task { await store.chooseImport(directory: true) } }
             } label: { Label("添加", systemImage: "plus").font(.system(size: 12)).foregroundStyle(VeilTheme.text) }
@@ -278,6 +313,9 @@ private struct EntryActions: View {
     var body: some View {
         Button("打开", systemImage: "arrow.up.forward.square") { Task { await store.activate(entry) } }
         if case .file(let file) = entry {
+            Button("在应用内预览", systemImage: "eye") { Task { await store.showPreview(file) } }
+            Button("用系统应用打开", systemImage: "arrow.up.forward.app") { Task { await store.openExternally(file) } }
+            Button("选择应用打开…", systemImage: "ellipsis.circle") { Task { await store.chooseApplication(for: file) } }
             Button("导出…", systemImage: "square.and.arrow.up") { Task { await store.exportFile(file) } }
         } else {
             Button("导出…", systemImage: "square.and.arrow.up") { Task { await store.exportFolder(entry.path) } }

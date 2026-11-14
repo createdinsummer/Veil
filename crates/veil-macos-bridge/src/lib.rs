@@ -75,6 +75,10 @@ enum Request {
         sources: Vec<String>,
         directory: String,
     },
+    CreateDirectory {
+        directory: String,
+        name: String,
+    },
     PollImportConflicts,
     ResolveImportConflicts {
         id: String,
@@ -108,6 +112,14 @@ enum Request {
     SetPreference {
         key: String,
         value: serde_json::Value,
+    },
+    /// 设置页展示用的系统配置（只读白名单）。
+    GetSystemSetting {
+        key: String,
+    },
+    /// 设置页切换默认空间；业务校验仍在 veil-service。
+    SetDefaultSpace {
+        id: String,
     },
     /// 免密时长；只保存秒数到 app.db，密码仍由应用层保存在内存中。
     SetUnlockCache {
@@ -158,6 +170,9 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::StreamImportFiles { sources, directory } => {
             ServiceRequest::StreamSessionImport { sources, directory }
         }
+        Request::CreateDirectory { directory, name } => {
+            ServiceRequest::CreateSessionDirectory { directory, name }
+        }
         Request::PollImportConflicts => ServiceRequest::PollSessionImportConflicts,
         Request::ResolveImportConflicts { id, resolutions } => {
             ServiceRequest::ResolveSessionImportConflicts { id, resolutions }
@@ -185,6 +200,12 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
                 key: &key,
                 value: &value,
             }));
+        }
+        Request::GetSystemSetting { key } => {
+            return serialize(service.execute(ServiceRequest::GetSystemSetting { key: &key }));
+        }
+        Request::SetDefaultSpace { id } => {
+            return serialize(service.execute(ServiceRequest::SetDefaultSpace { id: &id }));
         }
         Request::SetUnlockCache { seconds } => {
             let value = serde_json::json!(seconds);
@@ -462,6 +483,37 @@ mod tests {
             .unwrap()["id"]
             .as_str()
             .unwrap();
+        // 设置页读取的系统配置：设备 ID 可读，未白名单的键必须拒绝。
+        let (kind, bytes) = unsafe {
+            call(
+                client,
+                serde_json::json!({"operation":"get_system_setting","key":"device_id"}),
+            )
+        };
+        assert_eq!(kind, 0, "{}", String::from_utf8_lossy(&bytes));
+        let device: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(veil_core::metadata::is_uuid_v4(device.as_str().unwrap()));
+        assert_eq!(
+            unsafe {
+                call(
+                    client,
+                    serde_json::json!({"operation":"get_system_setting","key":"unknown_key"}),
+                )
+            }
+            .0,
+            1
+        );
+        // 设置页可把默认空间切换到现有空间。
+        assert_eq!(
+            unsafe {
+                call(
+                    client,
+                    serde_json::json!({"operation":"set_default_space","id":space}),
+                )
+            }
+            .0,
+            0
+        );
         let (kind, bytes) = unsafe {
             call(
                 client,

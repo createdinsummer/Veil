@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 import AVKit
 import UniformTypeIdentifiers
+import UIKit
 
 @main struct VeilApp: App {
     @StateObject private var store = Store()
@@ -55,6 +56,8 @@ struct RootView: View {
     @State private var deleting: BrowserEntry?
     @State private var deletingContainer: ContainerSummary?
     @State private var deletingSpace: Space?
+    @State private var showNewFolder = false
+    @State private var newFolderName = ""
     var body: some View {
         NavigationStack {
             Group { if store.container == nil { home } else { browser } }
@@ -73,8 +76,8 @@ struct RootView: View {
                             Button("导出错误日志", systemImage: "doc.text") { store.prepareErrorLogExport() }
                             Button("清理数据", systemImage: "trash", role: .destructive) { confirmClearData = true }
                         } else {
-                            Button("从文件添加", systemImage: "folder") { importing = true }
-                            Button("从相册添加", systemImage: "photo.on.rectangle") { importingPhotos = true }
+                            importOptions
+                            Divider()
                             Button("导出加密备份", systemImage: "square.and.arrow.up") { Task { await store.prepareExport() } }
                         } } label: { Image(systemName: "ellipsis.circle") }.disabled(store.busy)
                     }
@@ -114,7 +117,7 @@ struct RootView: View {
         }
         .privacySensitive()
         .overlay { if phase != .active { Color(uiColor: .systemBackground).ignoresSafeArea() } }
-        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; deletingContainer = nil; deletingSpace = nil; importing = false; importingPackage = false; store.exportSelection = nil } }
+        .onChange(of: phase) { _, value in if value == .background { form = nil; deleting = nil; deletingContainer = nil; deletingSpace = nil; showNewFolder = false; importing = false; importingPackage = false; store.exportSelection = nil } }
         .tint(ink)
         .sheet(item: $form, onDismiss: { if let url = pendingPackage { url.stopAccessingSecurityScopedResource(); pendingPackage = nil } }) { ContainerFormView(form: $0) { form = nil } }
         .fileImporter(isPresented: Binding(get: { store.exportSelection != nil }, set: { _ in }), allowedContentTypes: [.folder]) { result in
@@ -139,6 +142,18 @@ struct RootView: View {
             Button("清理所有数据", role: .destructive) { Task { await store.clearLocalData() } }
         } message: {
             Text("将永久删除此设备上 Veil 的所有空间、容器、文件和设置，无法撤销。请先导出需要保留的加密备份。")
+        }
+        .alert("新建文件夹", isPresented: $showNewFolder) {
+            TextField("文件夹名称", text: $newFolderName)
+            Button("创建") {
+                let name = newFolderName
+                newFolderName = ""
+                Task { await store.createFolder(named: name) }
+            }
+            .disabled(folderNameForCreation(newFolderName) == nil)
+            Button("取消", role: .cancel) { newFolderName = "" }
+        } message: {
+            Text("将在「\(store.directory.isEmpty ? "全部文件" : store.directory)」下创建文件夹。")
         }
         .alert("操作完成", isPresented: Binding(get: { store.notice != nil }, set: { if !$0 { store.notice = nil } })) {
             Button("好") { store.notice = nil }
@@ -310,6 +325,13 @@ struct RootView: View {
         }.scrollDismissesKeyboard(.interactively).searchable(text: $store.search, prompt: "搜索文件")
     }
     @ViewBuilder var importOptions: some View {
+        if store.mode == .path {
+            Button("新建文件夹", systemImage: "folder.badge.plus") {
+                newFolderName = ""
+                showNewFolder = true
+            }
+            Divider()
+        }
         Button("从文件添加", systemImage: "folder") { importing = true }
         Button("从相册添加", systemImage: "photo.on.rectangle") { importingPhotos = true }
     }
@@ -517,15 +539,31 @@ struct PreviewView: View {
                 case .image(let url): ImagePreview(url: url)
                 case .video(let url): VideoPreview(url: url)
                 case .text(let text):
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(text).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding()
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    ReadOnlyTextView(text: text)
                 }
             }
             .navigationTitle(item.file.leafName).navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("关闭") { dismiss() } }
         }
+    }
+}
+
+/// 只读文本视图：基于 UITextView，自带滚动与文本选择，
+/// 比 SwiftUI Text 更适合不限大小的文本预览。
+private struct ReadOnlyTextView: UIViewRepresentable {
+    let text: String
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+        view.backgroundColor = .clear
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.alwaysBounceVertical = true
+        return view
+    }
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
     }
 }
 

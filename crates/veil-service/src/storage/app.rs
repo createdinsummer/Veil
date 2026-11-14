@@ -20,6 +20,12 @@ pub const MAX_IMPORT_COMMIT_INTERVAL_SECONDS: u64 = 60;
 pub const IMPORT_COMMIT_COUNT_SETTING: &str = "import_commit_count";
 pub const DEFAULT_IMPORT_COMMIT_COUNT: u64 = 8;
 pub const MAX_IMPORT_COMMIT_COUNT: u64 = 100;
+/// 按扩展名登记的默认打开应用：`{"扩展名": "应用 bundle identifier"}`。
+/// 未登记的扩展名由客户端使用系统默认应用打开。
+pub const EXTERNAL_OPEN_DEFAULTS_SETTING: &str = "external_open_defaults";
+pub const MAX_EXTERNAL_OPEN_DEFAULTS: usize = 200;
+pub const MAX_EXTENSION_LENGTH: usize = 16;
+pub const MAX_BUNDLE_ID_LENGTH: usize = 255;
 
 static PLATFORM_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 /// 移动端在初始化服务前传入应用私有目录；桌面端与 CLI 使用相同默认策略。
@@ -637,6 +643,7 @@ impl AppStore {
                 serde_json::json!(DEFAULT_IMPORT_COMMIT_INTERVAL_SECONDS)
             }
             IMPORT_COMMIT_COUNT_SETTING => serde_json::json!(DEFAULT_IMPORT_COMMIT_COUNT),
+            EXTERNAL_OPEN_DEFAULTS_SETTING => serde_json::json!({}),
             _ => return Err(invalid("未知用户设置")),
         };
         let value: Option<String> = self
@@ -681,6 +688,24 @@ impl AppStore {
             )
             .optional()?;
         value.map(|s| parse(&s)).transpose()
+    }
+    /// 设置页展示用的系统配置视图；只放行白名单键，避免把内部键暴露给客户端。
+    /// 白名单键未写入时返回 `null`，由客户端按自身缺省处理。
+    pub fn system_setting_view(&self, key: &str) -> Result<serde_json::Value> {
+        if !matches!(key, "device_id" | "default_space_id") {
+            return Err(invalid("未知系统设置"));
+        }
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value_json FROM system_setting WHERE key=?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        value.map(|s| parse(&s)).transpose().map(|value| {
+            value.unwrap_or(serde_json::Value::Null)
+        })
     }
     pub fn record<T: DeserializeOwned>(&self, kind: &str, key: &str) -> Result<Option<T>> {
         let value: Option<String> = self
@@ -756,6 +781,28 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<()> {
         }
         return Ok(());
     }
+    if key == EXTERNAL_OPEN_DEFAULTS_SETTING {
+        let entries = value
+            .as_object()
+            .ok_or_else(|| invalid("打开方式必须按扩展名登记"))?;
+        if entries.len() > MAX_EXTERNAL_OPEN_DEFAULTS {
+            return Err(invalid("打开方式条目过多"));
+        }
+        for (extension, bundle_id) in entries {
+            if !valid_extension(extension) {
+                return Err(invalid(
+                    "扩展名只能包含小写字母和数字，长度 1 至 16，不含点号",
+                ));
+            }
+            let bundle_id = bundle_id
+                .as_str()
+                .ok_or_else(|| invalid("应用标识必须是字符串"))?;
+            if !valid_bundle_id(bundle_id) {
+                return Err(invalid("应用标识格式无效"));
+            }
+        }
+        return Ok(());
+    }
     let allowed: &[&str] = match key {
         "hint_level" => &["full", "brief", "off"],
         "layout" => &["grid", "list"],
@@ -766,6 +813,23 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<()> {
         return Err(invalid("用户设置值无效"));
     }
     Ok(())
+}
+
+/// 扩展名统一按小写、不含点号保存，例如 `mp4`、`7z`。
+fn valid_extension(extension: &str) -> bool {
+    (1..=MAX_EXTENSION_LENGTH).contains(&extension.len())
+        && extension
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+/// bundle identifier 形如 `com.apple.QuickTimePlayerX`。
+fn valid_bundle_id(bundle_id: &str) -> bool {
+    (1..=MAX_BUNDLE_ID_LENGTH).contains(&bundle_id.len())
+        && bundle_id.contains('.')
+        && bundle_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 #[derive(Deserialize)]
@@ -863,6 +927,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_setting_view_only_exposes_whitelisted_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = AppStore::open(directory.path()).unwrap();
+        let default_space = store.default_space().unwrap();
+        let device = store.system_setting_view("device_id").unwrap();
+        assert!(veil_core::metadata::is_uuid_v4(device.as_str().unwrap()));
+        assert_eq!(
+            store.system_setting_view("default_space_id").unwrap().as_str(),
+            Some(default_space.id.as_str())
+        );
+        assert!(store.system_setting_view("unknown_key").is_err());
+    }
+
+    #[test]
     fn import_commit_interval_is_persistent_and_validated() {
         let directory = tempfile::tempdir().unwrap();
         let store = AppStore::open(directory.path()).unwrap();
@@ -918,6 +996,70 @@ mod tests {
                 .import_commit_count()
                 .unwrap(),
             37
+        );
+    }
+
+    #[test]
+    fn external_open_defaults_are_persistent_and_default_to_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AppStore::open(directory.path()).unwrap();
+        assert_eq!(
+            store.user_setting(EXTERNAL_OPEN_DEFAULTS_SETTING).unwrap(),
+            serde_json::json!({})
+        );
+        let valid = serde_json::json!({
+            "mp4": "com.apple.QuickTimePlayerX",
+            "pdf": "com.apple.Preview",
+            "7z": "com.7z.7z",
+        });
+        store
+            .set_user_setting(EXTERNAL_OPEN_DEFAULTS_SETTING, &valid)
+            .unwrap();
+        assert_eq!(
+            store.user_setting(EXTERNAL_OPEN_DEFAULTS_SETTING).unwrap(),
+            valid
+        );
+        drop(store);
+        assert_eq!(
+            AppStore::open(directory.path())
+                .unwrap()
+                .user_setting(EXTERNAL_OPEN_DEFAULTS_SETTING)
+                .unwrap(),
+            valid
+        );
+    }
+
+    #[test]
+    fn external_open_defaults_reject_invalid_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AppStore::open(directory.path()).unwrap();
+        for invalid in [
+            serde_json::json!("com.apple.Preview"),
+            serde_json::json!(["mp4"]),
+            serde_json::json!({"MP4": "com.apple.QuickTimePlayerX"}),
+            serde_json::json!({".mp4": "com.apple.QuickTimePlayerX"}),
+            serde_json::json!({"mp4": ""}),
+            serde_json::json!({"mp4": "QuickTime Player"}),
+            serde_json::json!({"mp4": 7}),
+            serde_json::json!({"abcdefghijklmnopq": "com.apple.Preview"}),
+        ] {
+            assert!(
+                store
+                    .set_user_setting(EXTERNAL_OPEN_DEFAULTS_SETTING, &invalid)
+                    .is_err(),
+                "应拒绝无效登记：{invalid}"
+            );
+        }
+        let too_many: serde_json::Map<String, serde_json::Value> = (0..=MAX_EXTERNAL_OPEN_DEFAULTS)
+            .map(|index| (format!("e{index}"), serde_json::json!("com.apple.Preview")))
+            .collect();
+        assert!(
+            store
+                .set_user_setting(
+                    EXTERNAL_OPEN_DEFAULTS_SETTING,
+                    &serde_json::Value::Object(too_many)
+                )
+                .is_err()
         );
     }
 

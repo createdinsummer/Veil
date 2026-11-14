@@ -85,6 +85,14 @@ struct FileEntry: Decodable, Identifiable, Hashable, Sendable {
     }
 }
 
+func folderNameForCreation(_ rawName: String) -> String? {
+    let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty, name != ".", name != "..",
+          !name.contains("/"), !name.contains("\\"), !name.contains("\0")
+    else { return nil }
+    return name
+}
+
 enum BrowseMode: String, CaseIterable, Sendable { case type, path }
 enum FileLayout: String, Sendable { case grid, list }
 

@@ -300,6 +300,23 @@ import ImageIO
             if ticket == generation, !Task.isCancelled { thumbnailFailures.insert(key) }
         }
     }
+    func createFolder(named rawName: String) async {
+        guard let name = folderNameForCreation(rawName) else {
+            error = AppLog.validation("文件夹名称无效，请使用不含路径分隔符的名称")
+            return
+        }
+        guard mode == .path, container != nil else { return }
+        let parent = directory
+        await run { ticket in
+            let result: ContainerSnapshot = try await self.client.json(
+                NativeRequest(operation: "create_directory", name: name, directory: parent)
+            )
+            guard ticket == self.generation else { return }
+            self.container = result
+            self.notice = "文件夹已创建"
+        }
+    }
+
     func remove(_ item: BrowserEntry) async { await run { ticket in
         let result: ContainerSnapshot = try await self.client.json(NativeRequest(operation: "remove_path", name: item.path))
         if ticket == self.generation { self.container = result }
@@ -362,9 +379,6 @@ import ImageIO
         let type = UTType(filenameExtension: ext)
         let isImage = file.category == .photo || type?.conforms(to: .image) == true
         let isVideo = file.category == .video || type?.conforms(to: .movie) == true
-        if !isImage && !isVideo && file.size > 8 * 1024 * 1024 {
-            throw ClientError.unsupportedContent("文本文件超过 8 MB，请导出后查看。")
-        }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("veil-preview-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700, .protectionKey: FileProtectionType.complete])
         var retained = false
@@ -376,7 +390,9 @@ import ImageIO
             self.preview = PreviewItem(file: file, content: isVideo ? .video(url) : .image(url), temporaryFolder: folder)
             retained = true
         } else {
-            let data = try Data(contentsOf: url)
+            // 文本预览不限制大小；读取放在后台，避免大文本阻塞主线程。
+            let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
+            guard ticket == self.generation else { return }
             guard let text = Self.decodeText(data) else { throw ClientError.unsupportedContent("此文件不是支持的文本格式，请导出后使用其他应用打开。") }
             self.preview = PreviewItem(file: file, content: .text(text), temporaryFolder: nil)
         }
