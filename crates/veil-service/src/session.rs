@@ -817,18 +817,6 @@ impl VeilService {
             }
             _ => None,
         };
-        // 文件传输任务串行启动进度，避免后台导出请求重置正在运行的传输进度。
-        let _import_serial = if _import.is_some()
-            || matches!(
-                &request,
-                ServiceRequest::StreamSessionExport { .. }
-                    | ServiceRequest::ExportSessionFile { .. }
-                    | ServiceRequest::ExportSessionPackage { .. }
-            ) {
-            Some(self.2.lock().map_err(|_| ServiceError::StateUnavailable)?)
-        } else {
-            None
-        };
         let operation = match &request {
             ServiceRequest::ImportSessionFiles { .. }
             | ServiceRequest::StreamSessionImport { .. } => Some("import"),
@@ -838,7 +826,12 @@ impl VeilService {
             ServiceRequest::ExportSessionPackage { .. } => Some("export_package"),
             _ => None,
         };
-        let _progress = operation.map(|operation| self.1.begin(operation));
+        // 只在开始前串行占用共享进度槽：已有传输在跑时不覆盖它的进度，本次请求静默执行。
+        // 这里不能像以前那样把 self.2 一直持有到传输结束，否则导入期间预览/打开文件会一直排队。
+        let _progress = match operation {
+            Some(operation) => self.begin_transfer_progress(operation)?,
+            None => None,
+        };
         let execution =
             crate::execution::ExecutionService::global().map_err(|source| ServiceError::Io {
                 operation: "无法初始化执行上下文",
@@ -849,7 +842,7 @@ impl VeilService {
             request,
             _import.as_ref().map(|guard| guard.key.container.as_path()),
         );
-        if operation.is_some() {
+        if _progress.is_some() {
             if matches!(&result, Err(ServiceError::ImportCancelled { .. }))
                 || (matches!(operation, Some("import" | "export"))
                     && matches!(
@@ -867,6 +860,33 @@ impl VeilService {
 
     pub fn transfer_progress(&self) -> veil_core::progress::Snapshot {
         self.1.snapshot()
+    }
+
+    /// 串行占用共享进度槽：已有传输进行时返回 `None`，让本次请求静默执行，
+    /// 避免后台请求重置正在运行的传输进度，也不再阻塞预览/打开这类读操作。
+    fn begin_transfer_progress(
+        &self,
+        operation: &'static str,
+    ) -> Result<Option<veil_core::progress::Scope>, ServiceError> {
+        let _serial = self.2.lock().map_err(|_| ServiceError::StateUnavailable)?;
+        let snapshot = self.1.snapshot();
+        let active = matches!(
+            snapshot.operation,
+            "import" | "export" | "export_package" | "import_package"
+        ) && matches!(
+            snapshot.phase,
+            "preparing"
+                | "processing"
+                | "verifying"
+                | "snapshot"
+                | "packing"
+                | "unpacking"
+                | "finalizing"
+        );
+        if active {
+            return Ok(None);
+        }
+        Ok(Some(self.1.begin(operation)))
     }
 
     pub fn cancel_transfer(&self) -> bool {
