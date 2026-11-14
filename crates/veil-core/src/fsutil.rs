@@ -8,17 +8,36 @@ use std::io::{self, Write};
 use std::path::Path;
 
 /// 在 macOS 上请求设备刷新；其他平台使用系统文件同步。
+///
+/// F_FULLFSYNC 只在 HFS、FAT、UDF 和 APFS 上实现。SMB 挂载以及 fskit 的 exFAT 等
+/// 文件系统会返回 ENOTSUP（部分实现返回 EINVAL），此时退回普通 `fsync`：数据仍
+/// 保证进入内核缓冲并尽快写盘，只是不额外等待驱动完成刷新。
 pub fn sync_file(file: &fs::File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
         loop {
             // SAFETY: 文件描述符来自仍然存活的 File，F_FULLFSYNC 不读取额外参数。
-            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+            let success = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == 0;
+            #[cfg(any(test, feature = "fault-injection"))]
+            let success = success && !FULLFSYNC_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed);
+            if success {
                 return Ok(());
             }
+            #[cfg(any(test, feature = "fault-injection"))]
+            let error = if FULLFSYNC_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed) {
+                io::Error::from_raw_os_error(libc::ENOTSUP)
+            } else {
+                io::Error::last_os_error()
+            };
+            #[cfg(not(any(test, feature = "fault-injection")))]
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
+                if error.raw_os_error() == Some(libc::ENOTSUP)
+                    || error.raw_os_error() == Some(libc::EINVAL)
+                {
+                    return file.sync_all();
+                }
                 return Err(error);
             }
         }
@@ -48,6 +67,17 @@ pub fn fault_point(stage: &str) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+}
+
+/// 模拟目标文件系统不支持 F_FULLFSYNC（如 fskit 的 exFAT、SMB），供回退路径测试。
+#[cfg(any(test, feature = "fault-injection"))]
+static FULLFSYNC_UNSUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(any(test, feature = "fault-injection"))]
+#[doc(hidden)]
+pub fn simulate_fullfsync_unsupported(unsupported: bool) {
+    FULLFSYNC_UNSUPPORTED.store(unsupported, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 返回路径的父目录；没有父目录时使用当前目录。
@@ -227,6 +257,19 @@ mod tests {
         let nested = dir.path().join("a").join("b").join("c");
         create_dir_all_durable(&nested).unwrap();
         assert!(nested.is_dir());
+    }
+
+    /// 验证 F_FULLFSYNC 不受支持时退回 fsync，导出到 exFAT、SMB 等卷仍可完成。
+    #[test]
+    fn fullfsync_unsupported_falls_back_to_fsync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fallback");
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"content").unwrap();
+        simulate_fullfsync_unsupported(true);
+        sync_file(&file).unwrap();
+        simulate_fullfsync_unsupported(false);
+        assert_eq!(fs::read(&path).unwrap(), b"content");
     }
 }
 

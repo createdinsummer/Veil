@@ -477,11 +477,31 @@ fn publish(
                     .persist(target)
                     .map_err(|e| VeilError::Io(e.error))?;
             } else {
-                temporary
-                    .persist_noclobber(target)
-                    .map_err(|e| VeilError::Io(e.error))?;
+                // tempfile 的 persist_noclobber 依赖 renamex_np(RENAME_EXCL)，
+                // 在 exFAT（fskit）、SMB 等文件系统上返回 ENOTSUP。统一走共享发布
+                // 函数：其内部遇到 ENOTSUP 时回退为「排他创建 + 复制」，同样不会
+                // 覆盖导出目标；发布失败时临时明文仍由 TempPath 负责清理。
+                crate::fsutil::publish_staged_file(temporary.as_ref(), target).map_err(
+                    |error| {
+                        if progress::is_cancelled_io(&error) {
+                            VeilError::Cancelled
+                        } else {
+                            VeilError::Io(error)
+                        }
+                    },
+                )?;
             }
-            crate::fsutil::sync_directory(parent(target))?;
+            // 文件已经发布，目录同步在个别文件系统上可能不受支持，按尽力而为处理。
+            if let Err(error) = crate::fsutil::sync_directory(parent(target)) {
+                veil_core::logging::failure(
+                    veil_core::logging::Level::Warn,
+                    "service",
+                    "export_publish",
+                    "PUBLISHED_DIRECTORY_SYNC_FAILED",
+                    &error,
+                    &[("destination", veil_core::logging::Field::Path(target))],
+                );
+            }
             progress::file_done(false);
         } else {
             match fs::symlink_metadata(target) {

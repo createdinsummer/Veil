@@ -7,6 +7,33 @@ struct ContentView: View {
     @State private var sidebarVisible = true
 
     var body: some View {
+        content
+            .task(id: store.notice) {
+                guard let notice = store.notice else { return }
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                if store.notice == notice { store.notice = nil }
+            }
+            .task {
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                    await store.refreshSpaceAvailability()
+                }
+            }
+            .sheet(item: $store.importInspection) { inspection in
+                ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
+                    .interactiveDismissDisabled()
+                    .onDisappear { store.completeImportReview(nil, id: inspection.id) }
+            }
+            .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
+            .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
+            .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
+            .deleteEntryAlert(store: store)
+            .deleteSpaceAlert(store: store)
+            .deleteContainerAlert(store: store)
+    }
+
+    /// 主内容与浮层提示；独立拆出以控制单个表达式的类型检查复杂度。
+    private var content: some View {
         HStack(spacing: 0) {
             if sidebarVisible {
                 SidebarView().frame(width: VeilDesign.layout("sidebar"))
@@ -16,7 +43,11 @@ struct ContentView: View {
                 header
                 Rectangle().fill(VeilTheme.border).frame(height: 1)
                 if store.form == nil, !store.showNewSpace, let error = store.error {
-                    FeedbackBanner(message: error, isError: true) { store.error = nil }
+                    FeedbackBanner(
+                        message: error,
+                        isError: true,
+                        action: FeedbackBanner.Action(title: "导出错误日志…", run: exportErrorLogs)
+                    ) { store.error = nil }
                 }
                 if let form = store.form { ContainerFormView(form: form).id(form.id) }
                 else if let container = store.container { BrowserView(container: container) }
@@ -35,56 +66,6 @@ struct ContentView: View {
                     .padding(.trailing, 20).padding(.bottom, 20)
                     .accessibilityAddTraits(.updatesFrequently)
             }
-        }
-        .task(id: store.notice) {
-            guard let notice = store.notice else { return }
-            do { try await Task.sleep(for: .seconds(3)) } catch { return }
-            if store.notice == notice { store.notice = nil }
-        }
-        .task {
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) } catch { return }
-                await store.refreshSpaceAvailability()
-            }
-        }
-        .sheet(item: $store.importInspection) { inspection in
-            ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
-                .interactiveDismissDisabled()
-                .onDisappear { store.completeImportReview(nil, id: inspection.id) }
-        }
-        .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
-        .sheet(isPresented: $store.showNewSpace) { NewSpaceView().environmentObject(store) }
-        .sheet(item: $store.preview, onDismiss: { store.closePreview() }) { asset in PreviewSheet(asset: asset).environmentObject(store) }
-        .alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
-            get: { store.pendingDelete != nil }, set: { if !$0 { store.pendingDelete = nil } }
-        ), presenting: store.pendingDelete) { target in
-            Button("删除", role: .destructive) { Task { await store.confirmDelete(target) } }
-            Button("取消", role: .cancel) { store.pendingDelete = nil }
-        } message: { entry in
-            switch entry {
-            case .folder: Text("此文件夹及其全部文件将从容器中删除。此操作无法撤销。")
-            case .file: Text("此文件将从容器中删除。此操作无法撤销。")
-            }
-        }
-        .alert("\(store.pendingSpaceDelete?.isAvailable == true ? "删除空间" : "删除空间记录")「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
-            get: { store.pendingSpaceDelete != nil }, set: { if !$0 { store.pendingSpaceDelete = nil } }
-        ), presenting: store.pendingSpaceDelete) { space in
-            Button(space.isAvailable ? "删除空间" : "删除记录", role: .destructive) { store.pendingSpaceDelete = nil; Task { await store.deleteSpace(space) } }
-            Button("取消", role: .cancel) { store.pendingSpaceDelete = nil }
-        } message: { space in
-            if space.isAvailable {
-                Text(space.isDefault ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
-            } else {
-                Text("删除后，Veil 中的空间和容器记录无法恢复。磁盘上的空间文件和容器文件不会被删除。")
-            }
-        }
-        .alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
-            get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
-        ), presenting: store.pendingContainerDelete) { item in
-            Button("永久删除", role: .destructive) { Task { await store.deleteContainer(item) } }
-            Button("取消", role: .cancel) { store.pendingContainerDelete = nil }
-        } message: { _ in
-            Text("加密容器目录及其中的文件将被永久删除。此操作不需要容器密码，无法撤销。")
         }
     }
 
@@ -106,6 +87,8 @@ struct ContentView: View {
                     .buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy)
                 Button { Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(VeilIconButtonStyle()).help("刷新").disabled(!store.canBrowse)
+                Button(action: exportErrorLogs) { Image(systemName: "arrow.up.doc") }
+                    .buttonStyle(VeilIconButtonStyle()).help("导出错误日志…").accessibilityLabel("导出错误日志")
                 Button { Task { await store.lock(forgetPassword: true) } } label: { Label("锁定", systemImage: "lock") }
                     .buttonStyle(VeilPlainButtonStyle()).help("锁定容器并清除免密密码")
             } else {
@@ -116,6 +99,8 @@ struct ContentView: View {
                     Button("导入加密容器…") { Task { await store.choosePackage() } }.disabled(store.activeSpace?.isAvailable != true)
                     Divider()
                     Button("刷新") { Task { await store.refresh() } }
+                    Divider()
+                    Button("导出错误日志…") { exportErrorLogs() }
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).fixedSize().disabled(store.isBusy).pointerCursor().help("容器操作")
             }
@@ -131,6 +116,60 @@ struct ContentView: View {
             .padding(.horizontal, store.container == nil ? 32 : 24)
             .padding(.leading, sidebarVisible ? 0 : 76)
             .frame(height: store.container == nil ? VeilDesign.layout("header") : 52)
+    }
+
+    /// 主窗口内的日志导出入口：与任务中心共用同一保存流程，出错时可就地导出反馈。
+    private func exportErrorLogs() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Veil-错误日志.json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            store.exportErrorLogs(to: url)
+        }
+    }
+}
+
+/// 删除确认弹窗独立为视图修饰符，避免主视图表达式超出类型检查预算。
+private extension View {
+    func deleteEntryAlert(store: AppStore) -> some View {
+        alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
+            get: { store.pendingDelete != nil }, set: { if !$0 { store.pendingDelete = nil } }
+        ), presenting: store.pendingDelete) { target in
+            Button("删除", role: .destructive) { Task { await store.confirmDelete(target) } }
+            Button("取消", role: .cancel) { store.pendingDelete = nil }
+        } message: { entry in
+            switch entry {
+            case .folder: Text("此文件夹及其全部文件将从容器中删除。此操作无法撤销。")
+            case .file: Text("此文件将从容器中删除。此操作无法撤销。")
+            }
+        }
+    }
+
+    func deleteSpaceAlert(store: AppStore) -> some View {
+        alert("\(store.pendingSpaceDelete?.isAvailable == true ? "删除空间" : "删除空间记录")「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
+            get: { store.pendingSpaceDelete != nil }, set: { if !$0 { store.pendingSpaceDelete = nil } }
+        ), presenting: store.pendingSpaceDelete) { space in
+            Button(space.isAvailable ? "删除空间" : "删除记录", role: .destructive) { store.pendingSpaceDelete = nil; Task { await store.deleteSpace(space) } }
+            Button("取消", role: .cancel) { store.pendingSpaceDelete = nil }
+        } message: { space in
+            if space.isAvailable {
+                Text(space.isDefault ? "将永久删除整个空间文件夹、其中的容器和其他文件。完成后会自动重新建立一个空的默认空间。无法撤销。" : "将永久删除整个空间文件夹、其中的容器和其他文件。无法撤销。")
+            } else {
+                Text("删除后，Veil 中的空间和容器记录无法恢复。磁盘上的空间文件和容器文件不会被删除。")
+            }
+        }
+    }
+
+    func deleteContainerAlert(store: AppStore) -> some View {
+        alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
+            get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
+        ), presenting: store.pendingContainerDelete) { item in
+            Button("永久删除", role: .destructive) { Task { await store.deleteContainer(item) } }
+            Button("取消", role: .cancel) { store.pendingContainerDelete = nil }
+        } message: { _ in
+            Text("加密容器目录及其中的文件将被永久删除。此操作不需要容器密码，无法撤销。")
+        }
     }
 }
 
@@ -449,13 +488,24 @@ private struct ContainerCard: View {
 }
 
 struct FeedbackBanner: View {
+    /// 横幅右侧可选动作，例如「导出错误日志」，便于出错时就地导出诊断信息。
+    struct Action {
+        let title: String
+        let run: () -> Void
+    }
+
     let message: String
     let isError: Bool
+    var action: Action? = nil
     let dismiss: () -> Void
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: isError ? "exclamationmark.circle" : "checkmark.circle")
             Text(message).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            if let action {
+                Button(action.title, action: action.run).buttonStyle(VeilButtonStyle(variant: .subtle))
+            }
             Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(VeilPlainButtonStyle()).accessibilityLabel("关闭提示")
         }.font(.system(size: 12)).foregroundStyle(isError ? VeilTheme.danger : VeilTheme.secondary)
             .padding(12).background(isError ? VeilTheme.dangerSurface : VeilTheme.thumbnail)
