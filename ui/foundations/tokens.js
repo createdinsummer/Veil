@@ -1,4 +1,11 @@
-/* 自动生成自 ui/tokens.json。 */
+/*
+ * Veil Web 原型设计 token（自动生成）。
+ * 所属模块：UI 设计基础层，为颜色主题、字体、间距、圆角、布局、动画和阴影提供一致参数。
+ * 数据结构：window.VeilDesignTokens 按 color / font / space / radius / layout / motion / shadow 分组；
+ * color 下再按 light / dark 主题提供颜色值，其余分组供多个页面共享。
+ * 依赖能力：浏览器全局 window 对象和 ui/tokens.json 源文件。
+ * 整体目标：避免组件各自硬编码样式；请编辑 ui/tokens.json 后运行 ui/tools/build.mjs 生成本文件。
+ */
 window.VeilDesignTokens = {
   "name": "Veil",
   "version": 1,

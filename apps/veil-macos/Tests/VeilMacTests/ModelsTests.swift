@@ -1,14 +1,29 @@
+/// 验证 macOS 文件模型、容器状态和敏感诊断数据的展示与生命周期规则。
+/// 所属模块：桌面端模型 / Store 测试；纯模型用例使用构造快照，集成用例通过桥接层调用真实 Rust 服务。
+/// 核心类型 ModelsTests 检查日志和筛选，NativeClientTests 检查持久化、缓存、预览和冲突处理；依赖 XCTest、ImageIO 和 VeilMac。
+/// 集成环境必须由运行者提供独立 VEIL_APP_DATA_DIR；用例会修改配置和容器登记，局部临时文件清理不等于数据库状态完全还原。
 import Foundation
 import XCTest
 import ImageIO
 import UniformTypeIdentifiers
 @testable import VeilMac
 
+/// 覆盖日志脱敏和纯模型浏览筛选；不持有跨测试复用的业务数据。
 final class ModelsTests: XCTestCase {
+    /// 验证客户端错误会保留稳定错误码，但不会把用户提供的原始敏感文字写入日志。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 日志用例需独立 VEIL_APP_DATA_DIR；日志断言依赖没有其他并发用例向同一日志流提交记录。
     func testClientErrorsKeepCodesWithoutPersistingUserText() throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil else {
             throw XCTSkip("日志集成测试需要独立的测试目录")
         }
+        /// 从日志导出结果读取可供脱敏断言使用的记录集合。
+        /// - Parameters: 无；访问当前测试环境的 Rust 日志导出。
+        /// - Returns: [[String: Any]]，每项为一条日志对象，键值类型由导出的 JSON 决定。
+        /// - Throws: 日志导出、JSON 解析或 XCTUnwrap 类型断言失败时传播错误。
+        /// - 注意事项: 不是只读取本次测试新增记录；调用方先保存初始数量，再检查增量，不能与共享日志写入并发测试。
         func records() throws -> [[String: Any]] {
             try XCTUnwrap(JSONSerialization.jsonObject(with: AppLog.export()) as? [[String: Any]])
         }
@@ -40,6 +55,11 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(result.contains { ($0["native_code"] as? Int) == NSFileReadNoSuchFileError })
     }
 
+    /// 验证解码失败诊断不会泄露文件载荷或敏感字段名。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 日志用例需独立 VEIL_APP_DATA_DIR；日志断言依赖没有其他并发用例向同一日志流提交记录。
     func testDecodingDiagnosticsOmitPayloadAndFieldNames() throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil else {
             throw XCTSkip("日志集成测试需要独立的测试目录")
@@ -53,10 +73,20 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(text.contains("corrupted_data"))
     }
 
+    /// 创建用于浏览筛选的固定文件元数据样本。
+    /// - Parameters: path: String 容器内相对路径，同时作为测试 ID 和 name；category: FileCategory 文件类别，默认 document。
+    /// - Returns: FileEntry，固定为 32 字节、版本 1、指定时间及 text/plain 预览类型，不创建真实文件。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: category 与 MIME 可以不一致，样本服务于筛选测试，不模拟文件类型探测。
     private func file(_ path: String, category: FileCategory = .document) -> FileEntry {
         FileEntry(id: path, name: path, size: 32, version: 1, encryptedAt: "2026-11-04T12:00:00Z", category: category, previewMime: "text/plain")
     }
 
+    /// 验证按路径浏览会保留空文件夹，并且目录边界过滤不会混入相似前缀目录。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: 仅验证本例构造的数据和所列断言，不代表完整界面、权限失败或并发场景均已覆盖。
     func testPathBrowsingKeepsEmptyFoldersAndDirectoryBoundaries() {
         let container = ContainerSnapshot(id: "one", name: "测试", path: "/tmp/one", createdAt: "", files: [
             file("work/note.txt"), file("work/sub/child.txt"), file("workspace/hidden.txt"), file("root.txt")
@@ -66,6 +96,11 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(rows.map(\.name), ["empty", "sub", "note.txt"])
     }
 
+    /// 验证点开头的隐藏条目默认不可见，打开显示选项后可以浏览。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: 仅验证本例构造的数据和所列断言，不代表完整界面、权限失败或并发场景均已覆盖。
     func testDotEntriesAreHiddenByDefaultAndCanBeRevealed() {
         let container = ContainerSnapshot(id: "one", name: "测试", path: "/tmp/one", createdAt: "", files: [
             file(".DS_Store"), file("可见.txt"), file("资料/.hidden.txt"), file("资料/说明.txt"), file(".配置/内容.txt")
@@ -88,6 +123,11 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(Set(revealedType.map(\.name)), [".DS_Store", "可见.txt", ".hidden.txt", "说明.txt", "内容.txt"])
     }
 
+    /// 验证类型筛选、搜索词和目录面包屑共同反映当前浏览位置。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: 仅验证本例构造的数据和所列断言，不代表完整界面、权限失败或并发场景均已覆盖。
     func testCategorySearchAndBreadcrumbs() {
         let container = ContainerSnapshot(id: "one", name: "测试", path: "/tmp/one", createdAt: "", files: [
             file("旅行/照片.jpg", category: .photo), file("旅行/说明.txt"), file("工作/记录.txt")
@@ -100,8 +140,14 @@ final class ModelsTests: XCTestCase {
     }
 }
 
+/// 验证桌面客户端的容器创建、解锁、删除和冲突复核服务调用。
 @MainActor
 final class NativeClientTests: XCTestCase {
+    /// 验证删除容器会清除空间登记与活动会话，避免 UI 继续展示已删除对象。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testDeleteContainerClearsDirectoryRegistrationAndSession() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -124,6 +170,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertFalse(store.recents.contains { $0.id == container.id })
     }
 
+    /// 验证自定义空间目录可持久化，并被新容器创建流程采用。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testCustomSpaceDirectoryIsPersistedAndUsedForNewContainers() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -161,6 +212,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: existingFile), Data("已有文件".utf8))
     }
 
+    /// 验证免密缓存窗口内可重开容器，过期后必须重新输入密码。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testUnlockCacheSkipsPasswordWithinWindowAndExpires() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -203,6 +259,11 @@ final class NativeClientTests: XCTestCase {
         await store.lock(forgetPassword: true)
     }
 
+    /// 验证进入新容器表单会锁定先前容器，取消后清除 Store.form 和错误；不验证视图密码文本或内存擦除。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testFormNavigationLocksThePreviousContainerAndClearsCancelledInputState() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -240,6 +301,11 @@ final class NativeClientTests: XCTestCase {
         await store.lock()
     }
 
+    /// 验证缩略图会按预览需要缩小，并在锁定容器时清除缓存。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testThumbnailsAreDownsampledAndClearedOnLock() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -281,6 +347,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertTrue(store.thumbnails.isEmpty)
     }
 
+    /// 验证关闭预览后会移除该预览专用的明文临时文件。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 仅验证本例构造的数据和所列断言，不代表完整界面、权限失败或并发场景均已覆盖。
     func testPreviewRemovesItsPrivateTemporaryFile() throws {
         let file = FileEntry(id: "video", name: "旅行/短片.mp4", size: 8, version: 1,
                              encryptedAt: "", category: .video, previewMime: "video/mp4")
@@ -301,6 +372,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertNil(asset.contentURL)
     }
 
+    /// 验证预览会先创建受控临时副本，容器锁定后清理副本。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testShowPreviewWritesTemporaryFileAndLockCleansItUp() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -334,6 +410,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path))
     }
 
+    /// 验证导出冲突复核要求明确选择，取消时不会覆盖已有目标文件。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testExportReviewAndCancellationPreserveExistingFiles() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -354,6 +435,11 @@ final class NativeClientTests: XCTestCase {
         await store.exportPaths(["source.txt"], to: output)
         XCTAssertNil(store.error)
         XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
+        /// 等待当前导出任务发布一批需要用户决定的冲突。
+        /// - Parameters: 无；读取外层 store.importInspection 和 store.error。
+        /// - Returns: ImportInspection，出现时返回当前批次快照；不校验它是否来自特定任务 ID。
+        /// - Throws: 等待任务被取消时传播 CancellationError；约 15 秒后仍无批次时 XCTUnwrap 失败。
+        /// - 注意事项: 每次约等 20 毫秒轮询，15 秒是轮询截止而非硬实时保证；返回后调用方还需提交决定并等待传输任务完成。
         func awaitReview() async throws -> ImportInspection {
             let deadline = Date().addingTimeInterval(15)
             while store.importInspection == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
@@ -384,6 +470,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: output), Data("original".utf8))
     }
 
+    /// 验证导入冲突必须逐项选择，锁定容器会取消尚未提交的复核。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testImportReviewRequiresChoicesAndLockCancelsPendingReview() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {
@@ -401,6 +492,11 @@ final class NativeClientTests: XCTestCase {
         try Data("original".utf8).write(to: file)
         await store.importFiles([file])
         XCTAssertNil(store.error)
+        /// 等待当前导入任务发布一批需要用户决定的冲突。
+        /// - Parameters: 无；读取外层 store.importInspection 和 store.error。
+        /// - Returns: ImportInspection，出现时返回当前批次快照；不校验它是否来自特定任务 ID。
+        /// - Throws: 等待任务被取消时传播 CancellationError；约 15 秒后仍无批次时 XCTUnwrap 失败。
+        /// - 注意事项: 每次约等 20 毫秒轮询，15 秒是轮询截止而非硬实时保证；返回后调用方还需提交决定并等待传输任务完成。
         func awaitReview() async throws -> ImportInspection {
             let deadline = Date().addingTimeInterval(15)
             while store.importInspection == nil && Date() < deadline {
@@ -439,6 +535,11 @@ final class NativeClientTests: XCTestCase {
         XCTAssertFalse(store.isBusy)
     }
 
+    /// 验证 Swift 客户端通过桥接层调用 Rust 服务完成真实容器业务。
+    /// - Parameters: 无；由 XCTest 调用。
+    /// - Returns: Void；业务结果通过断言验证，不符合预期会登记测试失败。
+    /// - Throws: 环境未设置时抛出 XCTSkip；文件系统、日志导出、桥接调用或 XCTUnwrap 失败可传播错误。
+    /// - 注意事项: 需独立 VEIL_APP_DATA_DIR 及 VEIL_NATIVE_TESTS=1；通过真实服务产生配置或容器副作用，应在隔离环境运行。
     func testSwiftCallsRealRustService() async throws {
         guard ProcessInfo.processInfo.environment["VEIL_APP_DATA_DIR"] != nil,
               ProcessInfo.processInfo.environment["VEIL_NATIVE_TESTS"] == "1" else {

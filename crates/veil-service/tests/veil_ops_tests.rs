@@ -1,4 +1,8 @@
-//! 工作区功能集成测试
+//! 容器文件操作与版本管理的服务层集成测试。
+//! 所属模块：veil-service 容器业务；覆盖初始化、导入、导出、密码、路径及失败回滚。
+//! 核心内容：各 test_* 函数独立准备场景；encrypted_file_count 辅助核对根目录密文残留。
+//! 依赖能力：VeilManager、版本和元数据类型、临时目录及真实文件系统。
+//! 业务目标：以操作结果和最终文件状态确认接口契约；测试数据使用固定测试密码和一次性目录。
 
 use std::fs;
 use tempfile::TempDir;
@@ -8,6 +12,10 @@ use veil_service::veil_ops::{AddFileSpec, MovedPathKind, RemovedPathKind, VeilMa
 
 /// 验证工作区初始化、元数据读取和空文件列表。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_work_init_and_operations() {
     kdf::enable_fast_test_kdf();
     // 创建临时目录
@@ -38,6 +46,10 @@ fn test_work_init_and_operations() {
 
 /// 验证添加文件后可列出并解密导出原内容。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_add_and_extract_file() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -79,6 +91,10 @@ fn test_add_and_extract_file() {
 
 /// 两个基于同一版本的编辑，先提交者成功，后提交者不能覆盖。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn stale_export_cannot_overwrite_a_newer_version() {
     kdf::enable_fast_test_kdf();
     let root = TempDir::new().unwrap();
@@ -137,6 +153,10 @@ fn stale_export_cannot_overwrite_a_newer_version() {
 
 /// 同一基础版本的并发提交必须恰有一个成功。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn concurrent_checked_updates_allow_only_one_writer() {
     use std::sync::{Arc, Barrier};
     kdf::enable_fast_test_kdf();
@@ -203,6 +223,10 @@ fn concurrent_checked_updates_allow_only_one_writer() {
 /// 验证 Unix 下新密文仅当前用户可读写。
 #[cfg(unix)]
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_added_ciphertext_is_private() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -227,6 +251,10 @@ fn test_added_ciphertext_is_private() {
 
 /// 验证错误密码无法读取工作区元数据。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn test_wrong_password() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -245,6 +273,10 @@ fn test_wrong_password() {
 
 /// 验证删除文件会移除密文和元数据条目。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_remove_file() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -275,6 +307,10 @@ fn test_remove_file() {
 
 /// 验证容器内目标路径生效，重复添加同名目标会替换旧条目和旧密文。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_add_file_destination_replaces_existing() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -322,6 +358,10 @@ fn test_add_file_destination_replaces_existing() {
 
 /// 重命名、失败的覆盖和完整改密均不产生内容版本。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_file_version_survives_non_content_changes() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -363,6 +403,10 @@ fn test_file_version_survives_non_content_changes() {
 
 /// 验证错误密码在任何密文写入前失败。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn test_add_files_wrong_password_does_not_write_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -384,6 +428,10 @@ fn test_add_files_wrong_password_does_not_write_ciphertext() {
 
 /// 验证目录递归删除和 `./` 路径规范化。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_remove_directory_recursively() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -421,6 +469,10 @@ fn test_remove_directory_recursively() {
 
 /// 验证文件重命名和移动到已有目录。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_move_file_into_directory_and_rename() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -475,6 +527,10 @@ fn test_move_file_into_directory_and_rename() {
 
 /// 验证目录整体移动、子路径更新和循环移动保护。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_move_directory_recursively() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -527,6 +583,10 @@ fn test_move_directory_recursively() {
 
 /// 验证完整改密中途失败时保留旧密码和双密钥状态。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_change_password_full_failure_keeps_old_password() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -574,6 +634,10 @@ fn test_change_password_full_failure_keeps_old_password() {
 
 /// 验证完整改密中断后可以继续使用旧密码恢复迁移。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_change_password_full_can_resume_after_partial_migration() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -633,6 +697,11 @@ fn test_change_password_full_can_resume_after_partial_migration() {
 }
 
 #[test]
+/// 验证容器数据库换密钥后使用新密码可访问，且既有密文文件无需重写。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn database_rekey_uses_new_password_without_rewriting_files() {
     let temp = TempDir::new().unwrap();
     let m = VeilManager::new(temp.path().join("veil"));
@@ -646,6 +715,10 @@ fn database_rekey_uses_new_password_without_rewriting_files() {
 
 /// 验证崩溃遗留的临时文件和孤立密文会在下次成功读取时清理。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_crash_orphans_are_cleaned_after_successful_read() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -672,6 +745,10 @@ fn test_crash_orphans_are_cleaned_after_successful_read() {
 
 /// 验证默认改密只重新保护元数据，不修改现有密文文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_change_password_metadata_only_keeps_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -733,6 +810,10 @@ fn test_change_password_metadata_only_keeps_ciphertext() {
 
 /// 验证完整改密会轮换数据主密钥并替换全部文件密文。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_change_password_full_reencrypts_ciphertext() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -793,6 +874,10 @@ fn test_change_password_full_reencrypts_ciphertext() {
 
 /// 验证工作区对跨多个分块的大文件执行添加、完整改密和导出。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn test_work_streaming_multichunk_full_rekey() {
     kdf::enable_fast_test_kdf();
     let temp_dir = TempDir::new().unwrap();
@@ -822,7 +907,11 @@ fn test_work_streaming_multichunk_full_rekey() {
     assert_eq!(fs::read(output).unwrap(), plaintext);
 }
 
-/// 统计工作区根目录下的密文文件数量。
+/// 统计容器根目录中扩展名为 enc 的条目，供失败回滚测试检查残留密文。
+/// 入参：veil_dir（&Path）为已存在且可读取的容器目录。
+/// 返回值：usize，直接子项中扩展名精确等于小写 enc 的数量；不递归、不检查是否为普通文件。
+/// 异常：打开目录失败时 panic；单条目录读取错误被 filter_map 跳过，不作为错误返回。
+/// 注意事项：这是测试近似计数，不核对数据库引用，也不能证明没有其他名称的残留文件。
 fn encrypted_file_count(veil_dir: &std::path::Path) -> usize {
     fs::read_dir(veil_dir)
         .unwrap()

@@ -1,32 +1,47 @@
+# XcodeGen 工程定义；所属模块为 iOS 构建配置，生成工程以连接 Swift 界面与预先编译的 Rust 服务。
+# 依赖 XcodeGen、iOS SDK、Sources 桥接头文件以及 target 对应架构下的 release 静态库；此文件不执行 Cargo 构建。
 name: VeilIOS
+# 工程生成选项；最低系统版本为 iOS 17。
 options:
   deploymentTarget:
     iOS: '17.0'
+# 各目标共享的构建设置；与下方目标专用设置合并。
 settings:
   base:
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    # Swift 编译语言模式，和项目使用的 Xcode/编译器版本不是同一个概念。
     SWIFT_VERSION: '5.0'
     PRODUCT_BUNDLE_IDENTIFIER: com.veil.ios
+    # 交由 Xcode 自动管理签名；真机签名仍依赖本机构建环境的开发团队和证书配置。
     CODE_SIGN_STYLE: Automatic
+    # Swift 通过此桥接头声明调用 Rust 导出的 C 接口。
     SWIFT_OBJC_BRIDGING_HEADER: Sources/veil_bridge.h
+    # 按当前 SDK 选择的 RUST_TARGET 查找 release 库，保留继承的搜索路径。
     LIBRARY_SEARCH_PATHS: '$(inherited) $(SRCROOT)/../../target/$(RUST_TARGET)/release'
+    # 链接参数列表：保留已有参数，并显式链接桥接静态库和所需系统库。
     OTHER_LDFLAGS:
       - '$(inherited)'
       - '$(SRCROOT)/../../target/$(RUST_TARGET)/release/libveil_macos_bridge.a'
       - '-lc++'
       - '-lresolv'
+    # 模拟器采用 Apple Silicon ARM64 Rust 目标；未配置 Intel x86_64 模拟器变体。
     RUST_TARGET[sdk=iphonesimulator*]: aarch64-apple-ios-sim
+    # 真机采用 ARM64 iOS Rust 目标；库必须先为该目标构建。
     RUST_TARGET[sdk=iphoneos*]: aarch64-apple-ios
+    # 由 Xcode 根据下面的 INFOPLIST_KEY 设置生成应用信息文件。
     GENERATE_INFOPLIST_FILE: YES
     INFOPLIST_KEY_CFBundleDisplayName: Veil
     INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
     INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
     INFOPLIST_KEY_UILaunchScreen_Generation: YES
+    # 设备族 1 为 iPhone、2 为 iPad，目标同时支持两者。
     TARGETED_DEVICE_FAMILY: '1,2'
+# 构建目标集合，当前只有一个 iOS 应用目标，不包含独立测试目标。
 targets:
   VeilIOS:
     type: application
     platform: iOS
+    # 源目录列表：Sources 提供 Swift 和桥接声明，Resources 提供品牌及资源目录。
     sources:
       - path: Sources
       - path: Resources
@@ -34,6 +49,7 @@ targets:
       base:
         PRODUCT_NAME: Veil
 
+# 可供 Xcode 或命令行构建使用的共享方案；本方案构建 VeilIOS 的全部构建动作。
 schemes:
   VeilIOS:
     build:

@@ -1,3 +1,8 @@
+//! SQLite 存储中断、租约失效和恢复边界的故障注入集成测试。
+//! 所属模块：veil-service 数据持久化与恢复；仅在 fault-injection 特性开启时编译。
+//! 核心函数：manager/fixture 创建隔离容器；fail/fault_worker 注入故障；其余测试核对已提交数据、临时产物与锁状态。
+//! 依赖能力：VeilManager、ContainerDb、LockManager、临时目录、子进程及故障点环境变量。
+//! 业务目标：确认中断或失效不会发布未确认数据；所有写入发生在用例临时工作区。
 #![cfg(feature = "fault-injection")]
 use std::{fs, path::Path, process::Command, time::Duration};
 use tempfile::TempDir;
@@ -8,10 +13,20 @@ use veil_service::{
     },
     veil_ops::{AddFileSpec, VeilManager},
 };
+/// 为指定故障测试工作区定位其容器操作入口。
+/// 入参：root（&Path）为隔离测试根目录，实际容器路径固定为 root/veil。
+/// 返回值：VeilManager，保存容器路径；此时不表示容器已经初始化或解锁。
+/// 异常：不返回 Result；构造阶段不执行本函数显式文件读写。
+/// 注意事项：后续业务操作仍需有效容器和密码；调用方负责根目录生命周期。
 fn manager(root: &Path) -> VeilManager {
     VeilManager::new(root.join("veil"))
 }
 #[test]
+/// 在子进程中注入指定存储故障并输出可供父测试核对的结果。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn fault_worker() {
     let Some(root) = std::env::var_os("VEIL_SQL_FAULT_ROOT") else {
         return;
@@ -30,6 +45,11 @@ fn fault_worker() {
     // 写盘在独立线程完成；父测试直接读文件，退出前必须排空。
     veil_core::logging::flush().unwrap();
 }
+/// 功能：在隔离子进程的指定存储阶段模拟崩溃，验证后续恢复逻辑。
+/// 入参：root 为隔离测试目录；operation 为 fault_worker 识别的操作名；stage 为故障点名称。
+/// 返回值：无；断言子进程以注入约定的退出码 86 退出。
+/// 异常：进程启动失败或退出码不符会 panic，使测试失败。
+/// 注意事项：环境变量只传给子进程；故障点必须与实现中的 stage 字符串一致。
 fn fail(root: &Path, operation: &str, stage: &str) {
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "fault_worker", "--nocapture"])
@@ -40,6 +60,11 @@ fn fail(root: &Path, operation: &str, stage: &str) {
         .unwrap();
     assert_eq!(status.code(), Some(86), "{stage}");
 }
+/// 准备可供写入中断、密码轮换和恢复测试使用的完整容器工作区。
+/// 入参：无，内部创建独占临时目录。
+/// 返回值：TempDir；其中 veil 是密码 old 的容器，a.txt 已导入 original 内容，changed 是待替换内容的明文源文件。
+/// 异常：临时目录创建、容器初始化、写文件或导入失败会 panic。
+/// 注意事项：调用方需持有返回值直至所有子进程和恢复断言结束；丢弃 TempDir 会尝试删除工作区。
 fn fixture() -> TempDir {
     let root = TempDir::new().unwrap();
     let m = manager(root.path());
@@ -54,6 +79,11 @@ fn fixture() -> TempDir {
     root
 }
 #[test]
+/// 验证写入中断时数据库仍保留最后确认的完整版本。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn interrupted_writes_preserve_the_confirmed_database_version() {
     for stage in [
         "before_cipher_write",
@@ -81,6 +111,11 @@ fn interrupted_writes_preserve_the_confirmed_database_version() {
     }
 }
 #[test]
+/// 验证密码轮换在切换前后中断都能恢复到可用且口令一致的状态。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn rotation_recovers_before_and_after_password_switch() {
     for stage in [
         "after_rotation_keys",
@@ -127,6 +162,11 @@ fn rotation_recovers_before_and_after_password_switch() {
     }
 }
 #[test]
+/// 在独立进程中按指定时间偏移读取租约状态，验证时钟变化不影响凭证安全。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn clock_worker() {
     if std::env::var_os("VEIL_SQL_CLOCK_WORKER").is_none() {
         return;
@@ -152,6 +192,11 @@ fn clock_worker() {
     veil_service::storage::set_test_clock_offset(0);
 }
 #[test]
+/// 验证过期租约不会因系统时间回拨而重新变成有效凭证。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn expired_leases_and_wall_clock_changes_do_not_revive_credentials() {
     assert!(
         Command::new(std::env::current_exe().unwrap())
@@ -164,6 +209,11 @@ fn expired_leases_and_wall_clock_changes_do_not_revive_credentials() {
 }
 
 #[test]
+/// 在子进程执行容器移动或复制故障场景。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn move_worker() {
     let Some(root) = std::env::var_os("VEIL_SQL_MOVE_ROOT") else {
         return;
@@ -180,6 +230,11 @@ fn move_worker() {
         .unwrap();
 }
 #[test]
+/// 验证容器复制失败后清理未完成目标，同时源容器保持可用。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn failed_container_copy_cleans_target_and_preserves_source() {
     use veil_service::{config::AppConfig, storage::app::AppStore};
     let root = TempDir::new().unwrap();
@@ -222,6 +277,11 @@ fn failed_container_copy_cleans_target_and_preserves_source() {
 }
 
 #[test]
+/// 验证提交结果不确定时先读取数据库确认落盘，再决定向调用方报告成功。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn uncertain_commit_is_confirmed_before_returning_success() {
     let root = fixture();
     let status = Command::new(std::env::current_exe().unwrap())
@@ -253,6 +313,11 @@ fn uncertain_commit_is_confirmed_before_returning_success() {
 }
 
 #[test]
+/// 在子进程模拟读租约过期、恢复或导出操作。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn read_lease_worker() {
     let Some(root) = std::env::var_os("VEIL_READ_LEASE_ROOT") else {
         return;
@@ -265,6 +330,11 @@ fn read_lease_worker() {
     );
 }
 #[test]
+/// 验证读租约失效时不发布明文临时文件，也不覆盖已存在的目标。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn expired_read_lease_never_publishes_plaintext_or_overwrites_an_existing_file() {
     let root = fixture();
     fs::write(root.path().join("output"), b"keep").unwrap();
@@ -290,6 +360,10 @@ fn expired_read_lease_never_publishes_plaintext_or_overwrites_an_existing_file()
 }
 
 #[test]
+/// 并发创建链接的子进程工作入口，竞争创建并返回各自结果。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn link_competition_worker() {
     let Some(root) = std::env::var_os("VEIL_LINK_COMPETITION_ROOT") else {
         return;
@@ -326,6 +400,11 @@ fn link_competition_worker() {
     }
 }
 #[test]
+/// 验证并发创建失败的一方不会删除胜者链接或已提交容器。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn losing_creation_never_removes_the_winners_link_or_a_committed_container() {
     use veil_service::storage::app::AppStore;
     let root = TempDir::new().unwrap();

@@ -1,3 +1,6 @@
+//! SQLite 持久化与容器模式约束的端到端测试。
+//! 所属模块：应用库 / 容器数据库；覆盖结构版本、空间登记、文件树、摘要、分页、迁移、并发和密钥轮换。
+//! 每个场景使用独立临时目录，确保测试不会接触用户容器或应用数据库。
 use tempfile::TempDir;
 use veil_core::database::CONTAINER_DB;
 use veil_service::{
@@ -7,6 +10,11 @@ use veil_service::{
 };
 
 #[test]
+/// 验证当前容器结构版本可打开，未知的未来版本会被明确拒绝。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn current_container_schema_is_version_one_and_future_versions_are_rejected() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("veil");
@@ -48,6 +56,11 @@ fn current_container_schema_is_version_one_and_future_versions_are_rejected() {
 }
 
 #[test]
+/// 验证容器元数据快照直接读取数据库，不要求解密或遍历密文文件。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn metadata_snapshot_reads_only_the_database() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("source"));
@@ -76,6 +89,11 @@ fn metadata_snapshot_reads_only_the_database() {
     );
 }
 #[test]
+/// 验证容器文件树、历史版本、密码轮换和打包导入组成的完整存储往返流程。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn encrypted_container_roundtrip_tree_versions_rekey_and_package() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("source");
@@ -136,6 +154,11 @@ fn encrypted_container_roundtrip_tree_versions_rekey_and_package() {
         .is_some());
 }
 #[test]
+/// 验证本机安装身份、用户 / 系统设置、空间关系和本地记录能被持久化读取。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn app_identity_settings_spaces_and_records() {
     let root = TempDir::new().unwrap();
     let mut store = AppStore::open(root.path()).unwrap();
@@ -167,6 +190,11 @@ fn app_identity_settings_spaces_and_records() {
 }
 
 #[test]
+/// 验证数据库缺失、旧版结构和未来结构分别给出明确的兼容性结果。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn missing_legacy_and_future_schema_are_explicitly_rejected() {
     let root = TempDir::new().unwrap();
     let dir = root.path().join("legacy");
@@ -184,6 +212,11 @@ fn missing_legacy_and_future_schema_are_explicitly_rejected() {
     assert!(AppStore::open(&app).is_err());
 }
 #[test]
+/// 验证目录节点约束、文件名规则和内容基准身份在存储层被强制执行。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_constraints_and_content_base_identity_are_checked() {
     use rusqlite::params;
     let root = TempDir::new().unwrap();
@@ -272,6 +305,11 @@ fn directory_constraints_and_content_base_identity_are_checked() {
         .is_err());
 }
 #[test]
+/// 验证清理仅移除确认无引用的对象，保留活跃、被引用和未知对象。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn cleanup_preserves_active_referenced_and_unknown_objects() {
     use veil_service::storage::locks::{LockManager, LockMode};
     let root = TempDir::new().unwrap();
@@ -304,6 +342,11 @@ fn cleanup_preserves_active_referenced_and_unknown_objects() {
     assert!(m.read_file_bytes("source", "pw", 1024).is_err());
 }
 #[test]
+/// 验证宽且深的文件树可分页读取，查询计划能利用相应索引。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn wide_deep_tree_pagination_and_query_plans() {
     use rusqlite::params;
     let root = TempDir::new().unwrap();
@@ -362,6 +405,11 @@ fn wide_deep_tree_pagination_and_query_plans() {
 }
 
 #[test]
+/// 验证相同内容不制造新版本，密钥轮换后旧连接不能继续写入。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn identical_content_keeps_version_and_old_database_connections_cannot_write_after_rekey() {
     let root = TempDir::new().unwrap();
     let m = VeilManager::new(root.path().join("veil"));
@@ -383,6 +431,11 @@ fn identical_content_keeps_version_and_old_database_connections_cannot_write_aft
 }
 #[cfg(unix)]
 #[test]
+/// 验证同一磁盘目录的不同路径别名不会登记成重复空间。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_aliases_cannot_create_duplicate_spaces() {
     let root = TempDir::new().unwrap();
     let mut store = AppStore::open(&root.path().join("app")).unwrap();
@@ -393,6 +446,11 @@ fn directory_aliases_cannot_create_duplicate_spaces() {
 }
 
 #[test]
+/// 验证并发创建同名文件时失败方不会覆盖或删除成功提交的一方。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn competing_new_files_never_replace_or_delete_the_winner() {
     use std::sync::{Arc, Barrier};
     let root = TempDir::new().unwrap();
@@ -439,6 +497,11 @@ fn competing_new_files_never_replace_or_delete_the_winner() {
 }
 
 #[test]
+/// 验证多个进程同时首次启动时最终只生成并持久化一个安装身份。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn simultaneous_first_start_uses_one_persistent_install_identity() {
     use std::sync::{Arc, Barrier};
     let root = TempDir::new().unwrap();
@@ -468,6 +531,11 @@ fn simultaneous_first_start_uses_one_persistent_install_identity() {
 }
 
 #[test]
+/// 验证换行差异不影响结构校验，而表结构变化会被检测。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn schema_validation_accepts_cross_platform_newlines_and_rejects_changed_structure() {
     let root = TempDir::new().unwrap();
     let m = VeilManager::new(root.path().join("veil"));
@@ -492,6 +560,11 @@ fn schema_validation_accepts_cross_platform_newlines_and_rejects_changed_structu
 }
 
 #[test]
+/// 验证界面刷新读取旧快照时不能覆盖正在提交的容器迁移状态。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn display_refresh_cannot_overwrite_a_pending_container_move() {
     use veil_service::config::AppConfig;
     let root = TempDir::new().unwrap();

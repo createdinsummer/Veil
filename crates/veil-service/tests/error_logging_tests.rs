@@ -1,3 +1,6 @@
+//! 服务端错误日志与故障诊断流程的集成测试。
+//! 所属模块：锁、后台租约、数据库和部分文件操作的诊断；验证日志保留可操作上下文且避免重复写入或泄露敏感值。
+//! worker 函数通过独立进程模拟锁与存储故障，测试数据写入隔离临时目录。
 use std::{
     process::Command,
     time::{Duration, Instant},
@@ -9,6 +12,11 @@ use veil_service::{
 };
 
 #[test]
+/// 验证数据库锁等待和后台租约续期失败可被诊断，同时相同故障不会无限重复写日志。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn database_lock_and_background_lease_failures_are_diagnosable_without_log_spam() {
     let root = tempfile::tempdir().unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
@@ -26,6 +34,11 @@ fn database_lock_and_background_lease_failures_are_diagnosable_without_log_spam(
 }
 
 #[test]
+/// 作为子进程执行指定故障场景，并把结果写入临时测试日志供父测试核对。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn error_logging_worker() {
     let Some(root) = std::env::var_os("VEIL_ERROR_LOG_TEST_ROOT") else {
         return;
@@ -184,6 +197,11 @@ fn error_logging_worker() {
 
 #[cfg(unix)]
 #[test]
+/// 验证存储变更部分失败时记录失败阶段和安全错误码，日志不包含用户路径或文件内容。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn failed_storage_mutation_records_stage_and_preserves_privacy() {
     let root = tempfile::tempdir().unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
@@ -202,6 +220,11 @@ fn failed_storage_mutation_records_stage_and_preserves_privacy() {
 
 #[cfg(unix)]
 #[test]
+/// 在子进程中触发指定的部分存储变更故障，用于验证恢复和诊断记录。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn partial_storage_mutation_worker() {
     let Some(root) = std::env::var_os("VEIL_PARTIAL_LOG_TEST_ROOT") else {
         return;
@@ -258,6 +281,11 @@ fn partial_storage_mutation_worker() {
 }
 
 #[test]
+/// 验证空间操作系统锁发生等待时留下诊断，未竞争的正常加锁不制造噪声日志。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn space_os_lock_wait_is_diagnosable_without_logging_uncontended_locks() {
     let root = tempfile::tempdir().unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
@@ -274,6 +302,11 @@ fn space_os_lock_wait_is_diagnosable_without_logging_uncontended_locks() {
 }
 
 #[test]
+/// 在隔离子进程中执行空间锁竞争场景，供父测试检查锁等待日志。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn space_os_lock_logging_worker() {
     let Some(root) = std::env::var_os("VEIL_SPACE_LOCK_LOG_TEST_ROOT") else {
         return;

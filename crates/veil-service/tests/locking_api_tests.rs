@@ -1,4 +1,8 @@
-//! 公开文件租约与容器操作共用数据库协议。
+//! 公开租约接口和容器读写操作共用锁协议的集成测试。
+//! 所属模块：veil-service 并发控制；覆盖容器、目录、文件范围及跨进程锁所有者。
+//! 核心内容：各范围互斥/共享测试，配合 shared_write_cross_process_worker、directory_lock_process_worker 和崩溃工作进程核对生命周期。
+//! 依赖能力：LockManager、容器数据库、VeilManager、临时目录、子进程与等待同步。
+//! 业务目标：确认冲突范围受到保护，同时允许无冲突访问，并验证失效或结束任务的租约回收。
 use std::time::Duration;
 use tempfile::TempDir;
 use veil_service::{
@@ -8,6 +12,11 @@ use veil_service::{
 };
 
 #[test]
+/// 验证容器级锁覆盖全部操作范围，且只读调用不会创建续期租约。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn container_lock_covers_every_scope_and_ro_has_no_lease() {
     let root = TempDir::new().unwrap();
     let veil = VeilManager::new(root.path().join("veil"));
@@ -37,6 +46,11 @@ fn container_lock_covers_every_scope_and_ro_has_no_lease() {
 }
 
 #[test]
+/// 验证共享写锁允许普通只读查询，但会阻止修改同一文件的读者和写者。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
     let root = TempDir::new().unwrap();
     let veil = VeilManager::new(root.path().join("veil")).with_lock_options(LockOptions {
@@ -146,6 +160,11 @@ fn shared_write_allows_ro_but_blocks_protected_readers_and_writers() {
 }
 
 #[test]
+/// 作为子进程尝试获取共享写锁，验证锁约束能跨进程生效。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn shared_write_cross_process_worker() {
     let Some(path) = std::env::var_os("VEIL_SW_TEST_PATH") else {
         return;
@@ -159,6 +178,11 @@ fn shared_write_cross_process_worker() {
 }
 
 #[test]
+/// 验证共享写锁降级后其他进程可按新读锁权限进入。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn shared_write_downgrade_works_across_processes() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("veil"));
@@ -195,6 +219,11 @@ fn shared_write_downgrade_works_across_processes() {
 }
 
 #[test]
+/// 验证目录锁按路径范围共享读取，并排斥重叠范围的写入。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_ranges_share_reads_and_exclude_overlapping_writes() {
     let root = TempDir::new().unwrap();
     let m = VeilManager::new(root.path().join("veil"));
@@ -233,6 +262,11 @@ fn directory_ranges_share_reads_and_exclude_overlapping_writes() {
 }
 
 #[test]
+/// 验证目录写锁阻止目标子树变更，但不影响无关目录操作。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_lock_blocks_mutations_and_allows_unrelated_directory() {
     let root = TempDir::new().unwrap();
     let base = root.path().join("veil");
@@ -298,6 +332,11 @@ fn directory_lock_blocks_mutations_and_allows_unrelated_directory() {
 }
 
 #[test]
+/// 作为子进程尝试目录锁定或修改，供父进程验证跨进程互斥。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_lock_process_worker() {
     let Some(root) = std::env::var_os("VEIL_DIRECTORY_LOCK_TEST_ROOT") else {
         return;
@@ -326,6 +365,11 @@ fn directory_lock_process_worker() {
 }
 
 #[test]
+/// 验证一个进程持有目录锁时另一个进程不能对同一范围写入。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn directory_lock_blocks_another_process() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("veil");
@@ -370,6 +414,11 @@ fn directory_lock_blocks_another_process() {
 }
 
 #[test]
+/// 模拟取得目录锁后异常结束的子进程。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn directory_lock_crash_worker() {
     let Some(root) = std::env::var_os("VEIL_DIRECTORY_CRASH_ROOT") else {
         return;
@@ -387,6 +436,11 @@ fn directory_lock_crash_worker() {
 }
 
 #[test]
+/// 验证锁所有者崩溃后租约可被回收，不会永久占住目录。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn crashed_directory_lock_owner_is_reclaimed() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("veil");
@@ -423,6 +477,11 @@ fn crashed_directory_lock_owner_is_reclaimed() {
     drop(guard);
 }
 #[test]
+/// 验证读锁可以共存、写锁互斥，批量获取失败不会留下部分锁。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn reads_share_writes_exclude_and_batch_failure_leaves_no_partial_locks() {
     let root = TempDir::new().unwrap();
     let m = VeilManager::new(root.path().join("veil"));
@@ -462,6 +521,11 @@ fn reads_share_writes_exclude_and_batch_failure_leaves_no_partial_locks() {
     assert!(!m.veil_dir.join(".locks").exists());
 }
 #[test]
+/// 验证锁交接后旧凭证失效，取消请求会被后台租约及时观察。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn handoff_rejects_old_credentials_and_cancellation_is_observed() {
     let root = TempDir::new().unwrap();
     let m = VeilManager::new(root.path().join("veil"));
@@ -494,6 +558,11 @@ fn handoff_rejects_old_credentials_and_cancellation_is_observed() {
 }
 
 #[test]
+/// 验证已结束任务的租约可提前回收，状态未知的任务仍需等待租约过期。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn completed_tasks_are_reclaimed_early_and_unknown_tasks_keep_their_lease() {
     use veil_service::execution::ExecutionOwner;
     let root = TempDir::new().unwrap();
@@ -525,6 +594,11 @@ fn completed_tasks_are_reclaimed_early_and_unknown_tasks_keep_their_lease() {
 }
 
 #[test]
+/// 验证容器复制期间读锁不妨碍读取，但会阻止所有写入。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn container_copy_read_lock_allows_reads_and_blocks_all_writes() {
     let root = TempDir::new().unwrap();
     let veil = VeilManager::new(root.path().join("veil")).with_lock_options(LockOptions { timeout: Some(Duration::from_millis(50)), cancellation: None });

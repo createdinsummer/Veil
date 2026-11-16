@@ -11,6 +11,10 @@ use veil_service::link::VeilLink;
 
 /// 验证初始化会创建工作区和可解析的链接文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_creates_work_and_link() {
     let env = TestEnv::new("test-password");
 
@@ -35,6 +39,10 @@ fn init_creates_work_and_link() {
 
 /// 验证同名容器使用不同 ID、目录和链接，且内容互相隔离。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn duplicate_veil_names_use_distinct_directories_and_links() {
     let env = TestEnv::new("test-password");
     let first_link = env.init("photos");
@@ -108,6 +116,10 @@ fn duplicate_veil_names_use_distinct_directories_and_links() {
 
 /// 验证添加、列表和信息命令都能接受链接路径。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn add_list_and_info_accept_link() {
     let env = TestEnv::new("test-password");
     let link = env.init("documents");
@@ -143,6 +155,10 @@ fn add_list_and_info_accept_link() {
 
 /// 验证 info 输出稳定容器 ID、实际容器大小、稳定排序和 MIME 分布。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn info_reports_identity_size_and_mime_distribution() {
     let env = TestEnv::new("test-password");
     let link = env.init("detailed-info");
@@ -187,6 +203,10 @@ fn info_reports_identity_size_and_mime_distribution() {
 
 /// 验证 list 使用容器展示名称并按虚拟路径稳定排序。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn list_uses_veil_name_and_stable_order() {
     let env = TestEnv::new("test-password");
     let link = env.init("ordered");
@@ -233,6 +253,10 @@ fn list_uses_veil_name_and_stable_order() {
 
 /// 验证重命名和删除会更新工作区元数据。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn rename_and_remove_use_work_metadata() {
     let env = TestEnv::new("test-password");
     let link = env.init("archive");
@@ -264,6 +288,10 @@ fn rename_and_remove_use_work_metadata() {
 
 /// 验证 rm 可以递归删除目录并规范化 `./` 路径。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn remove_recursively_deletes_directory() {
     let env = TestEnv::new("test-password");
     let link = env.init("remove-directory");
@@ -316,6 +344,10 @@ fn remove_recursively_deletes_directory() {
 
 /// 验证 free 按真实父子层级渲染标准树状连接线。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn free_renders_hierarchical_tree() {
     let env = TestEnv::new("test-password");
     let link = env.init("tree-view");
@@ -396,6 +428,10 @@ fn free_renders_hierarchical_tree() {
 
 /// 验证 mv 支持文件移动、目录重命名、冲突拒绝和循环移动保护。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn move_files_and_directories() {
     let env = TestEnv::new("test-password");
     let link = env.init("move");
@@ -509,6 +545,10 @@ fn move_files_and_directories() {
 
 /// 验证导出文件与原始内容逐字节一致。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn export_round_trip() {
     let env = TestEnv::new("test-password");
     let link = env.init("exports");
@@ -531,6 +571,10 @@ fn export_round_trip() {
 
 /// 验证导出会自动创建缺失的输出父目录。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn export_creates_missing_parent_directories() {
     let env = TestEnv::new("test-password");
     let link = env.init("export-parent");
@@ -553,6 +597,10 @@ fn export_creates_missing_parent_directories() {
 
 /// 验证错误密码会使容器访问失败。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn wrong_password_is_rejected() {
     let env = TestEnv::new("correct-password");
     let link = env.init("secure");
@@ -566,6 +614,10 @@ fn wrong_password_is_rejected() {
 
 /// 验证默认修改密码只重保护元数据，旧密码失效且新密码可以访问原文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn change_password_default_updates_metadata_only() {
     let env = TestEnv::new("old-password");
     let link = env.init("rotate");
@@ -596,6 +648,10 @@ fn change_password_default_updates_metadata_only() {
 
 /// 验证 `--full` 会轮换数据密钥并保持文件可读。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn passwd_full_reencrypts_work() {
     let env = TestEnv::new("old-password");
     let link = env.init("full-rekey");
@@ -631,6 +687,10 @@ fn passwd_full_reencrypts_work() {
 
 /// 验证 passwd 选项形式、错误旧密码和空新密码。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn passwd_options_and_failures_are_safe() {
     let env = TestEnv::new("old-password");
     let link = env.init("passwd-options");
@@ -692,6 +752,10 @@ fn passwd_options_and_failures_are_safe() {
 
 /// 验证新密码环境变量与旧密码环境变量相互独立。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn passwd_uses_separate_new_password_environment_variable() {
     let env = TestEnv::new("old-password");
     let link = env.init("passwd-env");
@@ -715,6 +779,10 @@ fn passwd_uses_separate_new_password_environment_variable() {
 
 /// 验证打包再解包后可通过新链接读取原文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn pack_and_unpack_create_reusable_links() {
     let env = TestEnv::new("test-password");
     let link = env.init("package");
@@ -790,6 +858,10 @@ fn pack_and_unpack_create_reusable_links() {
 
 /// 验证错误密码和损坏包不会留下工作区或链接。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn unpack_failures_roll_back_artifacts() {
     let env = TestEnv::new("test-password");
     let link = env.init("package-source");
@@ -848,6 +920,10 @@ fn unpack_failures_roll_back_artifacts() {
 
 /// 验证目标路径支持覆盖容器内名称。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn add_honors_destination_path() {
     let env = TestEnv::new("test-password");
     let link = env.init("destination");
@@ -910,6 +986,10 @@ fn add_honors_destination_path() {
 
 /// 验证目录递归添加并保持相对路径。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn add_recursively_imports_directories() {
     let env = TestEnv::new("test-password");
     let link = env.init("directory");
@@ -951,6 +1031,10 @@ fn add_recursively_imports_directories() {
 
 /// 验证重复添加同名文件会替换旧条目而不是累积重复项。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn add_replaces_existing_file() {
     let env = TestEnv::new("test-password");
     let link = env.init("replace");
@@ -992,6 +1076,10 @@ fn add_replaces_existing_file() {
 
 /// 验证错误密码不会留下新的密文文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn add_with_wrong_password_does_not_write_ciphertext() {
     let env = TestEnv::new("test-password");
     let link = env.init("wrong-password-add");
@@ -1015,6 +1103,9 @@ fn add_with_wrong_password_does_not_write_ciphertext() {
 
 /// 验证 exists 能区分文件、隐式目录和不存在路径，并返回脚本可用的退出码。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn exists_reports_file_directory_and_missing_path() {
     let env = TestEnv::new("test-password");
     let link = env.init("exists");
@@ -1060,6 +1151,10 @@ fn exists_reports_file_directory_and_missing_path() {
 
 /// 验证不存在的容器会以失败状态退出并给出明确提示。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn nonexistent_veil_fails_cleanly() {
     let env = TestEnv::new("test-password");
 
@@ -1070,7 +1165,11 @@ fn nonexistent_veil_fails_cleanly() {
         .stderr(predicate::str::contains("容器未找到"));
 }
 
-/// 统计默认工作区中单个容器的密文文件数量。
+/// 统计测试默认空间各一级子目录内扩展名为 enc 的目录项总数。
+/// 入参：env（&TestEnv）为含隔离 app 目录的测试夹具。
+/// 返回值：usize，各容器候选目录中的 enc 扩展名条目数总和，并不限定单个容器。
+/// 异常：AppStore 打开、默认空间查询/路径缺失、目录枚举初始化失败会 unwrap panic；枚举过程中单项错误被忽略。
+/// 注意事项：只根据路径和扩展名统计，不检查数据库引用或确认每项是普通文件；扩展名为 enc 的目录也会计入。
 fn encrypted_file_count(env: &TestEnv) -> usize {
     let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
         .unwrap()
@@ -1099,7 +1198,11 @@ fn encrypted_file_count(env: &TestEnv) -> usize {
         .sum()
 }
 
-/// 统计默认工作区中的容器目录数量。
+/// 统计测试默认空间中第一层目录项数量，作为容器创建回滚检查的近似指标。
+/// 入参：env（&TestEnv）提供隔离本机 app 目录。
+/// 返回值：usize，第一层 is_dir 条目数；根目录无法枚举时返回 0。
+/// 异常：AppStore 打开、默认空间查询或 local_path 缺失会 panic，单条枚举错误被忽略。
+/// 注意事项：不读取目录中的 veil.db 或容器登记，非容器目录也会计入；读取失败返回 0 不能证明确实没有目录。
 fn default_veil_count(env: &TestEnv) -> usize {
     let work_root = veil_service::storage::app::AppStore::open(&env.home.path().join("app"))
         .unwrap()
@@ -1117,6 +1220,11 @@ fn default_veil_count(env: &TestEnv) -> usize {
 }
 
 #[test]
+/// 验证发现内容相同也必须由用户明确选择跳过或覆盖，避免静默处理导入冲突。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn add_requires_explicit_choice_even_for_identical_content() {
     let env = TestEnv::new("test-password");
     let link = env.init("conflict-choice");
@@ -1162,6 +1270,11 @@ fn add_requires_explicit_choice_even_for_identical_content() {
 }
 
 #[test]
+/// 验证排队导出等待用户逐项决策，跳过目标的已有输出文件保持原样。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn queued_export_requires_explicit_choices_and_preserves_skipped_output() {
     let env = TestEnv::new("test-password");
     let link = env.init("queued-export");
@@ -1223,6 +1336,11 @@ fn queued_export_requires_explicit_choices_and_preserves_skipped_output() {
 }
 
 #[test]
+/// 验证目录导入把源目录映射到目标路径，并把分批处理结果完整提交。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn queued_folder_import_maps_target_and_exports_all_batches() {
     let env = TestEnv::new("test-password");
     let link = env.init("queued-folder");
@@ -1259,6 +1377,11 @@ fn queued_folder_import_maps_target_and_exports_all_batches() {
 }
 
 #[test]
+/// 验证导入空目录仍按 CLI 约定成功完成，不把合法空批次误报为错误。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn queued_import_of_an_empty_folder_keeps_the_cli_success_contract() {
     let env = TestEnv::new("test-password");
     let link = env.init("queued-empty");

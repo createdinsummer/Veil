@@ -1,4 +1,8 @@
-//! 多进程文件写入与配置提交。
+//! 多进程同时写入容器、版本校验及写入中断的集成测试。
+//! 所属模块：veil-service 容器并发提交；检查版本保存、冲突拒绝和最后确认版本的恢复。
+//! 核心函数：process_worker/checked_process_worker 执行并发写入；interrupted_writer_worker 提供可终止写入流程；父测试组织竞争与结果断言。
+//! 依赖能力：VeilManager、VersionSnapshot、测试 KDF、临时目录、子进程和阶段同步文件。
+//! 业务目标：确认并发操作不丢失已经提交的内容，并验证终止写入者后的锁回收。
 
 use std::fs;
 use std::process::{Command, Stdio};
@@ -9,6 +13,11 @@ use veil_core::version::VersionSnapshot;
 use veil_service::veil_ops::{AddFileSpec, VeilManager};
 
 #[test]
+/// 子进程执行指定容器修改，用于验证数据库锁和事务能跨进程协调。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn process_worker() {
     let Some(root) = std::env::var_os("VEIL_CONCURRENCY_ROOT") else {
         return;
@@ -49,6 +58,11 @@ fn process_worker() {
 }
 
 #[test]
+/// 按场景执行带冲突检查的子进程更新，输出结果供并发断言比较。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn checked_process_worker() {
     let Some(root) = std::env::var_os("VEIL_CHECKED_ROOT") else {
         return;
@@ -84,6 +98,11 @@ fn checked_process_worker() {
 }
 
 #[test]
+/// 验证多个进程基于同一旧版本编辑时只有一个提交成功，其他操作得到冲突。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn concurrent_checked_processes_only_commit_one_edit() {
     kdf::enable_fast_test_kdf();
     let root = TempDir::new().unwrap();
@@ -140,6 +159,11 @@ fn concurrent_checked_processes_only_commit_one_edit() {
 }
 
 #[test]
+/// 验证并发更新不会覆盖同一文件历史版本，且不同文件的写入均保留。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn concurrent_processes_preserve_same_file_versions_and_distinct_files() {
     kdf::enable_fast_test_kdf();
     let root = TempDir::new().unwrap();
@@ -193,6 +217,11 @@ fn concurrent_processes_preserve_same_file_versions_and_distinct_files() {
 }
 
 #[test]
+/// 作为可被终止的写进程执行长时间容器更新。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn interrupted_writer_worker() {
     let Some(root) = std::env::var_os("VEIL_CRASH_TEST_ROOT") else {
         return;
@@ -209,6 +238,11 @@ fn interrupted_writer_worker() {
 }
 
 #[test]
+/// 验证强制终止写进程后最后一次提交的数据仍完整，锁不会永久滞留。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn killing_writer_keeps_last_committed_file_and_releases_lock() {
     kdf::enable_fast_test_kdf();
     let root = TempDir::new().unwrap();

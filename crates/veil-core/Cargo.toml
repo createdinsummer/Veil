@@ -1,29 +1,49 @@
+# 文件作用：声明 veil-core 底层库及密码派生、认证加密、日志、JSONC、文件系统和加密数据库依赖。
+# 所属模块：跨客户端公共能力；业务编排由 veil-service 完成，这里配置库构建而不执行容器操作。
 [package]
 name = "veil-core"
 edition.workspace = true # 从工作空间继承edition
 version.workspace = true # 从工作空间继承version
 rust-version = "1.89" # 标准库文件锁接口所需的最低 Rust 版本
 
+# fault-injection 暴露测试故障钩子；默认不开启，不在此定义运行时故障行为。
 [features]
 fault-injection = []
 
 [dependencies]
+# 数据库连接复用池，减少重复打开连接的成本。
 r2d2 = "0.8.10"
+# SQLite/SQLCipher 绑定；精确版本搭配内置 SQLCipher、随附 OpenSSL 和备份接口，构建可能需要本机 C 工具链。
 rusqlite = { version = "=0.38.0", features = ["bundled-sqlcipher-vendored-openssl", "backup"] }
+# 按配置参数从口令派生密钥；依赖本身不表示所有调用使用同一强度。
 argon2 = "0.5"
+# 字节内容和结构摘要计算，不用于替代口令派生。
 blake3 = "1.8.5"
+# 提供带认证标签的对称加解密，读出时同时检测密文完整性。
 chacha20poly1305 = "0.10"
+# 时间戳解析与格式化。
 chrono = "0.4"
+# 解析平台用户数据等目录位置。
 dirs = "5.0"
+# 向系统请求随机字节，用于密钥、盐及凭证材料。
 getrandom = "0.2"
+# 二进制与十六进制字符串转换。
 hex = "0.4"
+# 读取带注释 JSON，启用语法树与 serde 互操作能力。
 jsonc-parser = { version = "0.34", features = ["cst", "serde", "serde_json"] }
+# 模型序列化/反序列化，derive 生成类型实现。
 serde = { version = "1.0.228", features = ["derive"] }
+# JSON 值与文本/字节编解码。
 serde_json = "1.0"
+# 文本匹配和固定规则过滤，不自动保证任意日志内容都已脱敏。
 regex = "1.12"
+# 临时文件/目录管理，析构尽力清理，不等价于强制终止后的全面恢复。
 tempfile = "3.8"
+# 为错误枚举生成错误说明和来源链实现。
 thiserror = "2.0.18"
+# 主动擦除指定拥有型内存，不会自动清除所有借用、复制或系统缓存。
 zeroize = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
+# Unix 系统调用绑定，仅在 unix 目标编译。
 libc = "0.2"

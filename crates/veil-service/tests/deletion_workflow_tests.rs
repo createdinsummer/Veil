@@ -1,8 +1,17 @@
-//! 空间、容器、文件夹和文件删除的端到端流程。
+//! 空间、容器、文件夹和文件删除的服务入口集成测试。
+//! 所属模块：veil-service 删除工作流；通过 ServiceRequest 验证业务对象删除后的可见状态。
+//! 核心函数：deletion_flow_in_isolated_home 创建隔离子进程；deletion_flow_worker 执行完整删除链路及断言。
+//! 依赖能力：VeilService 请求/响应、临时 HOME、子进程和文件系统。
+//! 业务目标：确认不同层级删除作用于正确对象，环境隔离由父子进程配置完成。
 use std::path::Path;
 use veil_service::{ServiceRequest, ServiceResponse, VeilService};
 
 #[test]
+/// 验证容器和空间删除流程仅影响隔离 HOME 中登记的数据。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn deletion_flow_in_isolated_home() {
     let root = tempfile::TempDir::new().unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -20,6 +29,11 @@ fn deletion_flow_in_isolated_home() {
 }
 
 #[test]
+/// 在子进程中执行删除流程并报告结果，供父测试检查磁盘和数据库状态。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn deletion_flow_worker() {
     let Some(root) = std::env::var_os("VEIL_DELETE_TEST_ROOT") else {
         return;

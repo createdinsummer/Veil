@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# 构建 macOS SwiftUI 客户端和 DMG 安装包。
+# Veil macOS 桌面应用和 DMG 构建流程。
+# 所属模块：原生桌面端发布；先编译 Rust bridge 和 SwiftUI 应用，再组装、签名并校验 DMG。
+# 核心变量：CONFIGURATION 决定 debug / release；PROJECT_ROOT、APP_DIR 定位项目；STAGING 隔离临时打包内容；OUTPUT 保存最终镜像与校验和。
+# 依赖 macOS、Xcode 命令行工具、Rust、Swift、DMG 工具和代码签名工具。业务目标是产出可拖入 Applications 的安装镜像，并在退出时清理临时副本。
+# 失败即退出，保留已完成的构建缓存；EXIT trap 只在 staging 创建并登记之后负责该临时目录。
 set -euo pipefail
 
+# 默认生成发布版本；参数检查后所有工具复用该配置。
 CONFIGURATION="release"
 case "${1:-}" in
     "") ;;
@@ -15,6 +20,7 @@ esac
 if [[ $# -gt 1 || "$(uname -s)" != "Darwin" ]]; then
     printf '此脚本用于 macOS，且最多接受一个参数。\n' >&2; exit 1
 fi
+# 逐一检查此列表中的命令能否从 PATH 找到，不验证版本或 Xcode SDK 可用性；cmp、cp、awk 等系统命令未逐项列入。
 for tool in cargo swift xcrun python3 otool install_name_tool codesign hdiutil shasum; do
     command -v "$tool" >/dev/null 2>&1 || { printf '缺少构建工具：%s\n' "$tool" >&2; exit 1; }
 done
@@ -23,17 +29,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 APP_DIR="$PROJECT_ROOT/apps/veil-macos"
 PACKAGING_DIR="$APP_DIR/packaging"
+# 固定路径的 Python 虚拟环境缓存 DMG 工具，各次运行共用；不是每次构建的独立临时目录。
 DMG_TOOLS="$APP_DIR/.build/dmg-tools"
 if [[ ! -x "$DMG_TOOLS/bin/python" ]]; then
     python3 -m venv "$DMG_TOOLS"
 fi
+# 需求文件与上次成功安装的副本不同时才执行 pip；可能需要联网，文件相同不代表环境内包一定完整。
 if ! cmp -s "$PACKAGING_DIR/requirements-mac.txt" "$DMG_TOOLS/requirements.txt"; then
     printf '准备 DMG 布局工具…\n'
     "$DMG_TOOLS/bin/python" -m pip install --disable-pip-version-check -r "$PACKAGING_DIR/requirements-mac.txt"
     cp "$PACKAGING_DIR/requirements-mac.txt" "$DMG_TOOLS/requirements.txt"
 fi
+# 从 Web 设计源同步原生资源，可能改写工作区文件，不属于只读构建检查。
 python3 "$PROJECT_ROOT/ui/tools/sync-macos.py"
+# 通过 Cargo 元数据读取实际 target_directory，比自行拼接默认 target 更能兼容自定义缓存目录。
 TARGET_DIR="$(cargo metadata --manifest-path "$PROJECT_ROOT/Cargo.toml" --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+# Rust 参数数组每项是一个独立命令行参数，release 添加 --release，debug 保持空数组。
 RUST_ARGS=()
 [[ "$CONFIGURATION" != "release" ]] || RUST_ARGS+=(--release)
 
@@ -42,6 +53,8 @@ cargo build --manifest-path "$PROJECT_ROOT/Cargo.toml" -p veil-macos-bridge "${R
 export VEIL_RUST_LIB_DIR="$TARGET_DIR/$CONFIGURATION"
 export CLANG_MODULE_CACHE_PATH="$APP_DIR/.build/clang-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$APP_DIR/.build/swift-cache"
+# Swift 参数数组集中复用包路径、缓存位置和配置；第二次调用只查询该配置的可执行文件目录。
+# --disable-sandbox 关闭 SwiftPM 构建沙盒，不改变应用运行时沙盒或文件访问权限。
 SWIFT_ARGS=(--package-path "$APP_DIR" --scratch-path "$APP_DIR/.build/swift" --cache-path "$APP_DIR/.build/cache" --config-path "$APP_DIR/.build/config" --security-path "$APP_DIR/.build/security" --disable-sandbox -c "$CONFIGURATION")
 printf '\n构建 SwiftUI 客户端…\n'
 swift build "${SWIFT_ARGS[@]}"
@@ -49,6 +62,7 @@ BIN_DIR="$(swift build "${SWIFT_ARGS[@]}" --show-bin-path)"
 
 OUTPUT="$PROJECT_ROOT/release/desktop"
 mkdir -p "$PROJECT_ROOT/release"
+# 在输出目录旁使用临时 staging，确保最终 mv 与镜像位于同一卷。
 STAGING="$(mktemp -d "$OUTPUT-staging.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
 IMAGE_ROOT="$STAGING/image"
@@ -58,18 +72,22 @@ cp "$BIN_DIR/VeilMac" "$BUNDLE/Contents/MacOS/VeilMac"
 cp "$VEIL_RUST_LIB_DIR/libveil_macos_bridge.dylib" "$BUNDLE/Contents/Frameworks/"
 cp "$APP_DIR/Info.plist" "$BUNDLE/Contents/Info.plist"
 cp "$APP_DIR/Assets/Veil.icns" "$BUNDLE/Contents/Resources/Veil.icns"
+# 每轮一个 SwiftPM 资源 bundle 目录，复制到 .app 资源区；没有匹配时 glob 文本经目录检查跳过。
 for resource in "$BIN_DIR/"*.bundle; do
     [[ ! -d "$resource" ]] || cp -R "$resource" "$BUNDLE/Contents/Resources/"
 done
 
+# 将 Rust bridge 的动态库安装名改成 app bundle 内的相对路径，再对 bundle 进行签名验证。
 LIBRARY_NAME="$(otool -L "$BUNDLE/Contents/MacOS/VeilMac" | awk '/libveil_macos_bridge.dylib/{print $1; exit}')"
 install_name_tool -id '@rpath/libveil_macos_bridge.dylib' "$BUNDLE/Contents/Frameworks/libveil_macos_bridge.dylib"
 install_name_tool -change "$LIBRARY_NAME" '@rpath/libveil_macos_bridge.dylib' "$BUNDLE/Contents/MacOS/VeilMac"
 install_name_tool -delete_rpath "$VEIL_RUST_LIB_DIR" "$BUNDLE/Contents/MacOS/VeilMac"
+# 使用 ad-hoc 本地签名（sign -），不是 Developer ID 发布签名，也没有执行 Apple 公证。
 codesign --force --sign - "$BUNDLE/Contents/Frameworks/libveil_macos_bridge.dylib"
 codesign --force --sign - "$BUNDLE"
 codesign --verify --deep --strict "$BUNDLE"
 
+# 版本号来自 Info.plist；DMG 文件名同时标识应用版本和当前 CPU 架构。
 VERSION="$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["CFBundleShortVersionString"])' "$APP_DIR/Info.plist")"
 DMG_NAME="Veil_${VERSION}_$(uname -m)"
 [[ "$CONFIGURATION" != "debug" ]] || DMG_NAME="${DMG_NAME}_debug"
@@ -79,10 +97,13 @@ xcrun swift -module-cache-path "$APP_DIR/.build/swift-cache" "$PACKAGING_DIR/dmg
 "$DMG_TOOLS/bin/dmgbuild" -s "$PACKAGING_DIR/dmg-layout-mac.py" \
     -D "app=$BUNDLE" -D "background=$STAGING/background.tiff" -D "icon=$APP_DIR/Assets/Veil.icns" \
     Veil "$STAGING/$DMG_NAME"
+# 校验磁盘镜像结构，再生成镜像字节的 SHA-256；不是运行安装后的应用功能测试。
 hdiutil verify "$STAGING/$DMG_NAME"
 (cd "$STAGING" && shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256")
 
 mkdir -p "$OUTPUT"
+# 覆盖相同名称的已有发布文件；镜像和校验文件逐个移动，不构成两文件一起成功的原子事务。
+# 固定输出和工具缓存没有互斥锁，同配置并发打包可能相互覆盖。
 mv -f "$STAGING/$DMG_NAME" "$STAGING/$DMG_NAME.sha256" "$OUTPUT/"
 # 应用本体留在临时目录，由退出清理处理；同时清理旧脚本遗留的副本。
 rm -rf "$OUTPUT/Veil.app"

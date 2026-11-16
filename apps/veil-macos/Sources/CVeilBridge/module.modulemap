@@ -1,5 +1,11 @@
+// 文件作用：为 Clang/Swift 声明 CVeilBridge 模块，属于 macOS 跨语言构建适配。
+// 核心声明：桥接头、原生库链接名和公开符号导出；依赖 veil_bridge.h 与已构建的 veil_macos_bridge 库。
+// 目标是让 Swift import CVeilBridge 获得 C 函数声明；不生成 Rust 库，也不定义服务实例或执行文件业务。
 module CVeilBridge {
+    // 头文件包含句柄、缓冲区和函数签名；指针所有权契约仍由接口注释约定。
     header "veil_bridge.h"
+    // 向链接器请求同名库；实际搜索路径和运行时路径由 Package.swift 及打包脚本配置。
     link "veil_macos_bridge"
+    // 将该模块头文件声明整体公开给导入方，不代表 Rust 内部类型布局公开。
     export *
 }

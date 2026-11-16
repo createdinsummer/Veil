@@ -1,3 +1,8 @@
+<!-- 文件作用：桌面 Web 原型的静态挂载入口，所属模块为 UI 设计预览。 -->
+<!-- 核心节点：app 承载当前页面，modal/toast 承载反馈，viewport/page-state 控制演示画布和状态。 -->
+<!-- 依赖：tokens.css 在基础样式前加载；defer 脚本按图标、token 数据、控制器顺序在 HTML 解析后执行。 -->
+<!-- 目标：展示共享设计和示例交互，不提供 Rust 服务连接或持久化；DOM ID 被控制器直接引用，修改时须同步脚本。 -->
+<!-- Veil 桌面 Web 界面设计稿入口；加载共享设计 token / 图标和 prototype.js，所有交互只操作示例数据。 -->
 <!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -14,6 +19,7 @@
   <script defer src="prototype.js"></script>
 </head>
 <body>
+  <!-- 设计稿导航与主题切换；链接通过 data-page 切换下方示例页面。 -->
   <header class="review-header">
     <a class="review-brand" href="#home"><img src="assets/brand.png" alt=""><span>veil <small>DESIGN</small></span></a>
     <nav class="review-nav" aria-label="设计页面">
@@ -26,6 +32,7 @@
     </nav>
     <button class="review-icon" data-action="theme" aria-label="切换深色外观" title="切换明暗外观"></button>
   </header>
+  <!-- 画布尺寸、示例状态和重置控制，仅影响预览外壳。 -->
   <div class="review-controls">
     <p><span class="review-dot"></span>交互设计稿 <span class="review-divider">/</span> 仅使用示例数据</p>
     <div class="review-settings">
@@ -34,12 +41,15 @@
       <button class="review-reset" data-action="reset">重置示例</button>
     </div>
   </div>
+  <!-- 原型应用显示区域；prototype.js 将当前页面写入 app 容器。 -->
   <main class="stage-scroll" aria-label="设计预览">
     <div class="design-frame" id="design-frame">
       <div class="app-shell" id="app"></div>
     </div>
   </main>
+  <!-- 设计稿说明与 token 源数据入口。 -->
   <footer class="review-footer"><span>统一视觉，遵循平台交互习惯。</span><a href="tokens.json" target="_blank" rel="noopener">查看设计参数 JSON <span aria-hidden="true">↗</span></a></footer>
+  <!-- JavaScript 共用的确认 / 提示弹窗容器。 -->
   <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <noscript><p class="no-script">此设计稿需要 JavaScript 才能切换页面与展示交互。</p></noscript>

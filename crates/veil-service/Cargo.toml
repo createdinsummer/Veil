@@ -4,24 +4,39 @@ edition.workspace = true
 version.workspace = true
 rust-version = "1.89"
 
+# 特性开关：开启后可注入时钟偏移、故障点等测试钩子（只用于测试验证）。
 [features]
 fault-injection = ["veil-core/fault-injection"]
 
 [dependencies]
+# SQLite 数据库访问；backup 特性用于打包时生成数据库一致快照。
 rusqlite = { version = "=0.38.0", features = ["backup"] }
+# 临时目录：解包/导入等流程的暂存区。
 tempfile = "3.8"
+# 底层能力库：SQLCipher 连接、流式文件加密、版本比较、执行身份等。
 veil-core = { path = "../veil-core" }
+# 结构指纹：数据库表结构校验（verify_schema）用 BLAKE3 哈希比较。
 blake3 = "1.8.5"
+# 时间处理：UTC 毫秒时间戳与 RFC3339 格式互转。
 chrono = "0.4"
+# 平台应用数据目录定位：桌面端与 CLI 的默认数据目录策略。
 dirs = "5.0"
+# 随机数：生成文件密钥、锁令牌与查询端点访问凭证。
 getrandom = "0.2"
+# 十六进制编码：密钥材料与访问凭证的统一编码格式。
 hex = "0.4"
+# 序列化：数据库 JSON 字段与传输报文的（反）序列化，derive 用于业务模型。
 serde = { version = "1", features = ["derive"] }
+# JSON 值处理：设置/本机记录的 JSON 读写与校验。
 serde_json = "1"
+# 错误类型派生：服务层各模块的结构化错误枚举。
 thiserror = "2"
+# 目录递归遍历：导入文件时展开本地目录树。
 walkdir = "2"
+# 敏感数据擦除：清理显式使用 Zeroizing/zeroize 的自有缓冲，不覆盖所有口令副本。
 zeroize = "1.9.0"
 
 [dev-dependencies]
+# 测试用 core：开启故障注入特性验证恢复路径。
 veil-core = { path = "../veil-core", features = ["fault-injection"] }
 tempfile = "3.8"

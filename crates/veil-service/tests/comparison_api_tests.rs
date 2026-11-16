@@ -1,3 +1,6 @@
+//! 比较服务公开接口的集成测试。
+//! 所属模块：跨容器 / 外部文件内容比对；验证哈希、内容、版本三类检查组合及不确定结果。
+//! 测试会创建隔离容器和临时文件，确认比较操作不把缺失元数据误判为相同。
 use tempfile::TempDir;
 use veil_core::{database::CONTAINER_DB, version::VersionSnapshot};
 use veil_service::{
@@ -6,6 +9,10 @@ use veil_service::{
 };
 
 #[test]
+/// 验证密文、明文和外部文件的各类输入组合能按请求的检查项返回正确状态。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn all_input_combinations_support_selected_checks_and_missing_versions() {
     let root = TempDir::new().unwrap();
     let a = VeilManager::new(root.path().join("a"));
@@ -111,6 +118,11 @@ fn all_input_combinations_support_selected_checks_and_missing_versions() {
 }
 
 #[test]
+/// 验证容器缺少摘要缓存时仍可解密内容完成比较，且普通读取不会写入摘要缓存。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn missing_container_file_hash_falls_back_to_decrypted_content() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("veil"));
@@ -152,6 +164,11 @@ fn missing_container_file_hash_falls_back_to_decrypted_content() {
 }
 
 #[test]
+/// 验证空文件仍参与比较，并且密文损坏会被识别为错误而非相同内容。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn empty_content_is_compared_and_corruption_is_detected() {
     let root = TempDir::new().unwrap();
     let manager = VeilManager::new(root.path().join("veil"));
@@ -191,6 +208,11 @@ fn empty_content_is_compared_and_corruption_is_detected() {
 }
 
 #[test]
+/// 验证冲突结果能区分路径冲突、文件内容状态和因缺少信息无法执行的检查。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn conflict_entries_distinguish_paths_files_and_unavailable_checks() {
     use veil_service::comparison::{check_file_conflict, check_path_conflict};
     #[cfg(debug_assertions)]
@@ -246,6 +268,11 @@ fn conflict_entries_distinguish_paths_files_and_unavailable_checks() {
 }
 
 #[test]
+/// 验证只请求元数据时按容器身份和版本比较，不额外读取文件内容。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn metadata_inputs_compare_identity_and_versions_without_reading_content() {
     let base = VersionSnapshot {
         veil_id: "container".into(),

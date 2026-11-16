@@ -1,16 +1,18 @@
+# 文件作用：定义 Veil 多包工作区及共享发布构建配置；本身不是可发布 Rust 包。
+# 成员覆盖底层能力、服务、CLI、口令测试、长截图和原生桥接；依赖 Cargo 解析与构建各成员。
+# workspace.package 仅为显式选择 workspace=true 的成员字段提供共享值，不强制覆盖成员自定义版本或语言版次。
 [workspace] # 工作空间配置 声明「这不是一个包,而是一组包的容器」
 resolver = "3" # 依赖版本解析器的算法版本
 # 成员名单
 members = ["crates/veil-core", "crates/veil-service", "crates/veil-cli", "crates/veil-brute-force", "crates/veil-scrollshot", "crates/veil-macos-bridge"]
 
-# 工作空间包配置
-# 用于定义工作空间包的默认配置，如edition、version等
-# 共享元数据。子 crate 写 edition.workspace = true 就来这里取,改一处全员生效,不用每个 crate 维护一遍。
+# 共享包元数据：例如 edition.workspace=true 的成员继承这里，桥接包等自定义值仍独立维护。
 [workspace.package]
 edition = "2024"
 version = "2.0.0"
 
-# 发布构建配置
+# 发布 profile 作用于工作区构建：优化级别、跨模块优化及代码生成单元影响编译耗时、体积和性能。
+# 实际效果依赖代码与编译器，不能保证每个选项都使二进制更小或运行更快。
 [profile.release]
 opt-level = 3 # 优化等级 3 表示最高优化
 lto = "thin" # 开启 thin LTO 优化 跨 crate 内联,体积/速度更好,thin 是「省时版」。

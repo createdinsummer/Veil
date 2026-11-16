@@ -1,4 +1,9 @@
 //! 主 CLI 参数、帮助、链接和便携工作区集成测试。
+//!
+//! 所属业务模块：veil-cli 的端到端验证。文件内通过 TestEnv 启动真实 `veil` 子进程，
+//! 覆盖命令参数、本地化错误、工作区配置、容器链接、打包/解包及标准输出异常等场景。
+//! 依赖 assert_cmd 管理子进程、predicates 检查输出，并复用 veil-service 的配置与链接类型。
+//! 整体目标是从用户实际调用命令的角度，确认 CLI 与服务层协作后产生正确的业务结果。
 
 mod common;
 
@@ -8,6 +13,10 @@ use predicates::prelude::*;
 
 /// 命名工作区按配置目录及相对路径完成初始化、名称访问和解包。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn named_work_uses_config_relative_location() {
     let env = TestEnv::new("test-password");
     env.init("default-demo");
@@ -87,6 +96,10 @@ fn named_work_uses_config_relative_location() {
 
 /// 验证顶层帮助包含全部工作区命令。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn help_lists_work_model_commands() {
     Command::cargo_bin("veil")
         .unwrap()
@@ -104,6 +117,10 @@ fn help_lists_work_model_commands() {
 
 /// 验证版本输出与 work 发布版本一致。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn version_matches_work_release() {
     Command::cargo_bin("veil")
         .unwrap()
@@ -116,6 +133,9 @@ fn version_matches_work_release() {
 /// 验证输出管道提前关闭时返回稳定 I/O 错误，而不是 panic。
 #[cfg(unix)]
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn broken_stdout_pipe_is_reported_without_panic() {
     use std::os::fd::FromRawFd;
     use std::process::Stdio;
@@ -145,6 +165,10 @@ fn broken_stdout_pipe_is_reported_without_panic() {
 
 /// 验证 `init` 帮助明确区分命名工作区和显式路径。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_help_describes_work_options() {
     Command::cargo_bin("veil")
         .unwrap()
@@ -162,6 +186,9 @@ fn init_help_describes_work_options() {
 
 /// 验证未知参数使用本地化提示，而不是 clap 的英文建议。
 #[test]
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_rejects_unknown_option_with_localized_error() {
     let env = TestEnv::new("test-password");
 
@@ -179,6 +206,9 @@ fn init_rejects_unknown_option_with_localized_error() {
 
 /// 验证互斥密码参数使用本地化提示。
 #[test]
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_rejects_password_conflict_with_localized_error() {
     let env = TestEnv::new("test-password");
 
@@ -195,6 +225,10 @@ fn init_rejects_password_conflict_with_localized_error() {
 
 /// 验证初始化可使用自定义链接路径。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_accepts_custom_link_path() {
     let env = TestEnv::new("test-password");
     let custom_link = env.work.path().join("project/photos.veil-link");
@@ -223,6 +257,10 @@ fn init_accepts_custom_link_path() {
 
 /// 验证多个链接可以指向同一工作区并共享内容。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn multiple_links_can_target_the_same_work() {
     let env = TestEnv::new("test-password");
     let primary_link = env.init("shared");
@@ -253,6 +291,10 @@ fn multiple_links_can_target_the_same_work() {
 
 /// 验证普通命令接受名称、ID 和显式链接，但拒绝直接工作区目录。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn veil_selector_accepts_name_id_and_link_only() {
     let env = TestEnv::new("test-password");
     let link = env.init("selector");
@@ -295,6 +337,10 @@ fn veil_selector_accepts_name_id_and_link_only() {
 
 /// 配置缺失时没有已登记工作区，所有入口均报告未找到且不创建配置。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn missing_config_does_not_use_link_location_or_create_config() {
     let env = TestEnv::new("test-password");
     let link = env.init("configless");
@@ -326,6 +372,10 @@ fn missing_config_does_not_use_link_location_or_create_config() {
 
 /// 验证主 CLI 支持创建专属工作区容器。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn dedicated_work_init_is_available_from_main_cli() {
     let env = TestEnv::new("test-password");
     let work = env.work.path().join("dedicated-volume");
@@ -360,6 +410,10 @@ fn dedicated_work_init_is_available_from_main_cli() {
 
 /// 验证同名容器由不同 `veil_id` 区分且内容互不干扰。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn duplicate_veil_names_are_distinguished_by_veil_id() {
     let env = TestEnv::new("test-password");
     let first_work = env.work.path().join("disk-a");
@@ -424,6 +478,10 @@ fn duplicate_veil_names_are_distinguished_by_veil_id() {
 
 /// 本机的便携选项仍使用固定的本机配置和默认工作区。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn portable_mode_uses_fixed_local_config() {
     let env = TestEnv::new("test-password");
     let portable_dir = env.work.path().join("portable");
@@ -475,6 +533,10 @@ fn portable_mode_uses_fixed_local_config() {
 
 /// 验证文件类型帮助在英文环境下可用。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn help_files_is_available_in_english() {
     Command::cargo_bin("veil")
         .unwrap()
@@ -488,6 +550,9 @@ fn help_files_is_available_in_english() {
 
 /// 验证互斥的工作区参数不会有一项被静默忽略。
 #[test]
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_rejects_conflicting_work_options() {
     let env = TestEnv::new("test-password");
 
@@ -525,6 +590,10 @@ fn init_rejects_conflicting_work_options() {
 
 /// 验证相对工作区路径会固定为绝对位置，离开原目录后链接仍可解析。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_resolves_relative_work_root_from_another_directory() {
     let env = TestEnv::new("test-password");
     let link = env.work.path().join("relative.veil-link");
@@ -562,6 +631,10 @@ fn init_resolves_relative_work_root_from_another_directory() {
 
 /// 验证 `--link` 只能生成 CLI 可识别的 `.veil-link` 文件。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_rejects_link_path_with_unknown_extension() {
     let env = TestEnv::new("test-password");
     let output = env.work.path().join("not-a-link");
@@ -585,6 +658,10 @@ fn init_rejects_link_path_with_unknown_extension() {
 
 /// 链接中的 ID 被修改后，不会按名称或链接位置选择其他容器。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn link_does_not_fall_back_from_missing_id_to_name() {
     let env = TestEnv::new("test-password");
     let link = env.init("missing-link");
@@ -600,6 +677,10 @@ fn link_does_not_fall_back_from_missing_id_to_name() {
 
 /// 验证链接写入失败时会清理工作区，且不会留下孤立容器记录。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_preserves_committed_container_when_link_registration_fails() {
     let env = TestEnv::new("test-password");
     let blocker = env.work.path().join("blocker");
@@ -667,6 +748,10 @@ fn init_preserves_committed_container_when_link_registration_fails() {
 
 /// 验证专属工作区允许复用空目录，但拒绝覆盖已有内容。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_dedicated_work_requires_empty_directory() {
     let env = TestEnv::new("test-password");
     let empty_work = env.work.path().join("empty-work");
@@ -716,6 +801,10 @@ fn init_dedicated_work_requires_empty_directory() {
 
 /// 验证空密码不会创建无法提供任何口令强度的新容器。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn init_rejects_empty_password_without_side_effects() {
     let env = TestEnv::new("test-password");
     let link = env.link_path("empty-password");
@@ -752,6 +841,10 @@ fn init_rejects_empty_password_without_side_effects() {
 
 /// 验证 link 支持自动创建父目录并限制输出扩展名。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn link_creates_parent_and_validates_extension() {
     let env = TestEnv::new("test-password");
     let primary = env.init("link-source");
@@ -778,6 +871,10 @@ fn link_creates_parent_and_validates_extension() {
 
 /// 验证 help 可以显示指定命令的帮助。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn help_accepts_command_topics() {
     let env = TestEnv::new("test-password");
 
@@ -797,6 +894,10 @@ fn help_accepts_command_topics() {
 
 /// 验证 help all 和 --all 输出全部命令帮助。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn help_all_prints_every_command() {
     let env = TestEnv::new("test-password");
 
@@ -821,6 +922,9 @@ fn help_all_prints_every_command() {
 
 /// 验证导出不存在的容器内文件返回文件未找到错误码。
 #[test]
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn export_missing_file_returns_file_not_found_code() {
     let env = TestEnv::new("test-password");
     let link = env.init("missing-export");

@@ -1,3 +1,5 @@
+# veil-scrollshot 的清单文件：声明一个库（veil_scrollshot）和一个命令行
+# 二进制（veil-scrollshot），以及它们各自的依赖用途。所有版本号保持原样。
 [package]
 name = "veil-scrollshot"
 version.workspace = true
@@ -5,16 +7,23 @@ edition.workspace = true
 description = "将垂直滚动录屏拼接为长截图的独立库和命令行程序"
 license = "Apache-2.0"
 
+# 库目标：给其他程序（如 GUI 工具）提供 convert / Stitcher 等编程接口。
 [lib]
 name = "veil_scrollshot"
 
+# 二进制目标：同名命令行程序，入口在 src/main.rs。
 [[bin]]
 name = "veil-scrollshot"
 path = "src/main.rs"
 
 [dependencies]
+# veil-core：本工具复用它提供的日志初始化、错误链记录与写盘队列（main.rs 中调用）。
 veil-core = { path = "../veil-core" }
+# anyhow：统一错误包装，给错误附加上下文（如“在录屏 x 秒处拼接失败”）。
 anyhow = "1.0"
+# clap：解析命令行参数，derive 特性直接从 Args 结构体生成参数定义与 --help。
 clap = { version = "4.5", features = ["derive"] }
+# png：把拼接好的 RGB 字节流编码为 PNG（流式写入，不整张载入内存）。
 png = "0.18"
+# tempfile：暂存 RGB 条带及同目录 PNG；发布失败的错误对象可继续持有临时文件，释放后再尽力清理。
 tempfile = "3.8"

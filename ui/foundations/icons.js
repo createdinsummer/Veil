@@ -1,4 +1,10 @@
-/* 自动生成自 ui/assets/icons.svg，支持直接以本地文件打开原型。 */
+/*
+ * Veil Web 原型图标表（自动生成）。
+ * 所属模块：UI 设计基础层，供桌面原型和移动原型通过图标键取 SVG 图形。
+ * 数据结构：window.VeilIcons 是 Map 风格的普通对象，键为图标名称，值为 SVG path / shape 片段。
+ * 依赖能力：浏览器全局 window 对象与内联 SVG 渲染。
+ * 整体目标：统一界面图标来源；请在 ui/assets/icons.svg 修改图形，再运行 ui/tools/build.mjs 重新生成。
+ */
 window.VeilIcons = {
   "shield": "<path d=\"M12 2.8 19 5.5v5.7c0 4.4-2.8 7.7-7 9.8-4.2-2.1-7-5.4-7-9.8V5.5z\"/><path d=\"m9.2 11.8 1.9 1.9 3.8-4\"/>",
   "folder": "<path d=\"M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z\"/>",

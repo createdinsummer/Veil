@@ -1,3 +1,8 @@
+<!-- 文件作用：移动 Web 原型挂载入口，所属模块为 iOS 视觉交互预览。 -->
+<!-- 核心节点：phone 为设备外框，app 为整页替换目标，dialog 为共用提示弹窗；不包含原生 Swift 代码。 -->
+<!-- 依赖：style.css、共享 icons.js 和 app.js；defer 保证 DOM 解析后按声明顺序加载脚本。 -->
+<!-- 目标：在浏览器演示移动界面，设备状态栏和时间均为静态装饰，不检测真实设备或执行容器操作。 -->
+<!-- Veil iOS 单页交互原型入口；加载共享 SVG 图标和移动界面 app.js，仅展示示例数据。 -->
 <!doctype html>
 <html lang="zh-CN">
 <head>
@@ -11,7 +16,9 @@
   <script defer src="app.js"></script>
 </head>
 <body>
+  <!-- 返回桌面设计稿并标明这是交互示意，不连接真实数据。 -->
   <header class="review"><a href="../index.html">← 返回设计稿</a><strong>Veil / iOS</strong><span>交互示意 · 使用示例数据</span></header>
+  <!-- iPhone 外框和状态栏；app.js 把当前示例页面渲染到 app 节点。 -->
   <main class="phone" aria-label="iOS 界面预览">
     <div class="status"><span>9:41</span><span class="island"></span><span>● ◉ ▰</span></div>
     <div id="app"></div>

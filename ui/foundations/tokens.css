@@ -1,4 +1,8 @@
-/* 自动生成：编辑 ui/tokens.json 后运行 node ui/tools/build.mjs。 */
+/*
+ * 自动生成的 Web 设计变量。
+ * 所属模块：UI 基础样式；定义明暗主题颜色及字体、间距、圆角、布局、动画和阴影变量。
+ * 唯一来源是 ui/tokens.json；请编辑源 JSON 后运行 node ui/tools/build.mjs 重新生成本文件。
+ */
 :root {
   --color-canvas: #f7f7f7;
   --color-sidebar: #f0f0f0;

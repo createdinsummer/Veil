@@ -1,18 +1,29 @@
+# veil-macos-bridge 的清单文件：把 veil-service 包装成 C ABI 动态库/静态库，
+# 供 macOS/iOS 的 SwiftUI 客户端经 FFI 调用。所有版本号保持原样。
 [package]
 name = "veil-macos-bridge"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 
+# crate-type：cdylib 产出 .dylib 供 Swift 链接；staticlib 产出 .a 支持静态
+# 嵌入 App 包；rlib 供 Rust 侧测试引用。
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+# veil-core：错误日志系统（client_error/export/flush）与测试期快速 KDF 开关。
 veil-core = { path = "../veil-core" }
+# veil-service：真正执行业务的服务层（VeilService/ServiceRequest/ServiceResponse），
+# 桥接层同时处理缓冲所有权、请求类型翻译、部分设置适配与错误封装。
 veil-service = { path = "../veil-service" }
+# serde：请求枚举与响应的序列化/反序列化，derive 特性生成对应实现。
 serde = { version = "1", features = ["derive"] }
+# serde_json：Swift 请求 JSON 的解析与响应 JSON 的编码。
 serde_json = "1"
+# zeroize：请求副本、返回缓冲释放前对敏感字节清零（Zeroizing/zeroize）。
 zeroize = "1.9"
 
 [dev-dependencies]
+# tempfile：测试中创建隔离的临时目录作为 app 数据目录。
 tempfile = "3.8"

@@ -1,3 +1,8 @@
+/*
+ * Veil 桌面 Web 交互原型的组件样式。
+ * 所属模块：ui/prototype.js 渲染的导航、文件浏览、表单、弹窗和空 / 错误状态。
+ * 依赖 foundations/tokens.css 中的设计变量；这里仅控制布局与组件外观，不承载业务状态。
+ */
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--color-text); background: var(--color-review); font: var(--font-size-body)/var(--font-line-height-body) var(--font-family); -webkit-font-smoothing: antialiased; }
 button, input, select { font: inherit; }
@@ -31,6 +36,7 @@ h1, h2, h3, p { margin: 0; }
 .review-reset { border: 0; color: var(--color-secondary); background: none; font-size: 11px; padding: 4px; }
 .stage-scroll { width: 100%; overflow-x: auto; padding: 0 32px 18px; }
 .design-frame { width: 1160px; min-width: 390px; max-width: 100%; margin: auto; border: 1px solid var(--color-border); border-radius: 14px; overflow: hidden; box-shadow: 0 22px 70px #1118110a; background: var(--color-canvas); }
+/* 应用壳采用侧栏与主区两列，侧栏宽来自 token；主列 minmax(0,1fr) 允许内容缩窄而不被长文本撑开。 */
 .app-shell { display: grid; grid-template-columns: var(--layout-sidebar) minmax(0, 1fr); min-height: 760px; }
 .app-sidebar { min-width: 0; background: var(--color-sidebar); border-right: 1px solid var(--color-border); padding: 20px 13px 18px; display: flex; flex-direction: column; }
 .app-brand { display: flex; align-items: center; gap: 8px; padding: 0 8px; margin-bottom: 34px; }
@@ -145,6 +151,7 @@ h1 { color: var(--color-heading); font-size: var(--font-size-title); line-height
 .layout-switch .icon { width: 14px; height: 14px; }
 #browser-results { flex: 1; display: flex; flex-direction: column; }
 #browser-results>.files-empty { flex: 1; }
+/* 文件网格按至少 120px 自动补列，每项对应 prototype.js 生成的一条文件或目录；CSS 只排版，不筛选数据。 */
 .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 15px 12px; }
 .file-tile { min-width: 0; border: 0; padding: 5px; border-radius: 9px; background: none; text-align: left; }
 .file-tile:hover { background: var(--color-canvas); }
@@ -194,6 +201,7 @@ h1 { color: var(--color-heading); font-size: var(--font-size-title); line-height
 .error-box { display: flex; align-items: flex-start; gap: 8px; color: var(--color-danger); background: var(--color-danger-surface); border: 1px solid color-mix(in srgb, var(--color-danger) 20%, transparent); padding: 10px 12px; border-radius: 8px; margin-bottom: 15px; font-size: 11px; }
 .error-box .icon { width: 15px; height: 15px; }
 .error-box[hidden] { display: none; }
+/* 共用 dialog 的宽高受实际浏览器视口限制，内容过高时弹窗内部滚动；显示和关闭由脚本控制。 */
 .modal { width: min(430px, calc(100vw - 32px)); padding: 25px; border: 1px solid var(--color-border); border-radius: var(--radius-dialog); color: var(--color-text); background: var(--color-surface); box-shadow: var(--shadow-dialog); max-height: 90vh; overflow-y: auto; }
 .modal::backdrop { background: #18201b78; backdrop-filter: blur(3px); }
 .modal h2 { font-size: 18px; font-weight: 600; }
@@ -213,6 +221,7 @@ h1 { color: var(--color-heading); font-size: var(--font-size-title); line-height
 .preview-modal { width: min(760px, calc(100vw - 32px)); }
 .preview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .preview-heading p { font-size: 11px; color: var(--color-muted); margin-top: 6px; }
+/* 预览区允许内容滚动，图片等比例限制在 55vh；文本换行不是文件内容截断或安全读取限制。 */
 .preview-content { min-height: 280px; max-height: 55vh; border-radius: 10px; background: var(--color-thumbnail); overflow: auto; display: flex; align-items: center; justify-content: center; }
 .preview-content>img { max-width: 100%; max-height: 55vh; object-fit: contain; }
 .preview-content pre { padding: 22px; align-self: flex-start; width: 100%; font: 12px/1.8 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
@@ -243,7 +252,9 @@ h1 { color: var(--color-heading); font-size: var(--font-size-title); line-height
 .skeleton-tile { height: 146px; }
 .skeleton-line { height: 14px; width: 70%; margin: 8px 0; }
 @keyframes shimmer { to { background-position: -250% 0; } }
+/* 系统请求减少动画时禁用动画、过渡和平滑滚动，减少骨架加载等装饰效果，不取消实际交互。 */
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* 此断点依据真实浏览器窗口宽度，与脚本模拟画布 data-size 的断点不同；两套条件可能同时作用。 */
 @media (max-width: 800px) {
   .review-header { padding: 15px 16px; gap: 10px; flex-wrap: wrap; }
   .review-brand { flex: 1; }

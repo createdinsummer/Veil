@@ -1,10 +1,17 @@
+/// macOS 设置窗口及其用户偏好、打开方式和设备配置行。
+/// 所属模块：桌面端本机设置；偏好通过 AppStore 写入共享数据库，系统配置展示本机设备和默认空间。
+/// 核心视图：SettingsView 按业务分区组装控件；SettingsRow / SettingsSection 统一设置行与卡片布局。
+/// 依赖 AppKit 复制设备标识、SwiftUI 设置控件和 AppStore 持久化动作。整体目标是让设置变更即时生效，并显示保存结果或错误。
 import AppKit
 import SwiftUI
 
-/// 独立设置窗口：用户配置与系统配置分区，变更即时写入 app.db，与 CLI 共用设置项。
+/// 独立设置窗口，读取共享 Store 并发起用户配置、外部打开规则和系统设置的保存请求。
+/// 视图自身不写数据库；控件修改后由异步任务保存，失败和并发更新行为取决于 Store，并不保证立即落盘。
 struct SettingsView: View {
+    /// 读取并更新本机设置、应用偏好和保存反馈的共享状态。
     @EnvironmentObject private var store: AppStore
 
+    /// 按用户偏好、打开方式和系统配置分区展示可编辑设置。
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -46,15 +53,18 @@ struct SettingsView: View {
         .frame(width: 520)
         .background(VeilTheme.canvas)
         .foregroundStyle(VeilTheme.text)
+        // 每次提示值变化重启三秒倒计时；被取消就保留新任务处理，结束时再次比对避免清除不同文案。
         .task(id: store.settingsFeedback) {
             guard let feedback = store.settingsFeedback else { return }
             do { try await Task.sleep(for: .seconds(3)) } catch { return }
             if store.settingsFeedback == feedback { store.settingsFeedback = nil }
         }
+        // 绑定先更新内存布局，再异步保存完整偏好；连续切换可同时存在多个保存任务。
         .onChange(of: store.layout) { _, _ in Task { await store.savePreferences() } }
         .onChange(of: store.browseMode) { _, _ in Task { await store.savePreferences() } }
     }
 
+    /// 窗口标题和即时保存说明。
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
@@ -66,6 +76,7 @@ struct SettingsView: View {
         .padding(.horizontal, 22).padding(.vertical, 14)
     }
 
+    /// 按优先级展示最近一次保存成功提示、错误或默认保存说明。
     private var footer: some View {
         Group {
             if let feedback = store.settingsFeedback {
@@ -95,12 +106,14 @@ struct SettingsView: View {
         }
     }
 
+    /// 在同一设置分区内分隔相邻配置行。
     private var rowDivider: some View {
         Rectangle().fill(VeilTheme.border).frame(height: 1).padding(.leading, 14)
     }
 
     // MARK: 用户配置
 
+    /// 配置命令行提示详细程度；绑定 setter 创建异步保存任务，不等待持久化成功才返回。
     private var hintLevelRow: some View {
         SettingsRow("提示级别", detail: "命令行提示的详细程度。") {
             Picker("提示级别", selection: Binding(
@@ -113,6 +126,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 选择文件浏览器使用网格卡片还是列表行。
     private var layoutRow: some View {
         SettingsRow("布局", detail: "文件以网格或列表展示。") {
             Picker("布局", selection: $store.layout) {
@@ -123,6 +137,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 选择按文件类别聚合浏览或按目录层级浏览。
     private var browseModeRow: some View {
         SettingsRow("浏览方式", detail: "按类型查看，或按目录层级浏览。") {
             Picker("浏览方式", selection: $store.browseMode) {
@@ -133,6 +148,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 设置解锁密码在本机内存中复用的时长；0 表示每次都要求输入。
     private var unlockCacheRow: some View {
         SettingsRow("免密时长", detail: "解锁后重新打开同一容器免输密码的时长；导入/导出等长任务进行中会自动顺延。") {
             Picker("免密时长", selection: Binding(
@@ -147,6 +163,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 设置批量导入合并提交的时间阈值，界面范围为 1 至 60 秒；不表示每条记录一定在此时限内完成。
     private var importIntervalRow: some View {
         SettingsRow("导入提交间隔", detail: "批量导入时合并写入加密库的等待时间。") {
             Stepper(value: Binding(
@@ -159,6 +176,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 设置累计多少条待导入文件记录后触发合并提交。
     private var importCountRow: some View {
         SettingsRow("导入提交数量", detail: "累计多少条文件记录后合并写入。") {
             Stepper(value: Binding(
@@ -173,6 +191,7 @@ struct SettingsView: View {
 
     // MARK: 打开方式
 
+    /// 展示按文件后缀登记的默认外部应用；空集合时提示使用内置预览。
     private var openWithRows: some View {
         VStack(spacing: 0) {
             if store.openWithExtensions.isEmpty {
@@ -183,6 +202,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 14).padding(.vertical, 11)
             } else {
+                // 每轮展示一个已排序后缀的应用关联；索引只用于首行不画分隔线，后缀作为稳定标识。
                 ForEach(Array(store.openWithExtensions.enumerated()), id: \.element) { index, ext in
                     if index > 0 {
                         Rectangle().fill(VeilTheme.border).frame(height: 1).padding(.leading, 14)
@@ -193,6 +213,11 @@ struct SettingsView: View {
         }
     }
 
+    /// 展示一个后缀已登记的外部应用及更换、移除操作。
+    /// - Parameters: ext: String，规则映射中的扩展名键，正常由登记流程规范化为不带点的小写后缀。
+    /// - Returns: some View，显示后缀、当前可解析的应用图标和名称，或无法定位的 bundle ID。
+    /// - Throws: 不向调用方抛出异常；保存操作的错误由 Store 处理。
+    /// - 注意事项: 每次求值查询系统应用位置，不保证稍后能启动；按钮创建异步任务，本视图不对多次规则修改加互斥锁。
     private func openWithRow(_ ext: String) -> some View {
         HStack(spacing: 10) {
             Text(".\(ext)")
@@ -218,7 +243,7 @@ struct SettingsView: View {
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
 
-    /// 临时副本目录：展示路径并支持在访达中打开，说明清理时机。
+    /// 展示临时根目录及打开入口；说明文字描述清理时机，实际删除失败只记日志，不保证无残留。
     private var temporaryDirectoryRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -240,6 +265,7 @@ struct SettingsView: View {
         .padding(.horizontal, 14).padding(.vertical, 11)
     }
 
+    /// 提示默认应用规则，并打开新增后缀与应用的选择流程。
     private var openWithAddRow: some View {
         HStack {
             Text("选择应用打开时也会提示是否设为默认；打开前会先解密到临时文件。")
@@ -253,6 +279,7 @@ struct SettingsView: View {
 
     // MARK: 系统配置
 
+    /// 展示本机设备 ID，并允许复制供设备识别或诊断使用。
     private var deviceRow: some View {
         SettingsRow("设备 ID", detail: "本机设备身份，用于识别设备。") {
             HStack(spacing: 6) {
@@ -261,6 +288,7 @@ struct SettingsView: View {
                     .lineLimit(1).truncationMode(.middle).frame(maxWidth: 200, alignment: .trailing)
                 Button {
                     NSPasteboard.general.clearContents()
+                    // 未检查写入剪贴板的 Bool 结果，因此后续提示只表示已尝试复制。
                     NSPasteboard.general.setString(store.deviceID, forType: .string)
                     store.settingsFeedback = "设备 ID 已拷贝"
                 } label: { Image(systemName: "doc.on.doc") }
@@ -270,9 +298,11 @@ struct SettingsView: View {
         }
     }
 
+    /// 选择新建容器默认放置的空间。
     private var defaultSpaceRow: some View {
         SettingsRow("默认空间", detail: "新容器默认存放的空间。") {
             Picker("默认空间", selection: defaultSpaceBinding) {
+                // 每轮一个注册空间，离线空间也显示；这里没有按可用性过滤或禁用单个选项。
                 ForEach(store.spaces) { space in
                     Text("\(space.name) · \(space.path)").tag(space.id)
                 }
@@ -282,6 +312,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 读取列表中首个 isDefault 空间的 ID，无匹配返回空字符串；写入时异步请求 Store 保存，不直接修改列表。
     private var defaultSpaceBinding: Binding<String> {
         Binding(
             get: { store.spaces.first(where: \.isDefault)?.id ?? "" },
@@ -292,16 +323,25 @@ struct SettingsView: View {
 
 /// 设置行：左侧标题与说明，右侧控件。
 private struct SettingsRow<Control: View>: View {
+    /// 该设置项的业务名称。
     let title: String
+    /// 帮助用户理解设置影响的可选说明。
     let detail: String?
+    /// 调用方构建的 Picker、Stepper 或其他交互控件。
     private let control: Control
 
+    /// 构建一个左侧说明、右侧交互控件的设置行。
+    /// - Parameters: title: String 设置项标题；detail: String? 可选说明，默认 nil 不显示说明；control: () -> Control 构建交互视图的闭包，Control 符合 View。
+    /// - Returns: SettingsRow 实例，保存标题、说明及闭包本次求值生成的控件。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: control 在初始化时调用，不保存为待执行闭包；该行不负责设置的校验或持久化。
     init(_ title: String, detail: String? = nil, @ViewBuilder control: () -> Control) {
         self.title = title
         self.detail = detail
         self.control = control()
     }
 
+    /// 将设置标题与说明放在左侧，将实际交互控件放在右侧。
     var body: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
@@ -319,16 +359,25 @@ private struct SettingsRow<Control: View>: View {
 
 /// 设置分区：标题、说明与卡片容器。
 private struct SettingsSection<Content: View>: View {
+    /// 分区标题和用途说明。
     let title: String
+    /// 分区标题下面显示的业务范围说明。
     let detail: String
+    /// 按顺序排列在本分区中的设置行内容。
     private let content: Content
 
+    /// 将同一业务范围的设置行组合为带标题说明的卡片分区。
+    /// - Parameters: title: String 分区标题；detail: String 范围或存储说明；content: () -> Content 设置行构建闭包，Content 符合 View。
+    /// - Returns: SettingsSection 实例，保存标题、说明和本次生成的内容视图。
+    /// - Throws: 不抛出异常。
+    /// - 注意事项: content 初始化时求值；只提供布局和外观，不隔离各控件的异步保存任务。
     init(title: String, detail: String, @ViewBuilder content: () -> Content) {
         self.title = title
         self.detail = detail
         self.content = content()
     }
 
+    /// 按标题、说明和卡片内容组成一个视觉分组。
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.system(size: 13, weight: .semibold))

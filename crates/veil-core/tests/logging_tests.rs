@@ -1,9 +1,19 @@
+//! 核心日志系统的跨线程、跨进程和故障恢复集成测试。
+//! 所属模块：日志记录、轮转、隐私过滤和诊断导出；子进程覆盖崩溃与存储故障场景。
+//! 测试核对错误上下文、隐私过滤及存储故障后的业务继续执行；不代表任何情况下日志调用都绝不阻塞。
+//! 核心函数：worker 启动隔离进程，logging_worker 执行各场景，inspect 递归检查生产源码中的日志后端标记。
+//! 依赖能力：核心日志配置/快照/导出接口、JSON、文件系统、线程与子进程；目标是验证可诊断性与故障隔离边界。
 use std::{fs, process::Command};
 use veil_core::{
     error::VeilError,
     logging::{self, Config, Level, Record},
 };
 
+/// 在隔离子进程中运行一个日志验证场景，避免全局日志配置互相干扰。
+/// 入参：mode（&str）为 logging_worker 分支识别的场景名，通过 VEIL_LOG_TEST_MODE 传入；临时日志根目录另外由本函数创建。
+/// 返回值：()；子进程成功退出后返回，场景断言由子进程执行。
+/// 异常：临时目录创建、定位测试二进制、进程启动或收集输出失败会 panic；非成功退出会携带输出断言失败。
+/// 注意事项：阻塞等待且没有超时；必须保留 logging_worker 测试入口。临时目录在子进程结束后随本函数退出清理。
 fn worker(mode: &str) {
     let root = tempfile::tempdir().unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
@@ -21,90 +31,195 @@ fn worker(mode: &str) {
 }
 
 #[test]
+/// 验证多线程和多进程并发记录时每条 JSON 日志仍完整可解析。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn concurrent_threads_and_processes_preserve_json_records() {
     worker("concurrent");
 }
 #[test]
+/// 验证日志轮转与导出限制容量，避免磁盘占用无限增长。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn rotation_and_export_remain_bounded() {
     worker("rotation");
 }
 #[test]
+/// 验证错误和 panic 诊断会过滤敏感输入文本。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn errors_and_panics_do_not_leak_sensitive_text() {
     worker("privacy");
 }
 #[test]
+/// 验证日志级别开关和日志存储故障都能按配置被控制。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn disabled_levels_and_storage_failure_are_controllable() {
     worker("controls");
 }
 #[test]
+/// 验证写入中断留下的不完整记录不会遮蔽后续错误。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn incomplete_record_does_not_swallow_the_next_error() {
     worker("partial");
 }
 #[test]
+/// 验证重复错误可合并记录，并在导出时保留出现次数。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn repeated_errors_write_once_and_export_the_repeat_count() {
     worker("repeat");
 }
 #[test]
+/// 验证数据库失败记录保留底层原因和请求上下文。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn database_failure_keeps_the_cause_and_request_context() {
     worker("database");
 }
 #[test]
+/// 验证包装错误缺少安全描述时能回退到内部错误的可公开说明。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn wrapped_errors_fall_back_to_the_inner_safe_description() {
     worker("wrapper");
 }
 #[test]
+/// 验证工作线程继承请求关联信息与敏感值标记，使过滤规则保持一致。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn worker_threads_inherit_request_and_sensitive_values() {
     worker("context");
 }
 #[test]
+/// 验证日志锁超时和存储恢复过程不会阻塞客户端业务线程。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn logger_lock_timeout_and_storage_recovery_do_not_block_the_client() {
     worker("sink-lock");
 }
 #[test]
+/// 验证关闭日志时不执行错误文本格式化，避免无用开销和敏感读取。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn disabled_logging_does_not_format_errors() {
     worker("lazy");
 }
 #[test]
+/// 验证未标记的原始错误文本与客户端消息不会进入可导出诊断。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+/// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
 fn arbitrary_unlabelled_error_text_and_client_messages_are_not_exported() {
     worker("unstructured");
 }
 #[test]
+/// 验证进程被终止后已提交的日志记录仍可读取。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn completed_records_survive_a_killed_process() {
     worker("killed");
 }
 #[test]
+/// 验证坏掉的 UTF-8 记录不会阻止其他日志导出。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn invalid_utf8_record_does_not_prevent_export() {
     worker("invalid-utf8");
 }
 #[test]
+/// 验证业务冲突即使被包装，也不会误分类为数据库事务故障。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn wrapped_business_conflicts_do_not_become_transaction_errors() {
     worker("expected-batch");
 }
 #[test]
+/// 验证淘汰失败或日志目录切换时，尚未落盘的重复次数摘要仍保留。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn pending_repeat_summary_survives_failed_eviction_and_directory_change() {
     worker("pending-summary");
 }
 #[test]
+/// 验证旧格式记录可以按兼容规则导出。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn legacy_records_are_exported_as_stored() {
     worker("legacy");
 }
 #[test]
+/// 验证旧记录中的占位和空消息会在导出时安全修复。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn legacy_placeholder_and_empty_messages_are_repaired() {
     worker("placeholder");
 }
 #[cfg(unix)]
 #[test]
+/// 验证日志路径中的符号链接不能覆盖外部文件或把外部内容导出。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn log_symlinks_cannot_overwrite_or_export_other_files() {
     worker("symlink");
 }
 
 #[test]
+/// 验证生产 Rust / Swift 源码只通过核心日志门面调用日志，不绕过隐私和格式规则。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn production_code_only_uses_the_core_logging_facade() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
+    /// 递归扫描生产源码，检查是否出现绕过核心日志门面的后端标记。
+    /// 入参：path（&Path）为生产源码文件或目录；只检查扩展名为 rs、swift 的文件，跳过核心 logging.rs 自身。
+    /// 返回值：()；当前路径及递归子项均未命中禁止标记时返回。
+    /// 异常：遍历目录、读取 UTF-8 源码失败或命中任一标记会 panic，使测试失败。
+    /// 注意事项：按文本包含判断，不解析语言语法，因此注释和字符串也会被检查；没有符号链接环检测。
     fn inspect(path: &std::path::Path) {
         if path.is_dir() {
             for entry in fs::read_dir(path).unwrap() {
@@ -143,6 +258,11 @@ fn production_code_only_uses_the_core_logging_facade() {
 }
 
 #[test]
+/// 测试二进制的子进程入口；根据环境变量执行指定日志故障场景，不作为普通测试断言入口。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn logging_worker() {
     let Ok(mode) = std::env::var("VEIL_LOG_TEST_MODE") else {
         return;
@@ -292,14 +412,25 @@ fn logging_worker() {
             assert_eq!(recovered.context["failed_records"], 2);
         }
         "lazy" => {
+            /// 用于验证关闭日志时不会调用错误格式化或遍历底层错误。
             #[derive(Debug)]
             struct ExpensiveError;
             impl std::fmt::Display for ExpensiveError {
+                /// 通过故意失败的格式化器，验证关闭日志后不会计算错误文案。
+                /// 入参：self（&ExpensiveError）为无数据测试错误；_（&mut Formatter）为格式化目标，此处不会写入。
+                /// 返回值：声明为 fmt::Result，实际永远不返回。
+                /// 异常：每次调用都会 panic；若日志关闭路径调用此方法，测试应立即失败。
+                /// 注意事项：仅供 lazy 场景验证惰性求值，不是生产错误类型。
                 fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     panic!("关闭的日志不能格式化错误")
                 }
             }
             impl std::error::Error for ExpensiveError {
+                /// 通过故意失败的错误链访问器，验证关闭日志后不会查询根因。
+                /// 入参：self（&ExpensiveError）为当前测试错误，无其他参数。
+                /// 返回值：声明为可选底层错误引用，实际永远不返回。
+                /// 异常：每次调用都会 panic；用来暴露关闭日志时不应发生的错误链遍历。
+                /// 注意事项：仅供 lazy 场景使用；不会提供真实底层错误。
                 fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
                     panic!("关闭的日志不能遍历错误链")
                 }
@@ -454,14 +585,25 @@ fn logging_worker() {
             assert!(!record.thread_id.is_empty());
         }
         "wrapper" => {
+            /// 包装 I/O 错误以验证日志能跳过外层描述并保留安全根因。
             #[derive(Debug)]
             struct Wrapped(std::io::Error);
             impl std::fmt::Display for Wrapped {
+                /// 为包装错误提供不含底层细节的固定文案，以测试日志根因提取。
+                /// 入参：self（&Wrapped）持有 I/O 错误但本方法不读取；formatter（&mut Formatter）为调用方提供的格式化目标。
+                /// 返回值：fmt::Result；固定文案写入成功为 Ok(())，目标拒绝写入则透传 fmt::Error。
+                /// 异常：不主动 panic；格式化错误通过返回值传播。
+                /// 注意事项：该文案用于验证日志能够继续查找底层错误，不作为实际 I/O 根因说明。
                 fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     write!(formatter, "未分类包装错误")
                 }
             }
             impl std::error::Error for Wrapped {
+                /// 向日志分类逻辑暴露包装错误内部的真实 I/O 根因。
+                /// 入参：self（&Wrapped）为持有 std::io::Error 的测试包装对象，无其他参数。
+                /// 返回值：始终 Some(&self.0)，引用有效期受 self 约束，不复制或转移错误。
+                /// 异常：无 Result 错误，也不主动 panic。
+                /// 注意事项：只暴露一层底层错误；调用方负责决定是否继续遍历及如何隐藏敏感文案。
                 fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
                     Some(&self.0)
                 }

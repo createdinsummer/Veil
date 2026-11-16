@@ -1,4 +1,31 @@
 //! macOS 客户端专用的 C ABI。仅转换调用参数，业务仍由 veil-service 执行。
+//!
+//! 文件作用：本文件是 veil-macos-bridge 的全部实现——把 veil-service 的能力
+//! 包装成 C 风格导出函数（C ABI=跨语言函数调用接口），供 macOS/iOS SwiftUI
+//! 客户端（apps/veil-macos/Sources/VeilMac/ServiceClient.swift）经 FFI
+//! （FFI=外部函数接口，一种语言调用另一种语言编译出的函数）调用。
+//! 所属业务模块：Veil 的原生桥接层（桌面端与 Rust 服务的连接件）。
+//! 核心清单：VeilBuffer（跨边界传递的缓冲区）、Request（按 operation 标签
+//! 反序列化的请求枚举）、execute（请求翻译与执行）、serialize（响应转缓冲
+//! 区），以及导出的 C 函数 veil_configure_app_data_dir / veil_client_new /
+//! veil_client_call / veil_client_progress / veil_client_cancel_transfer /
+//! veil_client_free / veil_buffer_free / veil_log_* 系列。
+//! 依赖能力：veil-service 的 VeilService（业务执行）、serde/serde_json
+//! （请求响应编解码）、zeroize（敏感数据清零）。
+//! 约定（与 Swift 侧对应）：
+//! - 内存管理“谁分配谁释放”：本库返回的每个 VeilBuffer 都由 Swift 调用
+//!   veil_buffer_free 归还（Rust 侧 Box 重建后释放并清零），调用方不可自行 free；
+//! - 错误码约定用 VeilBuffer.kind：0=JSON、1=UTF-8 错误文本、2=文件二进制、
+//!   3=不稳定的文件二进制、4=不稳定的导出结果；
+//! - 请求、进度和日志等入口用catch_unwind处理可展开panic；配置、创建及释放入口无同样包装。
+//!   捕获不验证裸指针，不能恢复未定义行为或进程中止；各函数须遵守下方Safety约束。
+//! - 客户端句柄（*mut VeilService）由 veil_client_new 分配、veil_client_free
+//!   释放，期间允许并发调用。
+//! 业务目标：让 SwiftUI 界面只面对“JSON 进、缓冲出”的稳定接口，业务规则、
+//! 容器管理、导入导出冲突判定等全部留在 veil-service 中。
+// 导入说明：serde 负责请求枚举与响应的序列化反序列化；panic 工具用于在
+// FFI 边界捕获 Rust panic；指针/切片工具用于 C 指针与 Rust 切片的互转；
+// VeilService 是业务入口；zeroize 保证密码等敏感字节释放前被清零。
 use serde::Deserialize;
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -9,14 +36,25 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// kind：0 为 JSON，1 为 UTF-8 错误，2 为文件二进制，3 为不稳定的文件二进制，4 为不稳定的导出结果。
 /// 所有返回缓冲区均由 veil_buffer_free 释放，调用方不可自行 free。
+/// 业务定位：Rust 与 Swift 之间唯一的数据交换容器——一段带类型的字节缓冲。
+/// 数据说明：data 指向本库在 Rust 堆上分配的缓冲区；length 为其字节数；
+/// kind 标识内容形态（见上方 0~4 的含义），Swift 按 kind 决定如何解析。
 #[repr(C)]
 pub struct VeilBuffer {
+    /// 缓冲区首地址；由本库分配，Swift 只读，最终必须交回 veil_buffer_free。
     pub data: *mut u8,
+    /// 缓冲区字节数。
     pub length: usize,
+    /// 内容类型编码：0=JSON，1=错误文本，2/3=文件二进制，4=不稳定导出结果。
     pub kind: u32,
 }
 
 impl VeilBuffer {
+    /// 把Rust字节载荷所有权交给跨语言调用方，等待显式归还。
+    /// 入参：bytes（`Vec<u8>`）为JSON/错误/文件字节；kind（u32）为约定类型0至4，函数不校验。
+    /// 返回值：VeilBuffer，data/length对应Box切片，空载荷长度为0仍须按原值归还。
+    /// 异常：无Result；内存分配失败可能中止进程。
+    /// 注意事项：转Box切片后forget，调用方不释放会泄漏；不得用C free或改长度，只能一次veil_buffer_free。
     fn new(bytes: Vec<u8>, kind: u32) -> Self {
         let mut bytes = bytes.into_boxed_slice();
         let result = Self {
@@ -27,112 +65,191 @@ impl VeilBuffer {
         std::mem::forget(bytes);
         result
     }
+    /// 生成供Swift显示的UTF-8失败载荷。
+    /// 入参：message（impl `Into<String>`）为错误文案。
+    /// 返回值：kind=1的VeilBuffer。
+    /// 异常：无Result，分配/转换自身失败不保证可恢复。
+    /// 注意事项：不自动脱敏文案；调用方仍须归还缓冲区，错误载荷也适用相同所有权协议。
     fn error(message: impl Into<String>) -> Self {
         Self::new(message.into().into_bytes(), 1)
     }
 }
 
 /// 不派生 Debug，避免密码进入调试日志。
+/// 业务定位：Swift 发来请求的完整描述——serde 按 `operation` 字段（snake_case）
+/// 把 JSON 请求分派到对应变体，未知字段一律拒绝（deny_unknown_fields）。
+/// 使用场景：仅由 veil_client_call 解析一次，随后在 execute 中翻译成
+/// veil-service 的 ServiceRequest。
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    /// 列出全部空间（保险箱）及其容器。
     ListSpaces,
+    /// 列出最近使用过的容器。
     ListRecents,
+    /// 新建空间：name 为空间名，path 为可选的显式存储位置。
     CreateSpace {
+        /// 展示名称或新目录单级名称，由对应服务入口校验。
         name: String,
+        /// 可选空间本地目录；None由服务创建默认位置。
         path: Option<std::path::PathBuf>,
     },
+    /// 删除空间并递归删除其中的容器与文件。
     DeleteSpace {
+        /// 要物理删除的空间稳定ID，精确匹配，不按名称解析。
         id: String,
     },
+    /// 仅删除当前不可用空间的本机记录；此请求不把磁盘目录送废纸篓，也不物理删除目录。
     DeleteSpaceRecord {
+        /// 要移除本机记录的不可用空间ID。
         id: String,
     },
+    /// 删除容器及其中的文件。
     DeleteContainer {
+        /// 要删除的容器稳定UUID，不需在此请求中提供密码。
         id: String,
     },
+    /// 在指定空间新建容器：password 即容器的主密码。
     CreateContainer {
+        /// 目标空间ID或名称，由服务选择并验证。
         space: String,
+        /// 展示名称或新目录单级名称，由对应服务入口校验。
         name: String,
+        /// 数据库或备份包密码，成功打开后会话可能继续持有受保护副本。
         password: String,
     },
+    /// 打开现有容器目录并解锁；path不是.veil备份包文件，password为数据库密码。
     OpenContainer {
+        /// 本地已存在的容器目录路径，包含veil.db与密文。
         path: String,
+        /// 数据库或备份包密码，成功打开后会话可能继续持有受保护副本。
         password: String,
     },
+    /// 导入 .veil 打包文件到指定空间：password 为包的密码。
     ImportPackage {
+        /// 本地.veil备份包文件路径。
         path: String,
+        /// 目标空间ID或名称，由服务选择并验证。
         space: String,
+        /// 数据库或备份包密码，成功打开后会话可能继续持有受保护副本。
         password: String,
     },
+    /// 重新加载当前容器的目录状态。
     Refresh,
+    /// 清除主会话并释放其密码包装/生命周期锁；在途快照仍可能持有密码副本。
     Lock,
+    /// 一次性导入一批文件：sources 为源路径列表，directory 为目标目录。
     ImportFiles {
+        /// 本地来源路径列表，每项一个文件/目录；扫描处理每项并生成逐文件任务。
         sources: Vec<String>,
+        /// 容器内部父目录逻辑路径，空串表示根目录，不是本地磁盘目录。
         directory: String,
     },
+    /// 流式导入（长任务版）：边扫描边导入，进度经 veil_client_progress 查询。
     StreamImportFiles {
+        /// 本地来源路径列表，每项一个文件/目录；扫描处理每项并生成逐文件任务。
         sources: Vec<String>,
+        /// 容器内部父目录逻辑路径，空串表示根目录，不是本地磁盘目录。
         directory: String,
     },
+    /// 在当前目录下新建子目录。
     CreateDirectory {
+        /// 容器内部父目录逻辑路径，空串表示根目录，不是本地磁盘目录。
         directory: String,
+        /// 展示名称或新目录单级名称，由对应服务入口校验。
         name: String,
     },
+    /// 查询流式导入期间产生的同名冲突批次。
     PollImportConflicts,
+    /// 提交对一批导入冲突的处置决定（覆盖/跳过）。
     ResolveImportConflicts {
+        /// poll_import_conflicts返回的批次token，须仍为当前待决批次。
         id: String,
+        /// 当前冲突批次的完整决定列表；每项含target与skip/overwrite，服务校验匹配和完整性。
         resolutions: Vec<veil_service::session::SessionImportResolution>,
     },
+    /// 读取文件内容用于预览。
     PreviewFile {
+        /// 容器内部文件/目录路径，用于预览、单文件导出或删除。
         name: String,
     },
+    /// 一次性导出文件到目标路径。
     ExportFile {
+        /// 容器内部文件/目录路径，用于预览、单文件导出或删除。
         name: String,
+        /// 外部输出位置，单文件为精确文件路径，多项/包依对应业务规则解释。
         destination: String,
     },
+    /// 流式导出（长任务版）：names 为要导出的文件列表。
     StreamExportFiles {
+        /// 容器内部导出选择列表，每项一个文件或目录，可折叠重复后代选择。
         names: Vec<String>,
+        /// 外部输出位置，单文件为精确文件路径，多项/包依对应业务规则解释。
         destination: String,
     },
+    /// 查询流式导出期间产生的冲突批次。
     PollExportConflicts,
+    /// 提交对一批导出冲突的处置决定。
     ResolveExportConflicts {
+        /// poll_export_conflicts返回的批次token，须仍为当前待决批次。
         id: String,
+        /// 当前冲突批次的完整决定列表；每项含target与skip/overwrite，服务校验匹配和完整性。
         resolutions: Vec<veil_service::session::SessionImportResolution>,
     },
+    /// 把当前会话容器打包为.veil，非整个空间所有容器。
     ExportPackage {
+        /// 外部输出位置，单文件为精确文件路径，多项/包依对应业务规则解释。
         destination: String,
     },
+    /// 删除当前目录中的文件或目录。
     RemovePath {
+        /// 容器内部文件/目录路径，用于预览、单文件导出或删除。
         name: String,
     },
+    /// 读取用户偏好设置。
     GetPreference {
+        /// 设置键名，服务按用户偏好或系统展示白名单处理。
         key: String,
     },
+    /// 写入用户偏好：value为JSON，具体键、类型和值域由服务校验。
     SetPreference {
+        /// 设置键名，服务按用户偏好或系统展示白名单处理。
         key: String,
+        /// 对应用户偏好的JSON值，具体类型与范围按key校验。
         value: serde_json::Value,
     },
     /// 设置页展示用的系统配置（只读白名单）。
     GetSystemSetting {
+        /// 设置键名，服务按用户偏好或系统展示白名单处理。
         key: String,
     },
     /// 设置页切换默认空间；业务校验仍在 veil-service。
     SetDefaultSpace {
+        /// 已登记的目标默认空间ID。
         id: String,
     },
     /// 免密时长；只保存秒数到 app.db，密码仍由应用层保存在内存中。
     SetUnlockCache {
+        /// 设置的秒数，允许范围由服务对应偏好键校验。
         seconds: u64,
     },
+    /// 设置流式导入的自动提交间隔（秒）。
     SetImportCommitInterval {
+        /// 设置的秒数，允许范围由服务对应偏好键校验。
         seconds: u64,
     },
+    /// 设置流式导入达到多少文件后自动提交一次。
     SetImportCommitCount {
+        /// 每批提交文件数量阈值，服务校验正值及上限。
         count: u64,
     },
 }
 
+/// 把原生JSON请求翻译成公共服务请求并编码响应。
+/// 入参：service（&VeilService）为客户端共享服务；request（Request）为已反序列化的按值请求。
+/// 返回值：成功返回VeilBuffer；服务或编码失败为Err(String)。
+/// 异常：不在本函数捕获panic，由veil_client_call外层处理可展开panic。
+/// 注意事项：同步长任务会等待；设置分支借用本地字符串/JSON立即执行后返回。创建/打开会话可保留密码，函数结束不代表敏感副本全部销毁。
 fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String> {
     let request = match request {
         Request::ListSpaces => ServiceRequest::ListSpaces,
@@ -192,6 +309,7 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
             ServiceRequest::ExportSessionPackage { destination }
         }
         Request::RemovePath { name } => ServiceRequest::RemoveSessionPath { name },
+        // 以下设置类请求在 service 中没有同形请求，直接内联执行后提前返回。
         Request::GetPreference { key } => {
             return serialize(service.execute(ServiceRequest::GetUserSetting { key: &key }));
         }
@@ -207,6 +325,7 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
         Request::SetDefaultSpace { id } => {
             return serialize(service.execute(ServiceRequest::SetDefaultSpace { id: &id }));
         }
+        // 免密时长保存为 JSON 数值型的用户设置项 unlock_cache_seconds。
         Request::SetUnlockCache { seconds } => {
             let value = serde_json::json!(seconds);
             return serialize(service.execute(ServiceRequest::SetUserSetting {
@@ -214,6 +333,7 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
                 value: &value,
             }));
         }
+        // 流式导入的自动提交间隔保存为 import_commit_interval_seconds。
         Request::SetImportCommitInterval { seconds } => {
             let value = serde_json::json!(seconds);
             return serialize(service.execute(ServiceRequest::SetUserSetting {
@@ -221,6 +341,7 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
                 value: &value,
             }));
         }
+        // 流式导入的自动提交文件数保存为 import_commit_count。
         Request::SetImportCommitCount { count } => {
             let value = serde_json::json!(count);
             return serialize(service.execute(ServiceRequest::SetUserSetting {
@@ -232,6 +353,11 @@ fn execute(service: &VeilService, request: Request) -> Result<VeilBuffer, String
     serialize(service.execute(request))
 }
 
+/// 将桥接支持的服务结果编码为约定载荷类型。
+/// 入参：result（`Result<ServiceResponse,ServiceError>`）为服务结果，取得所有权。
+/// 返回值：JSON支持项kind0；预览kind2/3；不稳定导出kind4空载荷；Done/Locked为JSON null；服务失败为Err文本。
+/// 异常：编码失败或不支持响应记固定诊断并Err(String)。
+/// 注意事项：不覆盖所有ServiceResponse变体；只保留错误Display文本而不传Rust链结构，但正文仍可能含业务详情。返回内存须显式归还。
 fn serialize(
     result: Result<ServiceResponse, veil_service::ServiceError>,
 ) -> Result<VeilBuffer, String> {
@@ -242,9 +368,11 @@ fn serialize(
         ServiceResponse::Spaces(value) => serde_json::to_vec(&value),
         ServiceResponse::Recents(value) => serde_json::to_vec(&value),
         ServiceResponse::Setting(value) => serde_json::to_vec(&value),
+        // 文件预览：稳定/不稳定两种 kind，Swift 用 kind==3 标记“结果可能过期”。
         ServiceResponse::Preview(bytes) => return Ok(VeilBuffer::new(bytes, 2)),
         ServiceResponse::PreviewUnstable(bytes) => return Ok(VeilBuffer::new(bytes, 3)),
         ServiceResponse::ExportUnstable => return Ok(VeilBuffer::new(Vec::new(), 4)),
+        // 无返回内容的成功响应统一编码为 JSON null。
         ServiceResponse::Done | ServiceResponse::Locked => Ok(b"null".to_vec()),
         _ => {
             veil_core::logging::error("bridge", "serialize", "UNSUPPORTED_RESPONSE");
@@ -258,16 +386,21 @@ fn serialize(
     Ok(VeilBuffer::new(data, 0))
 }
 
-/// 在创建客户端前配置移动端应用私有目录。
+/// 为后续本机应用库配置原生客户端沙盒目录。
+/// 入参：path（*const c_char）为NUL结尾UTF-8路径，null直接拒绝。
+/// 返回值：配置成功true；null、非UTF-8或服务配置失败false。
+/// 异常：没有catch_unwind；无效非空指针属于未定义行为，不能靠false检测。
+/// 注意事项：须在客户端初始化/应用库使用前完成；仅本次借用字符串，服务保存路径值，不保留C指针。
 ///
 /// # Safety
-/// path 必须指向有效的、以 NUL 结尾的 UTF-8 字符串。
+/// 非空path必须指向本次调用全程可读、正确NUL终止的有效分配，不能与释放或写入并发。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_configure_app_data_dir(path: *const std::ffi::c_char) -> bool {
     if path.is_null() {
         veil_core::logging::error("bridge", "configure_directory", "INVALID_ARGUMENTS");
         return false;
     }
+    // C 字符串 → &str 的转换：先按 NUL 结尾解析为 CStr，再校验 UTF-8。
     let Ok(path) = unsafe { std::ffi::CStr::from_ptr(path) }.to_str() else {
         veil_core::logging::error("bridge", "configure_directory", "INVALID_UTF8");
         return false;
@@ -281,14 +414,25 @@ pub unsafe extern "C" fn veil_configure_app_data_dir(path: *const std::ffi::c_ch
     }
 }
 
+/// 创建可供Swift长期持有的服务句柄并初始化日志。
+/// 入参：无。
+/// 返回值：*mut VeilService，Box分配后转裸指针。
+/// 异常：无catch_unwind；线程创建等panic不能作为正常错误载荷返回，分配失败可中止进程。
+/// 注意事项：允许有效生命周期内并发共享调用，但必须等全部调用结束才free；不是打开容器，不保留调用者密码。
 #[unsafe(no_mangle)]
 pub extern "C" fn veil_client_new() -> *mut VeilService {
     veil_core::logging::initialize();
     Box::into_raw(Box::new(VeilService::default()))
 }
 
+/// 接收原生客户端错误上下文并交统一日志入口。
+/// 入参：category（u32）为类别；source（*const c_char）为来源，可null；line（u32）为行号；native_code（i64）为原生码；message为描述，可null。
+/// 返回值：无。
+/// 异常：可展开panic由catch_unwind忽略；非UTF-8替换为占位，非法地址不在可恢复范围。
+/// 注意事项：日志按核心规则处理，但任意来源/正文不能视作天然安全；不保证记录已落盘，也不反馈失败。
+///
 /// # Safety
-/// source 和 message 必须为有效的 NUL 结尾 UTF-8 字符串；message 仅由 core 脱敏后持久化。
+/// 所有非空字符串指针须在调用全程有效、可读且NUL终止；不能并发修改或释放。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_log_client_error(
     category: u32,
@@ -297,7 +441,9 @@ pub unsafe extern "C" fn veil_log_client_error(
     native_code: i64,
     message: *const std::ffi::c_char,
 ) {
+    // 日志函数也可能出错，用 catch_unwind 兜底：记录失败不影响客户端运行。
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        // 空指针与非法 UTF-8 都退化为占位文案，保证日志调用总能完成。
         let source = if source.is_null() {
             "client"
         } else {
@@ -316,7 +462,11 @@ pub unsafe extern "C" fn veil_log_client_error(
     }));
 }
 
-/// 生命周期边界的尽力刷新；日志失败不能影响客户端退出或进入后台。
+/// 在原生生命周期边界尽力等待日志队列刷新。
+/// 入参：无。
+/// 返回值：无，flush错误及捕获的panic忽略。
+/// 异常：可展开panic被捕获，进程中止/非法内存等不由此恢复。
+/// 注意事项：同步调用仍可能等待刷新超时；flush不是磁盘fsync，也不保证所有历史记录持久化。
 #[unsafe(no_mangle)]
 pub extern "C" fn veil_logs_flush() {
     let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -324,6 +474,11 @@ pub extern "C" fn veil_logs_flush() {
     }));
 }
 
+/// 为原生诊断导出提供滚动日志JSON字节。
+/// 入参：无。
+/// 返回值：成功kind0 JSON，导出失败/捕获panic为kind1通用错误。
+/// 异常：内层可展开panic转错误载荷，创建错误缓冲区本身的分配失败仍不可保证恢复。
+/// 注意事项：可能等待队列刷新并读取日志文件；返回缓冲必须veil_buffer_free，导出不重新全面净化历史记录。
 #[unsafe(no_mangle)]
 pub extern "C" fn veil_logs_export() -> VeilBuffer {
     catch_unwind(AssertUnwindSafe(|| match veil_core::logging::export() {
@@ -336,8 +491,14 @@ pub extern "C" fn veil_logs_export() -> VeilBuffer {
     .unwrap_or_else(|_| VeilBuffer::error("无法导出错误日志"))
 }
 
+/// 归还由本桥接分配的服务句柄及其资源。
+/// 入参：client（*mut VeilService）为原句柄，null无操作。
+/// 返回值：无。
+/// 异常：没有catch_unwind；非法/重复释放为未定义行为，服务析构可能同步等待后台线程。
+/// 注意事项：释放不等于对正在执行的请求安全取消；Swift须先保证所有引用与调用结束。
+///
 /// # Safety
-/// client 必须来自 veil_client_new；释放前须等待该客户端的全部调用结束，且只释放一次。
+/// 非空client只能来自veil_client_new且尚未释放；全部并发调用结束后仅调用一次，不得与任何读取/调用竞争。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_free(client: *mut VeilService) {
     if !client.is_null() {
@@ -345,8 +506,14 @@ pub unsafe extern "C" fn veil_client_free(client: *mut VeilService) {
     }
 }
 
+/// 读取共享传输进度供Swift轮询，允许与长请求并发。
+/// 入参：client（*const VeilService）为有效共享句柄，null可检测。
+/// 返回值：成功kind0 Snapshot JSON，空闲也返回状态对象；null/编码失败/捕获panic为kind1。
+/// 异常：可展开panic转通用错误；悬空非空指针不被验证。
+/// 注意事项：快照仅共享进度槽，不是所有并发操作总览；读取仍可能等待内部Mutex，缓冲须归还。
+///
 /// # Safety
-/// client 在本调用期间必须有效；允许与正在执行的调用并发。
+/// client非空时须来自本库且调用全程存活，不能与veil_client_free竞争。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_progress(client: *const VeilService) -> VeilBuffer {
     if client.is_null() {
@@ -364,8 +531,14 @@ pub unsafe extern "C" fn veil_client_progress(client: *const VeilService) -> Vei
     .unwrap_or_else(|_| VeilBuffer::error("无法读取进度"))
 }
 
+/// 向共享传输进度请求协作取消。
+/// 入参：client为有效服务只读指针，null直接false。
+/// 返回值：true为首次接受取消；false也可能无可取消任务、已请求取消、null或捕获panic。
+/// 异常：可展开panic折为false，非法非空指针不保证恢复。
+/// 注意事项：不强制终止线程、不撤销已提交文件；不应把false统一解释为句柄损坏。
+///
 /// # Safety
-/// client 在本调用期间必须有效；允许与正在执行的调用并发。
+/// 非空client在调用期间须有效且未释放；可与业务调用并发，不可与free竞争。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_cancel_transfer(client: *const VeilService) -> bool {
     if client.is_null() {
@@ -375,8 +548,14 @@ pub unsafe extern "C" fn veil_client_cancel_transfer(client: *const VeilService)
     catch_unwind(AssertUnwindSafe(|| unsafe { &*client }.cancel_transfer())).unwrap_or(false)
 }
 
+/// 解析Swift的JSON请求并同步执行，再返回有类型的桥接结果。
+/// 入参：client（*mut VeilService）为服务；data（*const u8）为只读JSON字节；length（usize）须1至1MiB。
+/// 返回值：成功kind0/2/3/4；参数、解析、服务或捕获panic失败为kind1文本。
+/// 异常：null/长度检查可返回错误，合法指针契约外的内存错误不能被catch_unwind兜底；仅可展开panic被转通用错误。
+/// 注意事项：先复制原始字节到Zeroizing并在释放时清零；serde解析出的String、Session及调用方输入另有生命周期，不能承诺全清。长任务阻塞当前调用，进度/冲突需并发轮询。
+///
 /// # Safety
-/// client 必须有效；data 必须指向至少 length 字节的可读内存，且在调用期间保持有效。
+/// client须来自本库且存活至返回；data须指向至少length字节稳定可读内存，复制期间不能改写/释放；不能与client_free竞争。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_client_call(
     client: *mut VeilService,
@@ -388,7 +567,7 @@ pub unsafe extern "C" fn veil_client_call(
         return VeilBuffer::error("请求参数无效");
     }
     catch_unwind(AssertUnwindSafe(|| {
-        // 请求副本用完即清零，不保留密码和原始请求正文。
+        // 此原始JSON字节副本在作用域释放时零化；解析后的字段和调用方输入不是同一份内存。
         let input = Zeroizing::new(unsafe { slice::from_raw_parts(data, length) }.to_vec());
         let request = serde_json::from_slice::<Request>(&input).map_err(|error| {
             // 只记录解析类别与行列，不回显请求正文。
@@ -406,8 +585,14 @@ pub unsafe extern "C" fn veil_client_call(
     .unwrap_or_else(VeilBuffer::error)
 }
 
+/// 把本桥接返回的原始载荷重建成Box切片，零化后释放。
+/// 入参：buffer（VeilBuffer）按值传回，data/length须保持本库返回原值；null data无操作。
+/// 返回值：无。
+/// 异常：无catch_unwind；伪造长度/地址或重复释放属于未定义行为。
+/// 注意事项：适用于call/progress/logs_export等所有本库缓冲；仅清此载荷字节，不清Swift已经复制出的Data，也不删除预览文件。
+///
 /// # Safety
-/// buffer 必须是 veil_client_call 返回的原始缓冲区，且只释放一次。
+/// 非空data必须是尚未释放的本库Box切片首地址且length精确匹配；无其他线程继续读此内存，仅释放一次。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veil_buffer_free(buffer: VeilBuffer) {
     if !buffer.data.is_null() {
@@ -422,6 +607,14 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// 在测试中模拟C请求并复制结果后归还Rust载荷。
+    /// 入参：client为有效测试句柄；value（serde_json::Value）为请求对象。
+    /// 返回值：(u32,`Vec<u8>`)为kind和独立响应副本。
+    /// 异常：序列化unwrap及无效指针可使测试失败或违反安全契约。
+    /// 注意事项：输出副本不随veil_buffer_free零化，测试方负责其生命周期。
+    ///
+    /// # Safety
+    /// client须为有效未释放句柄，且不能与free竞争。
     unsafe fn call(client: *mut VeilService, value: serde_json::Value) -> (u32, Vec<u8>) {
         let input = serde_json::to_vec(&value).unwrap();
         let buffer = unsafe { veil_client_call(client, input.as_ptr(), input.len()) };
@@ -433,7 +626,12 @@ mod tests {
         (kind, output)
     }
 
+    /// 验证非法请求只返回 kind=1 的通用错误，且错误文本不会回显请求中的
+    /// 密码等敏感字段。
     #[test]
+    /// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+    /// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
+    /// 异常：测试准备或断言失败会 panic；场景中预期的错误由测试体捕获或核对，不作为生产错误返回。
     fn rejects_malformed_calls_without_echoing_input() {
         let client = veil_client_new();
         let input = br#"{"operation":"unknown","password":"secret-do-not-log"}"#;
@@ -447,7 +645,13 @@ mod tests {
         }
     }
 
+    /// 端到端测试的驱动器：以子进程方式运行 native_worker（独立的 app 数据
+    /// 目录），校验子进程退出码并把 stdout/stderr 拼进断言信息。
     #[test]
+    /// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+    /// 返回值：无；正常执行至末尾表示本场景通过。
+    /// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+    /// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
     fn native_workflow() {
         let root = tempfile::TempDir::new().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -464,7 +668,13 @@ mod tests {
         );
     }
 
+    /// 原生链路端到端测试（子进程运行）：覆盖 建空间→建容器→导入冲突→
+    /// 预览→导出→锁定→解锁→删容器 的完整业务流，并抽查日志脱敏。
     #[test]
+    /// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+    /// 返回值：无；正常执行至末尾表示本场景通过。
+    /// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+    /// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
     fn native_worker() {
         let Some(root) = std::env::var_os("VEIL_NATIVE_TEST_ROOT") else {
             return;

@@ -1,3 +1,5 @@
+# veil-brute-force 的清单文件：声明密码强度测试工具的二进制目标及其依赖
+# 用途。所有版本号保持原样。
 [package]
 name = "veil-brute-force"
 version.workspace = true
@@ -7,14 +9,21 @@ description = "Veil 容器暴力破解工具 - 用于密码强度测试和安全
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# veil-core：提供 VeilPasswordVerifier / VeilUnpacker（读取包内加密数据库
+# 快照并按原生解锁流程验证候选密码）以及日志初始化、错误链记录、写盘队列。
 veil-core = { path = "../veil-core" }
+# rayon：并行枚举候选密码（par_iter / find_map_any），利用多核加速验证。
 rayon = "1.12"
+# num_cpus：探测 CPU 核心数，用于线程配置界面与默认线程池展示。
 num_cpus = "1.0"
 
 [dev-dependencies]
+# tempfile：测试中创建临时目录/文件。
 tempfile = "3.8"
+# veil-service：测试中构造打包文件与真实服务环境。
 veil-service = { path = "../veil-service" }
 
+# 二进制目标：交互式密码强度测试工具，入口在 src/main.rs。
 [[bin]]
 name = "veil-brute-force"
 path = "src/main.rs"

@@ -1,36 +1,49 @@
+# veil-cli：Veil 的命令行用户入口。
+# 负责解析用户命令与交互，把容器操作委托给 veil-service；veil-core 提供加密、错误、
+# 日志等底层能力。二进制产物名为 veil，库入口（src/lib.rs）供集成测试复用。
 [package]
 name = "veil-cli"
 version.workspace = true
 edition.workspace = true
 
+# 声明二进制目标：可执行文件叫 veil，入口源码为 src/main.rs。
 [[bin]]
 name = "veil"
 path = "src/main.rs"
 
 [dependencies]
 # 核心库
+# veil-core：加密、数据库连接、打包格式、日志等底层能力
 veil-core = { path = "../veil-core" }
+# veil-service：容器操作、工作区、链接及锁和版本控制的业务编排
 veil-service = { path = "../veil-service" }
 
 # CLI 框架
+# clap：声明式参数解析与子命令分发（derive 宏 + cargo 版本注入）
 clap = { version = "4.5", features = ["derive", "cargo"] }
 
 # 密码输入
+# rpassword：终端无回显读取密码
 rpassword = "7.3"
 
 # 密码的保密字符串封装
+# secrecy：SecretString 限制直接暴露和 Debug 展示并管理其自有口令内存，不保证其他副本或进程环境不留值
 secrecy = "0.10"
 
 # 错误处理
+# anyhow：底层错误链的通用载体
 anyhow = "1.0"
 
 # 彩色输出
+# colored：终端彩色提示（成功绿色、警告黄色等）
 colored = "2.1"
 
 # 文件遍历（用于进度条统计）
+# walkdir：递归遍历导入目录，供进度条统计文件数量
 walkdir = "2.4"
 
 # 时间处理
+# chrono：日志导出文件名中的 UTC 时间戳、list 展示加密时间
 chrono = "0.4"
 
 # Windows 控制台 API（用于编码检测和转换）
@@ -38,11 +51,16 @@ chrono = "0.4"
 winapi = { version = "0.3", features = ["consoleapi", "winnls", "processenv", "stringapiset"] }
 
 [target.'cfg(unix)'.dependencies]
+# 仅用于写入前检查标准输出描述符是否仍有效（fcntl 查询 fd 标志）。
 libc = "0.2"
 
 [dev-dependencies]
 # 测试框架
+# assert_cmd：以子进程方式运行编译产物并断言输出与退出码
 assert_cmd = "2.0"
+# predicates：组合式断言，配合 assert_cmd 校验输出内容
 predicates = "3.0"
+# serde_json：解析测试中生成的 JSON（如日志导出文件）
 serde_json = "1.0"
+# tempfile：为集成测试创建隔离的临时目录
 tempfile = "3.8"

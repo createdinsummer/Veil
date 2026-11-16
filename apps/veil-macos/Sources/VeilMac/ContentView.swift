@@ -1,12 +1,22 @@
+/// macOS 主窗口、侧栏、首页和传输状态提示的组合界面。
+/// 所属模块：桌面端应用导航与反馈；把 AppStore 中的业务状态呈现为窗口、弹窗和操作入口。
+/// 核心内容：ContentView 选择容器表单 / 文件浏览 / 首页；SidebarView 导航空间与容器；TransferProgressView 显示传输过程。
+/// 依赖 SwiftUI 窗口与弹窗、AppKit 保存面板和访达选择，以及 AppStore 的异步操作。整体目标是集中呈现本机容器管理流程，并让关键操作有明确反馈。
 import AppKit
 import SwiftUI
 
+/// 主窗口根视图，根据当前业务状态切换容器表单、文件浏览器和欢迎页。
 struct ContentView: View {
+    /// 跨窗口共享的容器、空间、任务与错误状态来源。
     @EnvironmentObject private var store: AppStore
+    /// 打开任务中心等独立窗口的系统动作。
     @Environment(\.openWindow) private var openWindow
+    /// 打开系统设置窗口的动作。
     @Environment(\.openSettings) private var openSettings
+    /// 当前是否显示左侧空间与容器导航栏。
     @State private var sidebarVisible = true
 
+    /// 绑定主界面、后台刷新、冲突复核和删除确认等窗口级流程。
     var body: some View {
         content
             .task(id: store.notice) {
@@ -14,6 +24,7 @@ struct ContentView: View {
                 do { try await Task.sleep(for: .seconds(3)) } catch { return }
                 if store.notice == notice { store.notice = nil }
             }
+            // 视图任务每次先等 15 秒，再刷新空间可用性；上一次刷新耗时也计入两次开始之间的间隔。
             .task {
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(15)) } catch { return }
@@ -23,6 +34,7 @@ struct ContentView: View {
             .sheet(item: $store.importInspection) { inspection in
                 ImportConflictReview(inspection: inspection, operationLabel: store.conflictOperation, progressText: store.importProgressDescription) { store.completeImportReview($0, id: inspection.id) }
                     .interactiveDismissDisabled()
+                    // 弹窗退出兜底请求中止；Store 按批次 ID 检查，已提交或过期批次不会再次恢复同一等待。
                     .onDisappear { store.completeImportReview(nil, id: inspection.id) }
             }
             .sheet(isPresented: $store.showImportPackage) { ImportPackageView().environmentObject(store) }
@@ -77,6 +89,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.15), value: store.decryptStatus)
     }
 
+    /// 主窗口顶栏：展示当前位置，并提供当前上下文可用的容器操作。
     private var header: some View {
         HStack(spacing: 10) {
             Button {
@@ -128,7 +141,11 @@ struct ContentView: View {
             .frame(height: store.container == nil ? VeilDesign.layout("header") : 52)
     }
 
-    /// 主窗口内的日志导出入口：与任务中心共用同一保存流程，出错时可就地导出反馈。
+    /// 在主窗口错误反馈处提供本机日志导出入口。
+    /// - Parameters: 无。
+    /// - Returns: Void；显示保存面板，确认且有 URL 后请求 Store 导出，取消无操作。
+    /// - Throws: 不向调用方抛错，导出错误由 Store 报告。
+    /// - 注意事项: 主线程调用；回调时才读取日志，面板等待期间日志仍可增加；本方法不直接执行文件写入。
     private func exportErrorLogs() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
@@ -140,8 +157,13 @@ struct ContentView: View {
     }
 }
 
-/// 删除确认弹窗独立为视图修饰符，避免主视图表达式超出类型检查预算。
+/// 将文件、空间和容器删除确认拆为独立视图修饰符，统一绑定状态并降低主视图表达式的复杂度。
 private extension View {
+    /// 为当前视图附加文件或目录的删除确认流程。
+    /// - Parameters: store: AppStore，提供 pendingDelete 条目及确认后的异步删除动作。
+    /// - Returns: some View，绑定待删状态、按条目类型显示影响说明的视图。
+    /// - Throws: 不向调用方抛出异常，删除失败由 Store 处理。
+    /// - 注意事项: 取消或关闭清除待删条目；确认后创建任务，不能保证后台调度时容器状态未变化；删除不是在此同步完成。
     func deleteEntryAlert(store: AppStore) -> some View {
         alert("删除「\(store.pendingDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingDelete != nil }, set: { if !$0 { store.pendingDelete = nil } }
@@ -156,6 +178,11 @@ private extension View {
         }
     }
 
+    /// 按空间可用性展示删除磁盘内容或仅删除登记的确认说明。
+    /// - Parameters: store: AppStore，提供 pendingSpaceDelete 空间快照和空间删除入口。
+    /// - Returns: some View，附加空间确认弹窗的视图。
+    /// - Throws: 不向调用方抛错，删除错误由 Store 报告。
+    /// - 注意事项: 使用弹窗空间快照的 isAvailable 选择流程；不可用空间请求删除登记，可用空间请求永久删除。确认先清除待删状态，再异步执行，不保证此时磁盘状态仍与快照一致。
     func deleteSpaceAlert(store: AppStore) -> some View {
         alert("\(store.pendingSpaceDelete?.isAvailable == true ? "删除空间" : "删除空间记录")「\(store.pendingSpaceDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingSpaceDelete != nil }, set: { if !$0 { store.pendingSpaceDelete = nil } }
@@ -171,6 +198,11 @@ private extension View {
         }
     }
 
+    /// 为已登记容器附加无需密码的永久删除确认。
+    /// - Parameters: store: AppStore，提供 pendingContainerDelete 记录及删除入口。
+    /// - Returns: some View，附加容器删除弹窗的视图。
+    /// - Throws: 不向调用方抛错，实际删除失败由 Store 处理。
+    /// - 注意事项: 用户确认才创建任务，取消只清除待删状态；确认并不代表磁盘删除成功，服务端仍执行权限和资源检查。
     func deleteContainerAlert(store: AppStore) -> some View {
         alert("永久删除容器「\(store.pendingContainerDelete?.name ?? "")」？", isPresented: Binding(
             get: { store.pendingContainerDelete != nil }, set: { if !$0 { store.pendingContainerDelete = nil } }
@@ -183,11 +215,16 @@ private extension View {
     }
 }
 
+/// 在主窗口中显示导入、导出或容器打包任务的简要进度。
 struct TransferProgressView: View {
+    /// 只用于提交取消请求；进度展示读取调用方传入的快照，不在视图中轮询后端。
     @EnvironmentObject private var store: AppStore
+    /// 当前任务的用户可读标题。
     let title: String
+    /// 最新任务快照；尚未生成时为空，界面显示准备状态。
     let progress: TransferProgress?
 
+    /// 把内部阶段码翻译为用户能理解的当前处理环节。
     private var stage: String {
         if progress?.cancelRequested == true { return "正在中止" }
         return switch progress?.phase {
@@ -201,6 +238,7 @@ struct TransferProgressView: View {
         }
     }
 
+    /// 把任务快照中的阶段、文件 / 字节进度和取消能力转换为紧凑浮层。
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -214,6 +252,7 @@ struct TransferProgressView: View {
                         .monospacedDigit().foregroundStyle(VeilTheme.secondary)
                 }
             }
+            // 普通传输优先按文件数计算，扫描中分母仍会增长；其他任务使用字节数，均截断上限为 100%。
             if let progress, ["import", "export"].contains(progress.operation), progress.totalFiles > 0 {
                 ProgressView(value: min(1, Double(progress.completedFiles) / Double(progress.totalFiles)))
                 Text(progress.scanComplete ? "文件遍历完成" : "正在发现文件，总数持续增加")
@@ -239,6 +278,8 @@ struct TransferProgressView: View {
                     Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(VeilTheme.secondary)
                 }
             }
+            // 这里只对普通导入/导出且阶段在白名单内显示取消；按钮文案固定为“中止导入”，动作仍取消当前传输。
+            // cancelRequested 只是已发出请求，不能据此断言工作线程已经停止或已完成文件被回滚。
             if let progress, ["import", "export"].contains(progress.operation), ["preparing", "processing", "verifying"].contains(progress.phase) {
                 Button(progress.cancelRequested ? "正在中止…" : "中止导入") { store.cancelTransfer() }
                     .buttonStyle(VeilButtonStyle()).disabled(progress.cancelRequested)
@@ -252,11 +293,16 @@ struct TransferProgressView: View {
     }
 }
 
+/// 左侧空间 / 容器导航栏，允许展开空间、切换容器并打开任务中心与设置。
 private struct SidebarView: View {
+    /// 注册空间及其中容器的共享快照，同时承接选择、创建和删除确认请求。
     @EnvironmentObject private var store: AppStore
+    /// 系统窗口动作，用于显示任务中心，不创建或恢复传输任务。
     @Environment(\.openWindow) private var openWindow
+    /// 当前折叠的空间 ID 集合；遍历空间时据此决定是否显示其容器。
     @State private var collapsed: Set<String> = []
 
+    /// 按空间和容器层级显示导航，并在每次点击时调用 Store 更新当前目标。
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -270,6 +316,7 @@ private struct SidebarView: View {
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 23).padding(.bottom, 8)
             ScrollView {
                 VStack(spacing: 2) {
+                    // 每轮一个注册空间，包含可用性和嵌套容器快照；离线空间仍可选择或删除登记。
                     ForEach(store.spaces) { space in
                         VStack(spacing: 2) {
                             HStack(spacing: 0) {
@@ -300,6 +347,7 @@ private struct SidebarView: View {
                             }
                             .background(store.container == nil && store.activeSpace?.id == space.id ? VeilTheme.selected : .clear, in: RoundedRectangle(cornerRadius: 7))
                             if !collapsed.contains(space.id) {
+                                // 当前空间未折叠时，每轮一个容器摘要；是否选中按当前容器 ID 比较，点击再交给 Store 处理解锁。
                                 ForEach(space.containers) { item in SidebarContainerRow(item: item, selected: store.container?.id == item.id) }
                             }
                         }
@@ -324,6 +372,7 @@ private struct SidebarView: View {
                         Text("任务中心").font(.system(size: 12))
                         Spacer(minLength: 4)
                         if store.transferTitle != nil {
+                            // 固定 1 表示 Store 当前公开的一组传输状态，不是统计所有后台任务的真实数量。
                             HStack(spacing: 4) {
                                 Text("1")
                                 if let percentage = store.transferProgress?.percentageText { Text(percentage) }
@@ -358,11 +407,17 @@ private struct SidebarView: View {
     }
 }
 
+/// 侧栏中的单个容器入口，点击后请求 Store 打开该容器。
 private struct SidebarContainerRow: View {
+    /// 负责选择容器及登记删除确认目标的共享状态；本行不直接删除文件。
     @EnvironmentObject private var store: AppStore
+    /// 当前行代表的容器摘要，包含标识、名称和磁盘路径。
     let item: ContainerSummary
+    /// 当前容器是否已在主窗口中选中。
     let selected: Bool
+    /// 鼠标悬停的界面状态，只影响背景或边框，不表示容器已选中或解锁。
     @State private var hovering = false
+    /// 展示并打开单个容器，选中状态与鼠标悬停状态只影响呈现。
     var body: some View {
         Button { Task { await store.chooseContainer(item) } } label: {
             HStack(spacing: 8) {
@@ -381,10 +436,14 @@ private struct SidebarContainerRow: View {
     }
 }
 
+/// 尚未进入容器时的首页，展示当前空间、容器卡片和最近打开记录。
 private struct HomeView: View {
+    /// 提供当前空间、已注册容器及外部最近打开记录的共享状态。
     @EnvironmentObject private var store: AppStore
+    /// 两项弹性列配置组成固定两列网格；同一规则用于当前空间容器和外部最近记录。
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
+    /// 汇总当前空间状态、容器卡片和最近打开记录，并提供创建 / 导入入口。
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 27) {
@@ -445,10 +504,12 @@ private struct HomeView: View {
                                 .padding(.horizontal, 8).frame(minHeight: 32).contentShape(Rectangle())
                         }.buttonStyle(VeilPlainButtonStyle()).disabled(store.isBusy || store.activeSpace?.isAvailable != true)
                     }
+                    // 离线时不把空容器摘要误显示为“没有容器”；上方保留不可用说明和目录路径。
                     if let space = store.activeSpace, !space.isAvailable {
                         EmptyView()
                     } else if let space = store.activeSpace, !space.containers.isEmpty {
                         LazyVGrid(columns: columns, spacing: 12) {
+                            // 每轮一个当前空间已登记容器；点击把该摘要交给 Store 决定复用密码还是显示解锁表单。
                             ForEach(space.containers) { item in
                                 ContainerCard(name: item.name, subtitle: "本机 / \(space.name)") { Task { await store.chooseContainer(item) } }.help(item.path)
                             }
@@ -470,6 +531,7 @@ private struct HomeView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         Text("最近打开").font(.system(size: 15, weight: .semibold))
                         LazyVGrid(columns: columns, spacing: 12) {
+                            // 每轮一条外部容器最近记录；这里只组装摘要，不预先验证磁盘位置仍然可用。
                             ForEach(store.externalRecents) { recent in
                                 ContainerCard(name: recent.name, subtitle: recent.path) {
                                     Task { await store.chooseContainer(ContainerSummary(id: recent.id, name: recent.name, path: recent.path)) }
@@ -484,13 +546,20 @@ private struct HomeView: View {
     }
 }
 
+/// 首页可点击的容器卡片，展示容器名称与所属空间或路径。
 private struct ContainerCard: View {
+    /// 用于读取忙碌状态并禁用点击；实际目标由调用方 action 捕获。
     @EnvironmentObject private var store: AppStore
+    /// 卡片所代表的容器名称。
     let name: String
+    /// 用于区分容器位置的空间名或路径说明。
     let subtitle: String
+    /// 用户点击卡片后执行的容器选择动作。
     let action: () -> Void
+    /// 鼠标悬停的界面状态，只影响背景或边框，不表示容器已选中或解锁。
     @State private var hovering = false
 
+    /// 展示一个容器摘要并把卡片点击委托给调用方。
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
@@ -509,18 +578,27 @@ private struct ContainerCard: View {
     }
 }
 
+/// 通用反馈横幅，只展示调用方传入的文案及错误样式，不保存消息生命周期。
+/// 可选 Action 提供后续处理，dismiss 委托调用方清除状态；组件不自行判断成功与否或自动关闭。
 struct FeedbackBanner: View {
     /// 横幅右侧可选动作，例如「导出错误日志」，便于出错时就地导出诊断信息。
     struct Action {
+        /// 按钮上显示的操作名称。
         let title: String
+        /// 用户点击后执行的业务动作。
         let run: () -> Void
     }
 
+    /// 要向用户展示的业务结果或错误说明。
     let message: String
+    /// true 表示错误反馈，false 表示普通提示或成功结果。
     let isError: Bool
+    /// 可选的后续处理动作；为空时只显示消息和关闭按钮。
     var action: Action? = nil
+    /// 关闭横幅并由调用方清理对应状态的动作。
     let dismiss: () -> Void
 
+    /// 显示一条成功或错误反馈，并提供可选后续动作和关闭入口。
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: isError ? "exclamationmark.circle" : "checkmark.circle")
@@ -534,10 +612,13 @@ struct FeedbackBanner: View {
     }
 }
 
-/// 解密浮层：先把明文写到临时文件，再交给应用内查看器或系统应用。
+/// 解密期间的等待浮层，展示文件名、打开目标及临时副本用途。
+/// 只读 status，不执行解密、打开或清理；提示中的清理由 Store 尽力完成，不代表删除必然成功。
 private struct DecryptOverlay: View {
+    /// 当前解密任务的文件名和打开目标等状态。
     let status: DecryptStatus
 
+    /// 遮罩界面并说明当前明文临时副本的生成、打开目标和清理时机。
     var body: some View {
         ZStack {
             Color.black.opacity(0.18).ignoresSafeArea()
@@ -558,6 +639,7 @@ private struct DecryptOverlay: View {
         .accessibilityAddTraits(.updatesFrequently)
     }
 
+    /// 根据打开目标生成临时文件用途和清理时机说明。
     private var hint: String {
         "会先把文件解密到临时文件，再用\(status.destination)打开；锁定或退出后自动清理。"
     }

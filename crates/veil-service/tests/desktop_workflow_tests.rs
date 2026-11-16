@@ -1,8 +1,17 @@
-//! 桌面端服务入口的空间、文件及预览流程。
+//! 桌面客户端使用的空间、容器、文件及预览服务流程集成测试。
+//! 所属模块：veil-service 桌面工作流；直接验证请求协议，不运行 SwiftUI 窗口。
+//! 核心函数：desktop_flow_in_isolated_home 准备隔离进程；desktop_flow_worker 执行服务请求并核对业务结果。
+//! 依赖能力：VeilService 请求/响应、临时 HOME、子进程和文件系统。
+//! 业务目标：确认桌面端所依赖的业务链路在隔离本机配置下能够衔接完成。
 use std::path::Path;
 use veil_service::{ServiceError, ServiceRequest, ServiceResponse, VeilService};
 
 #[test]
+/// 验证桌面端服务在隔离 HOME 中完成空间、容器和文件的主要工作流。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn desktop_flow_in_isolated_home() {
     let root = tempfile::TempDir::new().unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -20,6 +29,11 @@ fn desktop_flow_in_isolated_home() {
 }
 
 #[test]
+/// 在独立进程中运行桌面流程测试主体，隔离环境变量与应用状态。
+/// 入参：无；由 Rust 测试运行器调用，场景数据在测试体内准备。
+/// 返回值：无；正常执行至末尾表示本场景通过。
+/// 异常：测试准备、业务调用或断言中的 panic 会使测试失败，不作为生产错误返回。
+/// 注意事项：本方法仅验证注释所述场景；涉及的环境和资源按测试体中的方式初始化与清理。
 fn desktop_flow_worker() {
     let Some(root) = std::env::var_os("VEIL_DESKTOP_TEST_ROOT") else {
         return;
